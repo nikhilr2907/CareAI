@@ -2,8 +2,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Any
 import numpy as np
 
-from src.cross_room_environment.nodes.location_node import HospitalNode
-from src.cross_room_environment.edges.edge import HospitalEdge
+from .node import HospitalNode
+from .edge import HospitalEdge
 
 class HospitalGraph:
     def __init__(self):

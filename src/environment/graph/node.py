@@ -28,3 +28,7 @@ class HospitalNode:
     # 5. Operational State
     current_occupancy: int = 0
     max_capacity: int = 1  # How many robots can fit in this specific zone
+
+
+
+# discrete weighted graph for each room, get graphs of graphs? graphs of rooms components for other rooms and edges for rooms and hub nodes.
