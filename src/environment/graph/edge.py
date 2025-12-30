@@ -4,15 +4,15 @@ from dataclasses import dataclass, field
 class HospitalEdge:
     from_node: str
     to_node: str
-    
+
     # Static Specs
     distance_m: float  # Physical length
     max_v_ms: float = 1.0  # Max speed (1 m/s from specs) [cite: 583]
-    width_m: float = 1.9  # Corridor width 
-    
+    width_m: float = 1.9  # Corridor width
+
     # Dynamic States (The 'State' part)
-    clutter_level: float = 0.0  # 0.0 (clear) to 1.0 (blocked) 
-    active_robot_ids: list[int] = field(default_factory=list)
+    clutter_level: float = 0.0  # 0.0 (clear) to 1.0 (blocked)
+    active_robot_ids: list = field(default_factory=list)
     has_patient_bed: bool = False  # True if a bed is currently passing [cite: 421]
     
     @property

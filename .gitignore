@@ -1,1 +1,10 @@
 .vscode/**
+**/__pycache__/
+*.log
+
+# Model checkpoints and training artifacts
+checkpoints/
+*.pth
+*.pt
+*.md
+.claude/**
