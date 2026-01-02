@@ -1,0 +1,54 @@
+{
+  "name": "small_hospital_5node",
+  "metadata": {
+    "description": "Small 5-node hospital layout for testing",
+    "author": "Example",
+    "created": "2024-01-01"
+  },
+  "nodes": [
+    {
+      "id": 0,
+      "type": "storage",
+      "pos": [0.0, 0.0],
+      "size": [4.0, 4.0],
+      "max_reach_height": 2.5
+    },
+    {
+      "id": 1,
+      "type": "recovery",
+      "pos": [10.0, 0.0],
+      "size": [3.0, 3.0],
+      "max_reach_height": 2.0,
+      "consumption_rate": 8.0
+    },
+    {
+      "id": 2,
+      "type": "recovery",
+      "pos": [20.0, 0.0],
+      "size": [3.0, 3.0],
+      "max_reach_height": 2.0,
+      "consumption_rate": 10.0
+    },
+    {
+      "id": 3,
+      "type": "hallway",
+      "pos": [10.0, 10.0],
+      "size": [2.0, 2.0],
+      "max_reach_height": 2.0
+    },
+    {
+      "id": 4,
+      "type": "hallway",
+      "pos": [20.0, 10.0],
+      "size": [2.0, 2.0],
+      "max_reach_height": 2.0
+    }
+  ],
+  "edges": [
+    [0, 1],
+    [1, 2],
+    [1, 3],
+    [2, 4],
+    [3, 4]
+  ]
+}

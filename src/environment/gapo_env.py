@@ -7,10 +7,10 @@ Compatible with GNN-based GAPO policy network.
 import gym
 from gym import spaces
 import numpy as np
-import torch
-from typing import List, Tuple, Dict, Optional
+from typing import List, Dict, Optional
 
 from .graph.graph_state import GraphState
+from .graph.hospital_config import HospitalConfig
 from .robot.robot_state import RobotState, create_default_robot
 from .robot.robot_simulator import RobotSimulator
 from .tasks.task_state import Task, TaskQueue, rank_tasks
@@ -38,7 +38,8 @@ class GAPOTaskAssignmentEnv(gym.Env):
         num_robots=5,
         num_nodes=10,
         max_episode_time=28800.0,
-        timestep_seconds=1.0
+        timestep_seconds=1.0,
+        hospital_config: Optional[HospitalConfig] = None
     ):
         super(GAPOTaskAssignmentEnv, self).__init__()
 
@@ -46,6 +47,7 @@ class GAPOTaskAssignmentEnv(gym.Env):
         self.num_nodes = num_nodes
         self.max_episode_time = max_episode_time
         self.timestep_seconds = timestep_seconds
+        self.hospital_config = hospital_config  # Optional custom config
 
         # Action space
         self.action_space = spaces.Discrete(num_robots + 1)
@@ -82,8 +84,8 @@ class GAPOTaskAssignmentEnv(gym.Env):
 
     def reset(self):
         """Reset environment and return initial state dict."""
-        # Initialize graph
-        self.graph_state = GraphState()
+        # Initialize graph (use custom config if provided)
+        self.graph_state = GraphState(config=self.hospital_config)
 
         # Initialize robots
         self.robots = []

@@ -14,6 +14,7 @@ from pathlib import Path
 import time
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
+from src.environment.graph.hospital_config import HospitalConfig
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO, Memory
 
 
@@ -23,6 +24,19 @@ def main():
     num_nodes = 10
     max_episode_time = 28800.0  # 8 hours
     timestep_seconds = 1.0
+
+    # Hospital configuration
+    # Option 1: Use default config
+    hospital_config = None  # Uses default 10-node layout
+
+    # Option 2: Load from file (uncomment to use)
+    # hospital_config = HospitalConfig.from_file('configs/large_hospital.json')
+    # num_nodes = len(hospital_config.nodes)
+
+    # Option 3: Generate random grid (uncomment to use)
+    # config_dict = HospitalConfig.generate_random_grid(rows=3, cols=3, spacing=10.0, storage_ratio=0.3, recovery_ratio=0.4)
+    # hospital_config = HospitalConfig(config_dict)
+    # num_nodes = len(hospital_config.nodes)
 
     # GAPO parameters
     hidden_dim = 64
@@ -68,7 +82,8 @@ def main():
         num_robots=num_robots,
         num_nodes=num_nodes,
         max_episode_time=max_episode_time,
-        timestep_seconds=timestep_seconds
+        timestep_seconds=timestep_seconds,
+        hospital_config=hospital_config
     )
 
     # Create GAPO PPO
