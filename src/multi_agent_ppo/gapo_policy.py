@@ -25,8 +25,10 @@ class GAPOPolicyNetwork(nn.Module):
 
     def __init__(
         self,
-        node_feat_dim=5,
-        edge_feat_dim=3,
+        node_continuous_dim=15,
+        num_node_types=4,
+        edge_feat_dim=12,
+        node_type_embedding_dim=8,
         robot_feat_dim=12,
         task_feat_dim=12,
         hidden_dim=64,
@@ -43,7 +45,12 @@ class GAPOPolicyNetwork(nn.Module):
 
         # ===== ENCODERS =====
         self.hospital_encoder = HospitalGraphEncoder(
-            node_feat_dim, edge_feat_dim, hidden_dim, use_gnn
+            node_continuous_dim=node_continuous_dim,
+            num_node_types=num_node_types,
+            edge_feat_dim=edge_feat_dim,
+            hidden_dim=hidden_dim,
+            node_type_embedding_dim=node_type_embedding_dim,
+            use_gnn=use_gnn
         )
 
         self.robot_encoder = RobotFleetEncoder(
@@ -97,9 +104,11 @@ class GAPOPolicyNetwork(nn.Module):
         Args:
             state_dict: Dictionary with:
                 - 'task_features': [12]
-                - 'node_features': [num_nodes, 5]
-                - 'edge_features': [num_edges, 3]
-                - 'edge_index': [2, num_edges] (optional, for GNN)
+                - 'node_continuous': [num_nodes, 15] - continuous node features
+                - 'node_categorical': [num_nodes, 1] - node_type_id
+                - 'edge_features': [num_edges, 12] - continuous edge features
+                - 'edge_node_indices': [num_edges, 2] - (from_node_idx, to_node_idx)
+                - 'edge_index': [2, num_edges] - graph connectivity for GNN
                 - 'robot_features': [num_robots, 12]
                 - 'robot_positions': [num_robots, 2] (optional)
                 - 'queue_features': [5]
@@ -113,10 +122,12 @@ class GAPOPolicyNetwork(nn.Module):
         """
         # ===== ENCODE COMPONENTS =====
 
-        # 1. Hospital graph
+        # 1. Hospital graph (two-pass encoding with node embeddings)
         node_embeddings, edge_embeddings, graph_embedding = self.hospital_encoder(
-            state_dict['node_features'],
+            state_dict['node_continuous'],
+            state_dict['node_categorical'],
             state_dict['edge_features'],
+            state_dict['edge_node_indices'],
             state_dict.get('edge_index', None)
         )
 
@@ -305,10 +316,12 @@ def test_gapo_policy():
     """Test GAPO policy network."""
     print("Testing GAPO Policy Network...")
 
-    # Create policy
+    # Create policy with enhanced features
     policy = GAPOPolicyNetwork(
-        node_feat_dim=5,
-        edge_feat_dim=3,
+        node_continuous_dim=15,
+        num_node_types=4,
+        edge_feat_dim=12,
+        node_type_embedding_dim=8,
         robot_feat_dim=12,
         task_feat_dim=12,
         hidden_dim=64,
@@ -316,16 +329,18 @@ def test_gapo_policy():
         use_debiasing=True
     )
 
-    # Create dummy state
+    # Create dummy state (with enhanced features)
     num_nodes = 10
     num_edges = 20
     num_robots = 5
 
     state_dict = {
         'task_features': torch.randn(12),
-        'node_features': torch.randn(num_nodes, 5),
-        'edge_features': torch.randn(num_edges, 3),
-        'edge_index': torch.randint(0, num_nodes, (2, num_edges)),
+        'node_continuous': torch.randn(num_nodes, 15),  # Enhanced: 15 continuous features
+        'node_categorical': torch.randint(0, 4, (num_nodes, 1)),  # node_type_id (0-3)
+        'edge_features': torch.randn(num_edges, 12),  # Enhanced: 12 continuous features
+        'edge_node_indices': torch.randint(0, num_nodes, (num_edges, 2)),  # (from, to) indices
+        'edge_index': torch.randint(0, num_nodes, (2, num_edges)),  # GNN connectivity
         'robot_features': torch.randn(num_robots, 12),
         'robot_positions': torch.randn(num_robots, 2),
         'queue_features': torch.randn(5)

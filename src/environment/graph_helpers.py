@@ -225,3 +225,182 @@ def compute_graph_metrics(graph_state, current_task) -> np.ndarray:
         start_congestion,
         end_congestion
     ], dtype=np.float32)
+
+
+# ==============================================================================
+# REGION-BASED POSITION MAPPING
+# These functions map continuous (x, y) positions to graph nodes/edges
+# ==============================================================================
+
+def get_current_node_index(robot_x: float, robot_y: float, graph_state) -> Optional[int]:
+    """
+    Determine which node region contains the robot.
+
+    Args:
+        robot_x, robot_y: Robot's continuous position
+        graph_state: GraphState object
+
+    Returns:
+        Node index if robot is inside a node region, None if in corridor
+    """
+    for idx, node in enumerate(graph_state.nodes):
+        if node.contains_point(robot_x, robot_y):
+            return idx
+    return None  # Robot is in corridor (between regions)
+
+
+def get_current_edge_index(robot_x: float, robot_y: float, graph_state, tolerance: float = 1.0) -> Optional[int]:
+    """
+    Find which edge (corridor) the robot is on (if not in a node).
+
+    Args:
+        robot_x, robot_y: Robot's continuous position
+        graph_state: GraphState object
+        tolerance: Max perpendicular distance from corridor centerline (meters)
+
+    Returns:
+        Edge index if robot is on an edge, None if in unmapped space
+    """
+    for idx, edge in enumerate(graph_state.edges):
+        if edge.is_point_on_corridor(robot_x, robot_y, tolerance):
+            return idx
+    return None  # Robot is in unmapped space
+
+
+def compute_edge_progress(robot_x: float, robot_y: float, graph_state, edge_index: int) -> float:
+    """
+    Calculate how far along an edge the robot is (0.0 = entry, 1.0 = exit).
+
+    Args:
+        robot_x, robot_y: Robot's continuous position
+        graph_state: GraphState object
+        edge_index: Index of the edge
+
+    Returns:
+        Progress value between 0.0 and 1.0
+    """
+    if edge_index is None or edge_index < 0 or edge_index >= len(graph_state.edges):
+        return 0.0
+
+    edge = graph_state.edges[edge_index]
+    return edge.compute_progress(robot_x, robot_y)
+
+
+def update_robot_graph_position(robot, graph_state):
+    """
+    Update robot's graph-aware position (current_node_index, current_edge_index, edge_progress)
+    based on continuous (x, y) position from telemetry.
+
+    This function should be called after robot telemetry is updated.
+
+    Args:
+        robot: RobotState object with telemetry
+        graph_state: GraphState object
+
+    Modifies:
+        robot.telemetry.current_node_index
+        robot.telemetry.current_edge_index
+        robot.telemetry.edge_progress
+    """
+    if robot.telemetry is None:
+        return
+
+    robot_x = robot.telemetry.x
+    robot_y = robot.telemetry.y
+
+    # First check if robot is in a node region
+    node_idx = get_current_node_index(robot_x, robot_y, graph_state)
+
+    if node_idx is not None:
+        # Robot is in a node region
+        robot.telemetry.current_node_index = node_idx
+        robot.telemetry.current_edge_index = None
+        robot.telemetry.edge_progress = 0.0
+    else:
+        # Robot is in corridor - find which edge
+        edge_idx = get_current_edge_index(robot_x, robot_y, graph_state)
+
+        if edge_idx is not None:
+            # Robot is on an edge
+            robot.telemetry.current_node_index = None
+            robot.telemetry.current_edge_index = edge_idx
+            robot.telemetry.edge_progress = compute_edge_progress(robot_x, robot_y, graph_state, edge_idx)
+        else:
+            # Robot is in unmapped space - keep previous values
+            pass
+
+
+def estimate_travel_distance(robot, target_node_idx: int, graph_state) -> float:
+    """
+    Estimate distance robot must travel to reach target node.
+    Accounts for current position on graph (node or edge).
+
+    Args:
+        robot: RobotState object with telemetry
+        target_node_idx: Target node index
+        graph_state: GraphState object
+
+    Returns:
+        Estimated travel distance in meters
+    """
+    if robot.current_node_index is not None:
+        # Robot is in a node - use graph shortest path
+        path, distance = dijkstra_shortest_path(
+            robot.current_node_index,
+            target_node_idx,
+            graph_state
+        )
+        return distance
+
+    elif robot.telemetry and robot.telemetry.current_edge_index is not None:
+        # Robot is on edge - compute remaining distance on current edge + path from edge end
+        edge_idx = robot.telemetry.current_edge_index
+        edge = graph_state.edges[edge_idx]
+
+        # Remaining distance on current edge
+        remaining_on_edge = (1.0 - robot.telemetry.edge_progress) * edge.distance_m
+
+        # Find which node this edge leads to (closer to target)
+        from_node_idx = get_node_index_by_id(edge.from_node, graph_state)
+        to_node_idx = get_node_index_by_id(edge.to_node, graph_state)
+
+        # Get distances from both ends of edge to target
+        _, dist_from_end = dijkstra_shortest_path(to_node_idx, target_node_idx, graph_state)
+        _, dist_from_start = dijkstra_shortest_path(from_node_idx, target_node_idx, graph_state)
+
+        # Choose the direction that gets closer to target
+        if dist_from_end < dist_from_start:
+            # Continue forward on edge
+            return remaining_on_edge + dist_from_end
+        else:
+            # Turn back
+            distance_back = robot.telemetry.edge_progress * edge.distance_m
+            return distance_back + dist_from_start
+
+    else:
+        # Robot position unknown - use Euclidean as fallback
+        robot_x, robot_y = robot.current_position
+        target_node = graph_state.nodes[target_node_idx]
+        return np.sqrt((target_node.center_x - robot_x)**2 + (target_node.center_y - robot_y)**2)
+
+
+def get_node_index_by_id(node_id: str, graph_state) -> Optional[int]:
+    """
+    Get node index from node ID.
+
+    Args:
+        node_id: Node ID string
+        graph_state: GraphState object
+
+    Returns:
+        Node index or None if not found
+    """
+    for idx, node in enumerate(graph_state.nodes):
+        if node.node_id == node_id:
+            return idx
+    return None
+
+
+def euclidean_distance(x1: float, y1: float, x2: float, y2: float) -> float:
+    """Calculate Euclidean distance between two points."""
+    return np.sqrt((x2 - x1)**2 + (y2 - y1)**2)

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
 
 @dataclass
 class HospitalNode:
@@ -6,11 +7,15 @@ class HospitalNode:
     node_id: str  # e.g., "Ward_10817" or "Hub_Area_A" [cite: 89, 243]
     node_type: str  # e.g., 'storage', 'corridor', 'recovery', 'hub' [cite: 216, 259, 268]
 
-    # 2. Geometric Metadata (From Floorplan/Specs)
-    x: float  # Cartesian coordinates for distance calculation
-    y: float
-    width_m: float  # Corridor/Door width (e.g., 1000mm for doors) [cite: 407]
-    clearance_m: float  # Available space for turning (0.8m - 1.0m ideal) [cite: 504, 505]
+    # 2. Region Geometry (Bounding Box)
+    # CRITICAL: Nodes are spatial REGIONS, not points
+    center_x: float  # Center of region (meters)
+    center_y: float  # Center of region (meters)
+    width: float     # Region width (meters) - e.g., 5.0m for a ward
+    height: float    # Region height (meters) - e.g., 4.0m for a ward
+
+    # Physical Constraints
+    clearance_m: float = 0.9  # Available space for turning (0.8m - 1.0m ideal) [cite: 504, 505]
 
     # 3. Storage & Interaction Metadata (Verticality)
     max_reach_height: float = 1.35  # Max height robot can reach (1350mm) [cite: 570, 580]
@@ -24,15 +29,71 @@ class HospitalNode:
     })
     is_cluttered: bool = False  # Dynamic flag for nursing terminals/trolleys
 
-    # 5. Operational State
-    current_occupancy: int = 0
-    max_capacity: int = 1  # How many robots can fit in this specific zone
+    # 5. Operational State - Region Occupancy
+    current_robot_ids: List[int] = field(default_factory=list)  # Which robots are currently in this region
+    max_capacity: int = 1  # DEPRECATED: use area-based calculation instead
 
     # 6. Inventory Management (for just-in-time delivery)
     stock_level: float = 100.0  # Current inventory items at this location
     consumption_rate: float = 0.0  # Items consumed per hour (0 for non-ward nodes)
     buffer_time: float = 2.0  # Desired hours of buffer before stockout
     max_stock: float = 200.0  # Maximum stock capacity
+
+    def __post_init__(self):
+        """Initialize backwards compatibility fields."""
+        # For backwards compatibility: x, y point to center
+        if not hasattr(self, 'x') or self.x is None:
+            self.x = self.center_x
+        if not hasattr(self, 'y') or self.y is None:
+            self.y = self.center_y
+
+    @property
+    def bounds(self) -> Tuple[float, float, float, float]:
+        """
+        Get bounding box of this region.
+        Returns: (x_min, y_min, x_max, y_max)
+        """
+        half_w = self.width / 2
+        half_h = self.height / 2
+        return (
+            self.center_x - half_w,
+            self.center_y - half_h,
+            self.center_x + half_w,
+            self.center_y + half_h
+        )
+
+    @property
+    def area(self) -> float:
+        """Area of this region in square meters."""
+        return self.width * self.height
+
+    @property
+    def occupancy_count(self) -> int:
+        """Number of robots currently in this region."""
+        return len(self.current_robot_ids)
+
+    @property
+    def occupancy_ratio(self) -> float:
+        """
+        How crowded this region is (robots per square meter).
+        Normalized by assuming ~10 sq meters per robot as comfortable density.
+        """
+        return self.occupancy_count / max(1.0, self.area / 10.0)
+
+    def contains_point(self, x: float, y: float) -> bool:
+        """Check if a point (x, y) is inside this region's bounds."""
+        x_min, y_min, x_max, y_max = self.bounds
+        return x_min <= x <= x_max and y_min <= y <= y_max
+
+    def add_robot(self, robot_id: int):
+        """Add a robot to this region."""
+        if robot_id not in self.current_robot_ids:
+            self.current_robot_ids.append(robot_id)
+
+    def remove_robot(self, robot_id: int):
+        """Remove a robot from this region."""
+        if robot_id in self.current_robot_ids:
+            self.current_robot_ids.remove(robot_id)
 
     @property
     def time_to_stockout(self) -> float:

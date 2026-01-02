@@ -23,46 +23,86 @@ except ImportError:
 
 class HospitalGraphEncoder(nn.Module):
     """
-    Encodes hospital graph structure using Graph Attention Networks.
+    Encodes hospital graph structure using Graph Attention Networks with TWO-PASS encoding.
 
-    Input: Node features, edge features, edge connectivity
-    Output: Node embeddings + global graph embedding
+    Pass 1: Encode nodes from continuous + categorical features
+    Pass 2: Augment edges with from/to node embeddings, then refine node embeddings
+
+    Input: Node features (continuous + categorical), edge features, edge-node connectivity
+    Output: Node embeddings + edge embeddings + global graph embedding
     """
 
-    def __init__(self, node_feat_dim=5, edge_feat_dim=3, hidden_dim=64, use_gnn=True):
+    def __init__(
+        self,
+        node_continuous_dim=15,
+        num_node_types=4,
+        edge_feat_dim=12,
+        hidden_dim=64,
+        node_type_embedding_dim=8,
+        use_gnn=True
+    ):
+        """
+        Initialize Hospital Graph Encoder with enhanced feature extraction.
+
+        Args:
+            node_continuous_dim: Continuous node features (default 15)
+                [center_x, center_y, width, height, area, clearance_m, max_reach_height,
+                 unit_height, has_wash_basin, is_cluttered, stock_level, consumption_rate,
+                 time_to_stockout, occupancy_count, urgency_level]
+            num_node_types: Number of node type categories (default 4)
+                [storage, corridor, recovery, hub]
+            edge_feat_dim: Edge continuous features (default 12)
+                [distance_m, corridor_width, max_v_ms, entry_x, entry_y, exit_x, exit_y,
+                 clutter_level, num_active_robots, has_patient_bed, current_weight, base_cost]
+            hidden_dim: Hidden embedding dimension (default 64)
+            node_type_embedding_dim: Dimension for node_type embeddings (default 8)
+            use_gnn: Whether to use GNN layers (requires torch_geometric)
+        """
         super().__init__()
 
         self.use_gnn = use_gnn and TORCH_GEOMETRIC_AVAILABLE
         self.hidden_dim = hidden_dim
+        self.node_type_embedding_dim = node_type_embedding_dim
+
+        # Categorical embedding for node_type
+        self.node_type_embedding = nn.Embedding(num_node_types, node_type_embedding_dim)
+
+        # Total node feature dimension after concatenating continuous + embedded categorical
+        node_input_dim = node_continuous_dim + node_type_embedding_dim  # 15 + 8 = 23
 
         if self.use_gnn:
-            # Graph Attention Network for nodes
+            # PASS 1: Initial node encoding
             self.gat1 = GATConv(
-                in_channels=node_feat_dim,
+                in_channels=node_input_dim,
                 out_channels=hidden_dim // 4,
                 heads=4,
                 concat=True,
                 edge_dim=edge_feat_dim
             )
 
+            # Edge feature dimension after augmentation:
+            # Original 12 + from_node_embedding (64) + to_node_embedding (64) = 140
+            augmented_edge_dim = edge_feat_dim + hidden_dim + hidden_dim
+
+            # PASS 2: Refine nodes with augmented edge features
             self.gat2 = GATConv(
                 in_channels=hidden_dim,
                 out_channels=hidden_dim,
                 heads=1,
                 concat=False,
-                edge_dim=edge_feat_dim
+                edge_dim=augmented_edge_dim
             )
 
-            # Edge feature encoder
+            # Edge feature encoder (for final edge embeddings)
             self.edge_encoder = nn.Sequential(
-                nn.Linear(edge_feat_dim, hidden_dim),
+                nn.Linear(augmented_edge_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim)
             )
         else:
             # Fallback: Simple MLP encoder
             self.node_encoder = nn.Sequential(
-                nn.Linear(node_feat_dim, hidden_dim),
+                nn.Linear(node_input_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim)
             )
@@ -75,32 +115,63 @@ class HospitalGraphEncoder(nn.Module):
 
     def forward(
         self,
-        node_features: torch.Tensor,
+        node_continuous: torch.Tensor,
+        node_categorical: torch.Tensor,
         edge_features: torch.Tensor,
+        edge_node_indices: torch.Tensor,
         edge_index: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
+        Two-pass GNN encoding with node-embedded edges.
+
         Args:
-            node_features: [num_nodes, node_feat_dim]
-            edge_features: [num_edges, edge_feat_dim]
-            edge_index: [2, num_edges] - connectivity (only if use_gnn=True)
+            node_continuous: [num_nodes, 15] - continuous node features
+            node_categorical: [num_nodes, 1] - node_type_id (0-3)
+            edge_features: [num_edges, 12] - continuous edge features
+            edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx) for each edge
+            edge_index: [2, num_edges] - graph connectivity (for GNN message passing)
 
         Returns:
             node_embeddings: [num_nodes, hidden_dim]
             edge_embeddings: [num_edges, hidden_dim]
             graph_embedding: [hidden_dim]
         """
+        # Embed categorical features
+        node_type_embeds = self.node_type_embedding(node_categorical.squeeze(-1))  # [num_nodes, 8]
+
+        # Concatenate continuous + embedded categorical
+        node_features = torch.cat([node_continuous, node_type_embeds], dim=-1)  # [num_nodes, 23]
+
         if self.use_gnn and edge_index is not None:
-            # GNN encoding
+            # PASS 1: Initial node encoding
             x = self.gat1(node_features, edge_index, edge_attr=edge_features)
             x = F.elu(x)
-            node_embeddings = self.gat2(x, edge_index, edge_attr=edge_features)
+            node_embeddings_pass1 = x  # [num_nodes, 64]
+
+            # Augment edges with from/to node embeddings
+            from_node_embeds = node_embeddings_pass1[edge_node_indices[:, 0]]  # [num_edges, 64]
+            to_node_embeds = node_embeddings_pass1[edge_node_indices[:, 1]]    # [num_edges, 64]
+
+            augmented_edge_features = torch.cat([
+                edge_features,      # [num_edges, 12]
+                from_node_embeds,   # [num_edges, 64]
+                to_node_embeds      # [num_edges, 64]
+            ], dim=-1)  # [num_edges, 140]
+
+            # PASS 2: Refine nodes with augmented edges
+            node_embeddings = self.gat2(
+                node_embeddings_pass1,
+                edge_index,
+                edge_attr=augmented_edge_features
+            )  # [num_nodes, 64]
+
+            # Final edge embeddings
+            edge_embeddings = self.edge_encoder(augmented_edge_features)  # [num_edges, 64]
+
         else:
             # MLP encoding (fallback)
             node_embeddings = self.node_encoder(node_features)
-
-        # Encode edges
-        edge_embeddings = self.edge_encoder(edge_features)
+            edge_embeddings = self.edge_encoder(edge_features)
 
         # Global graph embedding (mean pooling)
         graph_embedding = torch.mean(node_embeddings, dim=0)
@@ -249,25 +320,32 @@ def test_encoders():
     """Test GNN encoders with dummy data."""
     print("Testing GAPO GNN Encoders...")
 
-    # Test Hospital Graph Encoder
-    print("\n1. Hospital Graph Encoder")
+    # Test Hospital Graph Encoder (with complete features)
+    print("\n1. Hospital Graph Encoder (Two-Pass with Node Embeddings)")
     hospital_encoder = HospitalGraphEncoder(
-        node_feat_dim=5,
-        edge_feat_dim=3,
-        hidden_dim=64
+        node_continuous_dim=15,
+        num_node_types=4,
+        edge_feat_dim=12,
+        hidden_dim=64,
+        node_type_embedding_dim=8,
+        use_gnn=True
     )
 
-    node_features = torch.randn(10, 5)  # 10 nodes
-    edge_features = torch.randn(20, 3)  # 20 edges
-    edge_index = torch.randint(0, 10, (2, 20))  # Random connectivity
+    node_continuous = torch.randn(10, 15)  # 10 nodes, 15 continuous features
+    node_categorical = torch.randint(0, 4, (10, 1))  # 10 nodes, node_type_id (0-3)
+    edge_features = torch.randn(20, 12)  # 20 edges, 12 continuous features
+    edge_node_indices = torch.randint(0, 10, (20, 2))  # Edge-node connectivity
+    edge_index = torch.randint(0, 10, (2, 20))  # Graph connectivity
 
     node_embeds, edge_embeds, graph_embed = hospital_encoder(
-        node_features, edge_features, edge_index
+        node_continuous, node_categorical, edge_features, edge_node_indices, edge_index
     )
 
     print(f"  Node embeddings: {node_embeds.shape}")
     print(f"  Edge embeddings: {edge_embeds.shape}")
     print(f"  Graph embedding: {graph_embed.shape}")
+    print(f"  Node input: 15 continuous + 8 embedded = 23 dims")
+    print(f"  Edge augmentation: 12 continuous + 64 from + 64 to = 140 dims")
 
     # Test Robot Fleet Encoder
     print("\n2. Robot Fleet Encoder")
@@ -295,7 +373,7 @@ def test_encoders():
 
     print(f"  Task embedding: {task_embed.shape}")
 
-    print("\n✓ All encoders working!")
+    print("\nAll encoders working!")
 
 
 if __name__ == '__main__':

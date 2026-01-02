@@ -65,21 +65,20 @@ class GAPOTaskAssignmentEnv(gym.Env):
         self.graph_state = None
         self.robots = []
         self.robot_simulators = []
-        self.tasks = []
         self.next_task_id = 0
+
+        # Task management (continuous operation)
+        self.pending_tasks = []  # Tasks waiting for assignment
+        self.completed_tasks = []  # Tasks that have been completed
 
         # Time tracking
         self.current_time = 0.0
         self.last_inventory_check = 0.0
-        self.inventory_check_interval = 300.0
+        self.inventory_check_interval = 60.0  # Check every minute
 
         # Episode metrics
-        self.episode_assignments = []
         self.episode_stockouts = 0
-        self.cumulative_stockout_penalty = 0.0
-
-        # Current state
-        self.current_task_index = 0
+        self.cumulative_reward = 0.0
 
     def reset(self):
         """Reset environment and return initial state dict."""
@@ -103,102 +102,332 @@ class GAPOTaskAssignmentEnv(gym.Env):
             self.robots.append(robot_state)
 
         # Generate initial tasks
-        self.tasks = []
+        self.pending_tasks = []
+        self.completed_tasks = []
         self.next_task_id = 0
         self.current_time = 0.0
         self.last_inventory_check = 0.0
 
+        # Generate initial inventory tasks
         new_tasks, self.next_task_id = generate_inventory_tasks(
             self.graph_state, self.current_time, self.next_task_id
         )
-        self.tasks.extend(new_tasks)
+        self.pending_tasks.extend(new_tasks)
 
+        # Add some ad-hoc tasks
         ad_hoc_tasks, self.next_task_id = generate_random_ad_hoc_tasks(
-            self.graph_state, self.current_time, 3, self.next_task_id
+            self.graph_state, self.current_time, 2, self.next_task_id
         )
-        self.tasks.extend(ad_hoc_tasks)
+        self.pending_tasks.extend(ad_hoc_tasks)
 
-        # Rank tasks
-        task_queue = TaskQueue(tasks=self.tasks)
-        ranked = rank_tasks(task_queue, self.current_time)
-        self.tasks = ranked
+        # Rank pending tasks by urgency
+        if self.pending_tasks:
+            task_queue = TaskQueue(tasks=self.pending_tasks)
+            ranked = rank_tasks(task_queue, self.current_time)
+            self.pending_tasks = ranked
 
         # Reset metrics
-        self.episode_assignments = []
         self.episode_stockouts = 0
-        self.cumulative_stockout_penalty = 0.0
-        self.current_task_index = 0
+        self.cumulative_reward = 0.0
 
         return self._get_state_dict()
 
-    def step(self, action: int):
-        """Execute action and return next state dict."""
-        reward = 0.0
-        assignment_made = False
+    def step(self, Δt: float = None):
+        """
+        Advance simulation by Δt seconds (continuous operation).
 
-        # Make assignment decision
-        if self.current_task_index < len(self.tasks):
-            current_task = self.tasks[self.current_task_index]
+        This is the NEW continuous step function. Policy assigns tasks externally
+        using assign_task_to_robot().
 
-            if action != self.HOLD_ACTION:
-                available_robots = self._get_available_robots()
+        Args:
+            Δt: Time step in seconds (default: self.timestep_seconds)
 
-                if action < len(available_robots):
-                    robot = available_robots[action]
-                    assignment_made = True
+        Returns:
+            state_dict: Current state
+            reward: Reward for this timestep
+            done: False (continuous) or True if max_time reached
+            info: Debug information
+        """
+        if Δt is None:
+            Δt = self.timestep_seconds
 
-                    reward += self._compute_assignment_reward(robot, current_task)
-                    self._assign_task_to_robot(robot, current_task)
-
-                    self.current_task_index += 1
-                else:
-                    reward -= 10.0  # Invalid action
-            else:
-                reward += self._compute_hold_reward(current_task)
-                self.current_task_index += 1
-
-        # Advance simulation
-        time_delta = self.timestep_seconds
-        self.current_time += time_delta
-        time_delta_hours = time_delta / 3600.0
-
-        self._update_robot_telemetry(time_delta)
+        # 1. Update inventory levels (consumption)
+        time_delta_hours = Δt / 3600.0
         update_inventory_levels(self.graph_state, time_delta_hours)
 
-        stockout_penalty = self._check_stockouts()
-        reward += stockout_penalty
-
-        self._update_edge_congestion()
-
-        # Generate new tasks
-        if self.current_time - self.last_inventory_check > self.inventory_check_interval:
+        # 2. Generate tasks from low-stock nodes
+        if self.current_time - self.last_inventory_check >= self.inventory_check_interval:
             new_tasks, self.next_task_id = generate_inventory_tasks(
                 self.graph_state, self.current_time, self.next_task_id
             )
 
             if new_tasks:
-                self.tasks.extend(new_tasks)
-                task_queue = TaskQueue(tasks=self.tasks)
+                self.pending_tasks.extend(new_tasks)
+
+                # Re-rank all pending tasks
+                task_queue = TaskQueue(tasks=self.pending_tasks)
                 ranked = rank_tasks(task_queue, self.current_time)
-                self.tasks = ranked
+                self.pending_tasks = ranked
 
             self.last_inventory_check = self.current_time
 
-        # Check termination
-        done = (
-            self.current_task_index >= len(self.tasks) or
-            self.current_time >= self.max_episode_time
-        )
+        # Occasionally add random ad-hoc tasks for testing
+        if np.random.random() < 0.01:  # 1% chance per step
+            ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
+                self.graph_state, self.current_time, 1, self.next_task_id
+            )
+            if ad_hoc:
+                self.pending_tasks.extend(ad_hoc)
+
+        # 3. Move robots along their paths
+        self._update_robot_positions(Δt)
+
+        # 4. Check task completions
+        completed_tasks = self._check_task_completions()
+
+        # 5. Compute rewards
+        reward = self._compute_timestep_reward(completed_tasks)
+        self.cumulative_reward += reward
+
+        # 6. Update edge congestion
+        self._update_edge_congestion()
+
+        # 7. Advance time
+        self.current_time += Δt
+
+        # 8. Check termination
+        done = self.current_time >= self.max_episode_time
+
+        # 9. Build state
+        state_dict = self._get_state_dict()
 
         info = {
             'current_time': self.current_time,
-            'tasks_assigned': len(self.episode_assignments),
-            'tasks_remaining': len(self.tasks) - self.current_task_index,
-            'stockouts': self.episode_stockouts,
-            'assignment_made': assignment_made
+            'pending_tasks': len(self.pending_tasks),
+            'completed_tasks': len(completed_tasks),
+            'total_robot_tasks': sum(r.num_queued_tasks for r in self.robots),
+            'stockouts': sum(1 for n in self.graph_state.nodes if n.is_stockout),
+            'cumulative_reward': self.cumulative_reward
         }
 
-        return self._get_state_dict(), reward, done, info
+        return state_dict, reward, done, info
+
+    def assign_task_to_robot(self, robot_id: int, task: Task) -> bool:
+        """
+        Assign a task to a robot (called by policy/controller).
+
+        Supports multi-capacity: robot can have multiple tasks queued
+        if it has capacity.
+
+        Args:
+            robot_id: ID of robot to assign task to
+            task: Task object to assign
+
+        Returns:
+            True if assignment successful, False otherwise
+        """
+        if robot_id < 0 or robot_id >= len(self.robots):
+            return False
+
+        robot = self.robots[robot_id]
+        simulator = self.robot_simulators[robot_id]
+
+        # Check if robot can accept this task (capacity check)
+        if not robot.can_accept_items(task.num_items):
+            return False
+
+        # Add task to robot's queue (auto-sorted by priority)
+        robot.add_task(task)
+
+        # Mark task as assigned
+        task.is_assigned = True
+        task.assigned_robot_id = robot_id
+
+        # Remove from pending
+        if task in self.pending_tasks:
+            self.pending_tasks.remove(task)
+
+        # If this is the first task (robot was idle), plan path immediately
+        if len(robot.task_queue) == 1:
+            self._plan_path_for_robot(robot, task, simulator)
+
+        return True
+
+    def _plan_path_for_robot(self, robot: RobotState, task: Task, simulator):
+        """
+        Plan path for robot to complete task.
+
+        Args:
+            robot: RobotState object
+            task: Task to plan path for
+            simulator: RobotSimulator for this robot
+        """
+        # Get robot's current location
+        start_node = robot.current_node_index
+        if start_node is None:
+            # Robot is between nodes, find nearest
+            start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
+
+        # Plan path from current location to task destination
+        path, distance = dijkstra_shortest_path(
+            start_node,
+            task.to_location_index,
+            self.graph_state,
+            self.num_nodes
+        )
+
+        # Set path in simulator
+        simulator.set_path(path, task.task_id, task.num_items)
+
+        # Update robot state
+        robot.planned_path = path
+        robot.target_node_index = task.to_location_index
+        robot.travel_start_time = self.current_time
+
+    def _update_robot_positions(self, Δt: float):
+        """
+        Move robots along their planned paths.
+
+        Args:
+            Δt: Time elapsed in seconds
+        """
+        for robot, simulator in zip(self.robots, self.robot_simulators):
+            # Update simulator (moves robot)
+            telemetry = simulator.update(Δt)
+            telemetry.timestamp = self.current_time
+
+            # Update robot telemetry
+            robot.update_telemetry(telemetry)
+
+    def _check_task_completions(self) -> List[Task]:
+        """
+        Check if any robots have completed their current tasks.
+
+        Returns:
+            List of completed tasks
+        """
+        completed_tasks = []
+
+        for robot, simulator in zip(self.robots, self.robot_simulators):
+            # Check if robot has arrived at destination
+            # Robot completed task if:
+            # 1. Has a current task
+            # 2. Is at the target node
+            # 3. No more path segments to traverse
+            if (robot.current_task and
+                robot.current_node_index == robot.target_node_index and
+                not simulator.path_queue and
+                simulator.current_target_node is None):
+
+                task = robot.current_task
+
+                # Complete delivery
+                if task.task_type == 'replenishment':
+                    to_node = self.graph_state.nodes[task.to_location_index]
+                    to_node.restock(task.num_items)
+
+                # Unload items from simulator
+                simulator.complete_task(task.num_items)
+
+                # Remove task from robot queue
+                completed_task = robot.complete_current_task()
+                if completed_task:
+                    self.completed_tasks.append(completed_task)
+                    completed_tasks.append(completed_task)
+
+                # If robot has more tasks, plan next one
+                if robot.current_task:
+                    self._plan_path_for_robot(robot, robot.current_task, simulator)
+
+        return completed_tasks
+
+    def _compute_timestep_reward(self, completed_tasks: List[Task]) -> float:
+        """
+        Compute reward for this timestep.
+
+        Args:
+            completed_tasks: List of tasks completed this timestep
+
+        Returns:
+            Reward scalar
+        """
+        reward = 0.0
+
+        # 1. Task completion rewards
+        for task in completed_tasks:
+            reward += 10.0  # Base completion bonus
+
+            # Early completion bonus
+            completion_time = self.current_time
+            if completion_time < task.deadline:
+                time_saved = task.deadline - completion_time
+                reward += 5.0 * (time_saved / max(task.deadline, 1.0))
+            else:
+                # Deadline penalty
+                lateness = completion_time - task.deadline
+                reward -= 20.0 * (lateness / 60.0)  # -20 per minute late
+
+        # 2. Pending task penalties (age accumulation)
+        for task in self.pending_tasks:
+            age = task.get_age(self.current_time)
+
+            # Higher penalty for urgent tasks
+            if task.manual_priority >= 4:
+                reward -= 0.01 * age
+            else:
+                reward -= 0.001 * age
+
+        # 3. Stockout penalties
+        stockout_count = 0
+        for node in self.graph_state.nodes:
+            if node.is_stockout and node.node_type == 'recovery':
+                reward -= 5.0  # Per timestep stockout penalty
+                stockout_count += 1
+
+        self.episode_stockouts = stockout_count
+
+        # 4. Load balancing bonus
+        if len(self.robots) > 0:
+            loads = [robot.current_load for robot in self.robots]
+            load_variance = np.var(loads)
+            reward -= 0.1 * load_variance
+
+        return reward
+
+    def get_robot_availability_mask(self, task: Task) -> np.ndarray:
+        """
+        Get boolean mask for which robots can accept a task.
+
+        In continuous mode, robots can accept tasks even when busy
+        if they have capacity.
+
+        Args:
+            task: Task to check availability for
+
+        Returns:
+            Boolean numpy array [num_robots]
+        """
+        mask = []
+
+        for robot in self.robots:
+            # Robot can accept if it has capacity for the items
+            can_accept = robot.can_accept_items(task.num_items)
+
+            # Also check battery level
+            if can_accept and robot.current_node_index is not None:
+                _, distance = dijkstra_shortest_path(
+                    robot.current_node_index,
+                    task.to_location_index,
+                    self.graph_state,
+                    self.num_nodes
+                )
+                battery_needed = distance * 0.001
+                if robot.battery_level < battery_needed:
+                    can_accept = False
+
+            mask.append(can_accept)
+
+        return np.array(mask, dtype=bool)
 
     def _get_state_dict(self) -> Dict[str, np.ndarray]:
         """
@@ -206,27 +435,33 @@ class GAPOTaskAssignmentEnv(gym.Env):
 
         Returns dict with:
         - task_features: [12]
-        - node_features: [num_nodes, 5]
-        - edge_features: [num_edges, 3]
-        - edge_index: [2, num_edges] - connectivity
+        - node_continuous: [num_nodes, 15] - continuous node features
+        - node_categorical: [num_nodes, 1] - node_type_id
+        - edge_features: [num_edges, 12] - continuous edge features
+        - edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx)
+        - edge_index: [2, num_edges] - graph connectivity for GNN
         - robot_features: [num_robots, 12]
         - robot_positions: [num_robots, 2]
         - queue_features: [5]
         """
-        # Task features
-        if self.current_task_index < len(self.tasks):
-            current_task = self.tasks[self.current_task_index]
+        # Task features (get most urgent pending task, or zeros if none)
+        if self.pending_tasks:
+            current_task = self.pending_tasks[0]  # Most urgent task
             task_features = current_task.get_features(self.current_time)
         else:
             task_features = np.zeros(12, dtype=np.float32)
 
-        # Node features
-        node_features = self.graph_state.get_node_features()  # [num_nodes, 5]
+        # Node features (COMPLETE extraction)
+        node_continuous, node_categorical = self.graph_state.get_node_features_complete()
+        # node_continuous: [num_nodes, 15]
+        # node_categorical: [num_nodes, 1]
 
-        # Edge features
-        edge_features = self.graph_state.get_edge_features()  # [num_edges, 3]
+        # Edge features (COMPLETE extraction)
+        edge_features, edge_node_indices = self.graph_state.get_edge_features_complete()
+        # edge_features: [num_edges, 12]
+        # edge_node_indices: [num_edges, 2]
 
-        # Edge index (connectivity)
+        # Edge index (connectivity for GNN message passing)
         edge_index = self._build_edge_index()  # [2, num_edges]
 
         # Robot features
@@ -258,17 +493,16 @@ class GAPOTaskAssignmentEnv(gym.Env):
         robot_features = np.array(robot_features, dtype=np.float32)
         robot_positions = np.array(robot_positions, dtype=np.float32)
 
-        # Queue features
-        remaining_tasks = self.tasks[self.current_task_index + 1:]
-        if remaining_tasks:
-            num_remaining = len(remaining_tasks)
-            avg_priority = np.mean([t.manual_priority for t in remaining_tasks])
-            num_urgent = sum(1 for t in remaining_tasks if t.manual_priority >= 4)
-            oldest_age = max([t.get_age(self.current_time) for t in remaining_tasks])
-            num_near_deadline = sum(1 for t in remaining_tasks if t.get_time_to_deadline(self.current_time) < 300)
+        # Queue features (based on pending tasks)
+        if self.pending_tasks:
+            num_pending = len(self.pending_tasks)
+            avg_priority = np.mean([t.manual_priority for t in self.pending_tasks])
+            num_urgent = sum(1 for t in self.pending_tasks if t.manual_priority >= 4)
+            oldest_age = max([t.get_age(self.current_time) for t in self.pending_tasks])
+            num_near_deadline = sum(1 for t in self.pending_tasks if t.get_time_to_deadline(self.current_time) < 300)
 
             queue_features = np.array([
-                float(num_remaining),
+                float(num_pending),
                 avg_priority,
                 float(num_urgent),
                 oldest_age,
@@ -279,8 +513,10 @@ class GAPOTaskAssignmentEnv(gym.Env):
 
         return {
             'task_features': task_features,
-            'node_features': node_features,
+            'node_continuous': node_continuous,
+            'node_categorical': node_categorical,
             'edge_features': edge_features,
+            'edge_node_indices': edge_node_indices,
             'edge_index': edge_index,
             'robot_features': robot_features,
             'robot_positions': robot_positions,
