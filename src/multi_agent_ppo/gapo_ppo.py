@@ -42,11 +42,13 @@ class GAPOPPO:
 
     def __init__(
         self,
-        node_feat_dim=5,
-        edge_feat_dim=3,
+        node_continuous_dim=15,
+        num_node_types=4,
+        edge_feat_dim=12,
         robot_feat_dim=12,
         task_feat_dim=12,
         hidden_dim=64,
+        num_attention_heads=4,
         lr=0.0003,
         gamma=0.99,
         K_epochs=4,
@@ -54,21 +56,25 @@ class GAPOPPO:
         use_gnn=True,
         use_debiasing=True,
         lambda_debias=0.1,
+        lambda_gae=0.95,
         device='cpu'
     ):
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
+        self.lambda_gae = lambda_gae
         self.use_debiasing = use_debiasing
         self.device = torch.device(device)
 
         # GAPO policy network
         self.policy = GAPOPolicyNetwork(
-            node_feat_dim=node_feat_dim,
+            node_continuous_dim=node_continuous_dim,
+            num_node_types=num_node_types,
             edge_feat_dim=edge_feat_dim,
             robot_feat_dim=robot_feat_dim,
             task_feat_dim=task_feat_dim,
             hidden_dim=hidden_dim,
+            num_attention_heads=num_attention_heads,
             use_gnn=use_gnn,
             use_debiasing=use_debiasing,
             lambda_state_delta=lambda_debias
@@ -79,11 +85,13 @@ class GAPOPPO:
 
         # Old policy for PPO ratio
         self.policy_old = GAPOPolicyNetwork(
-            node_feat_dim=node_feat_dim,
+            node_continuous_dim=node_continuous_dim,
+            num_node_types=num_node_types,
             edge_feat_dim=edge_feat_dim,
             robot_feat_dim=robot_feat_dim,
             task_feat_dim=task_feat_dim,
             hidden_dim=hidden_dim,
+            num_attention_heads=num_attention_heads,
             use_gnn=use_gnn,
             use_debiasing=False  # Don't need debiasing in old policy
         ).to(self.device)
@@ -136,47 +144,101 @@ class GAPOPPO:
 
         return action
 
-    def update(self, memory: Memory):
+    def select_action_greedy(
+        self,
+        state_dict: Dict[str, np.ndarray],
+        robot_mask: np.ndarray = None
+    ) -> int:
         """
-        Update policy using PPO with de-biasing.
+        Select action greedily (for deployment/evaluation).
+
+        Args:
+            state_dict: State dictionary from environment
+            robot_mask: Boolean mask for available robots
+
+        Returns:
+            action: Selected action (greedy)
+        """
+        # Convert numpy arrays to tensors
+        state_dict_tensor = self._state_dict_to_tensor(state_dict)
+
+        # Convert mask
+        if robot_mask is not None:
+            robot_mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(self.device)
+        else:
+            robot_mask_tensor = None
+
+        # Select action greedily
+        with torch.no_grad():
+            action_probs, _ = self.policy.forward(state_dict_tensor, robot_mask_tensor)
+            action = torch.argmax(action_probs).item()
+
+        return action
+
+    def update(self, memory: Memory, next_state_dict: Dict[str, np.ndarray] = None):
+        """
+        Update policy using PPO with GAE advantages.
 
         Args:
             memory: Memory buffer with experiences
+            next_state_dict: Next state for bootstrapping (continuous tasks)
         """
-        # Monte Carlo estimate of returns
-        rewards = []
-        discounted_reward = 0
-
-        for reward, is_terminal in zip(reversed(memory.rewards), reversed(memory.is_terminals)):
-            if is_terminal:
-                discounted_reward = 0
-            discounted_reward = reward + (self.gamma * discounted_reward)
-            rewards.insert(0, discounted_reward)
-
-        # Normalize rewards
-        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
-
         # Convert to tensors
         old_actions = torch.tensor(memory.actions, dtype=torch.long).to(self.device)
         old_logprobs = torch.tensor(memory.logprobs, dtype=torch.float32).to(self.device)
+        rewards_tensor = torch.tensor(memory.rewards, dtype=torch.float32).to(self.device)
+
+        # Convert state dicts to tensors
+        state_dict_tensors = [
+            self._state_dict_to_tensor(sd) for sd in memory.state_dicts
+        ]
+
+        robot_mask_tensors = []
+        for mask in memory.robot_masks:
+            if mask is not None:
+                robot_mask_tensors.append(
+                    torch.tensor(mask, dtype=torch.bool).to(self.device)
+                )
+            else:
+                robot_mask_tensors.append(None)
+
+        # Compute state values for all states
+        with torch.no_grad():
+            _, values, _ = self.policy.evaluate_actions(
+                state_dict_tensors,
+                old_actions,
+                robot_mask_tensors
+            )
+            values = values.squeeze()
+
+            # Get value of next state for bootstrapping
+            if next_state_dict is not None:
+                next_state_tensor = self._state_dict_to_tensor(next_state_dict)
+                _, next_value, _ = self.policy.evaluate_actions(
+                    [next_state_tensor],
+                    torch.zeros(1, dtype=torch.long).to(self.device),
+                    [robot_mask_tensors[-1] if robot_mask_tensors else None]
+                )
+                next_value = next_value.squeeze()
+            else:
+                next_value = torch.tensor(0.0).to(self.device)
+
+        # Compute GAE advantages
+        advantages = self._compute_gae(
+            rewards_tensor,
+            values,
+            next_value,
+            memory.is_terminals
+        )
+
+        # Compute returns for critic training
+        returns = advantages + values
+
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
 
         # Optimize policy for K epochs
         for epoch in range(self.K_epochs):
-            # Convert state dicts to tensors
-            state_dict_tensors = [
-                self._state_dict_to_tensor(sd) for sd in memory.state_dicts
-            ]
-
-            robot_mask_tensors = []
-            for mask in memory.robot_masks:
-                if mask is not None:
-                    robot_mask_tensors.append(
-                        torch.tensor(mask, dtype=torch.bool).to(self.device)
-                    )
-                else:
-                    robot_mask_tensors.append(None)
-
             # Evaluate actions
             logprobs, state_values, dist_entropy = self.policy.evaluate_actions(
                 state_dict_tensors,
@@ -184,11 +246,10 @@ class GAPOPPO:
                 robot_mask_tensors
             )
 
+            state_values = state_values.squeeze()
+
             # PPO ratio
             ratios = torch.exp(logprobs - old_logprobs.detach())
-
-            # Advantages
-            advantages = rewards - state_values.detach()
 
             # Surrogate loss
             surr1 = ratios * advantages
@@ -197,8 +258,8 @@ class GAPOPPO:
             # Actor loss
             actor_loss = -torch.min(surr1, surr2).mean()
 
-            # Critic loss
-            critic_loss = 0.5 * self.MseLoss(state_values, rewards)
+            # Critic loss (fit to GAE-computed returns)
+            critic_loss = 0.5 * self.MseLoss(state_values, returns)
 
             # Entropy bonus (exploration)
             entropy_loss = -0.01 * dist_entropy.mean()
@@ -235,6 +296,52 @@ class GAPOPPO:
 
         # Reset episode tracking
         self.policy.reset_episode_tracking()
+
+    def _compute_gae(
+        self,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        next_value: torch.Tensor,
+        is_terminals: List[bool]
+    ) -> torch.Tensor:
+        """
+        Compute Generalized Advantage Estimation (GAE).
+
+        GAE formula:
+            A_t = Σ_{l=0}^{∞} (γλ)^l * δ_{t+l}
+        where:
+            δ_t = r_t + γ * V(s_{t+1}) * (1 - terminal) - V(s_t)
+
+        Args:
+            rewards: Rewards [T]
+            values: State values [T]
+            next_value: Value of state after last timestep (for bootstrapping)
+            is_terminals: Terminal flags [T]
+
+        Returns:
+            advantages: GAE advantages [T]
+        """
+        T = len(rewards)
+        advantages = torch.zeros(T, dtype=torch.float32).to(self.device)
+        gae = 0
+
+        # Compute GAE in reverse order
+        for t in reversed(range(T)):
+            if t == T - 1:
+                # Bootstrap from next state
+                next_value_t = next_value
+            else:
+                next_value_t = values[t + 1]
+
+            # TD error: δ_t = r_t + γ * V(s_{t+1}) * (1 - terminal) - V(s_t)
+            terminal_mask = 0.0 if is_terminals[t] else 1.0
+            delta = rewards[t] + self.gamma * next_value_t * terminal_mask - values[t]
+
+            # GAE: A_t = δ_t + γλ * A_{t+1} * (1 - terminal)
+            gae = delta + self.gamma * self.lambda_gae * gae * terminal_mask
+            advantages[t] = gae
+
+        return advantages
 
     def _state_dict_to_tensor(self, state_dict: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
         """Convert numpy state dict to tensor dict."""
