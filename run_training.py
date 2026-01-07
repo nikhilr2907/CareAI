@@ -7,11 +7,17 @@ Trains hospital robot task allocation using:
 - Cross-attention for task-robot-node
 - De-biasing mechanisms for autoregressive decisions
 - Continuous time simulation with telemetry
-- Curriculum learning with multiple hospital configs
+- Supports both single-config and multi-config curriculum learning
 
 Usage:
-    python run_training.py --curriculum adaptive --num-random 5 --iterations 10000
-    python run_training.py --no-curriculum --config configs/my_hospital.json
+    # Single config training
+    python run_training.py --config configs/hospital_3nodes_consumables.json
+
+    # Multi-config curriculum learning
+    python run_training.py --configs-dir configs --curriculum adaptive
+
+    # Custom multi-config
+    python run_training.py --config-list configs/small.json configs/medium.json configs/large.json
 """
 import torch
 import numpy as np
@@ -20,7 +26,9 @@ import time
 import argparse
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
-from src.environment.graph.hospital_config import HospitalConfig
+from src.environment.graph.graph_state import GraphState
+from src.environment.graph.edge import HospitalEdge
+from src.environment.graph.config_loader import load_config_from_file, list_available_configs, get_num_robots_from_config
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO, Memory
 
 
@@ -28,15 +36,22 @@ def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description='Train GAPO policy for hospital robot task assignment')
 
+    # Config selection (mutually exclusive)
+    config_group = parser.add_mutually_exclusive_group(required=False)
+    config_group.add_argument('--config', type=str,
+                              help='Path to single hospital config JSON file')
+    config_group.add_argument('--configs-dir', type=str, default='configs',
+                              help='Directory containing multiple config files for curriculum learning')
+    config_group.add_argument('--config-list', type=str, nargs='+',
+                              help='List of specific config files for curriculum learning')
+
     # Curriculum settings
-    parser.add_argument('--curriculum', type=str, default='adaptive', choices=['adaptive', 'fixed', 'random', 'none'],
-                        help='Curriculum learning schedule (default: adaptive)')
-    parser.add_argument('--no-curriculum', action='store_true',
-                        help='Disable curriculum learning (train on single config)')
-    parser.add_argument('--num-random', type=int, default=0,
-                        help='Number of random configs to add to curriculum (default: 0)')
-    parser.add_argument('--config', type=str, default=None,
-                        help='Path to custom hospital config JSON (for single-config training)')
+    parser.add_argument('--curriculum', type=str, default='none', choices=['adaptive', 'fixed', 'random', 'none'],
+                        help='Curriculum learning schedule (default: none)')
+    parser.add_argument('--config-interval', type=int, default=500,
+                        help='Config switch interval for fixed schedule (default: 500)')
+    parser.add_argument('--perf-threshold', type=float, default=50.0,
+                        help='Performance threshold for adaptive schedule (default: 50.0)')
 
     # Training hyperparameters
     parser.add_argument('--iterations', type=int, default=10000,
@@ -50,83 +65,115 @@ def parse_args():
     parser.add_argument('--no-debiasing', action='store_true',
                         help='Disable de-biasing loss')
 
-    # Curriculum schedule parameters
-    parser.add_argument('--config-interval', type=int, default=500,
-                        help='Config switch interval for fixed schedule (default: 500)')
-    parser.add_argument('--perf-threshold', type=float, default=50.0,
-                        help='Performance threshold for adaptive schedule (default: 50.0)')
-
     # System
     parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cpu', 'cuda'],
                         help='Device to use (default: auto)')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for reproducibility')
 
+    # Environment
+    parser.add_argument('--num-robots', type=int, default=None,
+                        help='Number of robots (default: read from config or 5)')
+    parser.add_argument('--max-episode-time', type=float, default=28800.0,
+                        help='Max episode time in seconds (default: 28800 = 8 hours)')
+
     return parser.parse_args()
 
 
-def generate_curriculum_configs(num_random=0, include_default=True):
+def load_curriculum_from_configs(config_paths: list) -> list:
     """
-    Generate a curriculum of hospital configurations with increasing complexity.
+    Load curriculum from list of config file paths.
 
     Args:
-        num_random: Number of additional random configs to generate
-        include_default: Whether to include predefined configs
+        config_paths: List of paths to config JSON files
 
     Returns:
-        List of (config, description) tuples
+        List of (config_path, description) tuples
     """
-    configs = []
+    curriculum = []
 
-    if include_default:
-        # Stage 1: Simple layouts (10 nodes, 5 robots)
-        configs.extend([
-            (None, "Default 10-node hospital"),  # Default config
-            (HospitalConfig(HospitalConfig.generate_random_grid(
-                rows=2, cols=3, spacing=10.0, storage_ratio=0.3, recovery_ratio=0.5
-            )), "Predefined: Small 2x3 grid"),
-            (HospitalConfig(HospitalConfig.generate_random_grid(
-                rows=3, cols=2, spacing=12.0, storage_ratio=0.2, recovery_ratio=0.6
-            )), "Predefined: Compact 3x2 grid"),
-        ])
+    for config_path in config_paths:
+        config_path = Path(config_path)
+        if not config_path.exists():
+            print(f"Warning: Config file not found: {config_path}, skipping...")
+            continue
 
-        # Stage 2: Medium layouts (12-15 nodes)
-        configs.extend([
-            (HospitalConfig(HospitalConfig.generate_random_grid(
-                rows=3, cols=4, spacing=10.0, storage_ratio=0.25, recovery_ratio=0.5
-            )), "Predefined: Medium 3x4 grid"),
-            (HospitalConfig(HospitalConfig.generate_random_grid(
-                rows=4, cols=3, spacing=11.0, storage_ratio=0.3, recovery_ratio=0.4
-            )), "Predefined: Medium 4x3 grid"),
-        ])
+        # Create description from filename
+        description = config_path.stem.replace('_', ' ').title()
 
-        # Stage 3: Complex layouts (16-20 nodes)
-        configs.extend([
-            (HospitalConfig(HospitalConfig.generate_random_grid(
-                rows=4, cols=4, spacing=10.0, storage_ratio=0.2, recovery_ratio=0.6
-            )), "Predefined: Large 4x4 grid"),
-            (HospitalConfig(HospitalConfig.generate_random_grid(
-                rows=5, cols=3, spacing=12.0, storage_ratio=0.25, recovery_ratio=0.5
-            )), "Predefined: Large 5x3 grid"),
-        ])
+        curriculum.append((str(config_path), description))
 
-    # Add random configs
-    for i in range(num_random):
-        # Randomly sample complexity
-        rows = np.random.randint(2, 6)
-        cols = np.random.randint(2, 6)
-        spacing = np.random.uniform(8.0, 15.0)
-        storage_ratio = np.random.uniform(0.15, 0.35)
-        recovery_ratio = np.random.uniform(0.4, 0.7)
+    if not curriculum:
+        raise ValueError("No valid config files found for curriculum!")
 
-        config = HospitalConfig(HospitalConfig.generate_random_grid(
-            rows=rows, cols=cols, spacing=spacing,
-            storage_ratio=storage_ratio, recovery_ratio=recovery_ratio
-        ))
+    return curriculum
 
-        configs.append((config, f"Random {i+1}: {rows}x{cols} grid"))
 
-    return configs
+def create_env_from_config_file(config_path: str, num_robots: int = None,
+                                max_episode_time: float = 28800.0,
+                                timestep_seconds: float = 1.0):
+    """
+    Create environment from config file.
+
+    Args:
+        config_path: Path to config JSON file
+        num_robots: Number of robots (if None, reads from config or uses 5)
+        max_episode_time: Max episode time in seconds
+        timestep_seconds: Timestep duration
+
+    Returns:
+        env: GAPOTaskAssignmentEnv instance
+        num_nodes: Number of nodes in the config
+    """
+    # Load config
+    nodes, edge_pairs = load_config_from_file(config_path)
+    num_nodes = len(nodes)
+
+    # Determine number of robots
+    if num_robots is None:
+        num_robots = get_num_robots_from_config(config_path)
+
+    # Create graph state from loaded nodes
+    graph_state = GraphState()
+    graph_state.nodes = nodes
+
+    # Create edges from edge pairs
+    graph_state.edges = []
+    for from_idx, to_idx in edge_pairs:
+        from_node = nodes[from_idx]
+        to_node = nodes[to_idx]
+
+        # Calculate distance
+        distance = np.sqrt((from_node.center_x - to_node.center_x)**2 +
+                          (from_node.center_y - to_node.center_y)**2)
+
+        edge = HospitalEdge(
+            from_node=from_node.node_id,
+            to_node=to_node.node_id,
+            distance_m=distance,
+            corridor_width=1.9,
+            entry_point=(from_node.center_x, from_node.center_y),
+            exit_point=(to_node.center_x, to_node.center_y),
+            max_v_ms=1.0,
+            clutter_level=np.random.random() * 0.3,
+            active_robot_ids=[],
+            has_patient_bed=np.random.random() < 0.1
+        )
+        graph_state.edges.append(edge)
+
+    # Create environment with custom graph state
+    env = GAPOTaskAssignmentEnv(
+        num_robots=num_robots,
+        num_nodes=num_nodes,
+        max_episode_time=max_episode_time,
+        timestep_seconds=timestep_seconds,
+        hospital_config=None  # We're providing graph_state directly
+    )
+
+    # Override graph_state with our custom one
+    env.graph_state = graph_state
+
+    return env, num_nodes
 
 
 def main():
@@ -139,33 +186,48 @@ def main():
         np.random.seed(args.seed)
         print(f"Random seed set to: {args.seed}")
 
-    ############## Hyperparameters (from args) ##############
-    num_robots = 5
-    num_nodes = 10  # Will be overridden by config
-    max_episode_time = 28800.0  # 8 hours
+    ############## Load Configs ##############
+    use_curriculum = args.curriculum != 'none'
+
+    if args.config:
+        # Single config mode
+        if not Path(args.config).exists():
+            raise FileNotFoundError(f"Config file not found: {args.config}")
+        curriculum_configs = [(args.config, Path(args.config).stem)]
+        use_curriculum = False
+        print(f"Single-config mode: {args.config}")
+
+    elif args.config_list:
+        # Explicit list of configs for curriculum
+        curriculum_configs = load_curriculum_from_configs(args.config_list)
+        print(f"Multi-config mode: {len(curriculum_configs)} configs specified")
+
+    elif args.configs_dir:
+        # Load all configs from directory
+        available_configs = list_available_configs(args.configs_dir)
+        if not available_configs:
+            raise ValueError(f"No config files found in directory: {args.configs_dir}")
+        curriculum_configs = load_curriculum_from_configs(available_configs)
+        print(f"Curriculum mode: {len(curriculum_configs)} configs from {args.configs_dir}")
+
+    else:
+        raise ValueError("Must specify --config, --config-list, or --configs-dir")
+
+    # If only one config, disable curriculum
+    if len(curriculum_configs) == 1:
+        use_curriculum = False
+
+    current_config_idx = 0
+
+    ############## Hyperparameters ##############
+    num_robots = args.num_robots  # Can be None (will be read from config)
+    max_episode_time = args.max_episode_time
     timestep_seconds = 1.0
 
-    # Multi-configuration training settings
-    use_curriculum = not args.no_curriculum and args.curriculum != 'none'
-    curriculum_schedule = args.curriculum if args.curriculum != 'none' else 'adaptive'
+    # Curriculum settings
+    curriculum_schedule = args.curriculum
     config_switch_interval = args.config_interval
     performance_threshold = args.perf_threshold
-
-    # Generate curriculum configs (mix of predefined + random)
-    if use_curriculum:
-        curriculum_configs = generate_curriculum_configs(
-            num_random=args.num_random,
-            include_default=True  # Always include predefined configs
-        )
-    elif args.config:
-        # Single custom config from file
-        custom_config = HospitalConfig.from_file(args.config)
-        curriculum_configs = [(custom_config, f"Custom: {args.config}")]
-    else:
-        # Single default config
-        curriculum_configs = [(None, "Default 10-node hospital")]
-
-    current_config_idx = 0  # Start with simplest config
 
     # GAPO parameters
     hidden_dim = args.hidden_dim
@@ -183,10 +245,10 @@ def main():
 
     # Training parameters
     max_training_iterations = args.iterations
-    rollout_steps = 2000  # Collect experience for 2000 timesteps before update
-    timesteps_per_decision = 60.0  # Make assignment decision every 60 seconds
-    save_interval = 100  # Save every 100 iterations
-    log_interval = 10  # Log every 10 iterations
+    rollout_steps = 2000
+    timesteps_per_decision = 60.0
+    save_interval = 100
+    log_interval = 10
 
     # Device
     if args.device == 'auto':
@@ -199,7 +261,7 @@ def main():
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 80)
-    print("GAPO TRAINING - Graph Attention + De-biasing")
+    print("GAPO TRAINING - Real Hospital Configs with Category Tracking")
     print("=" * 80)
     print(f"Device: {device}")
     print(f"GNN Enabled: {use_gnn}")
@@ -210,42 +272,55 @@ def main():
     print(f"De-bias Lambda: {lambda_debias}")
 
     if use_curriculum:
-        print(f"Curriculum Learning: Enabled ({curriculum_schedule} schedule)")
+        print(f"\nCurriculum Learning: Enabled ({curriculum_schedule} schedule)")
         print(f"  Stages: {len(curriculum_configs)} configurations")
         if curriculum_schedule == 'fixed':
             print(f"  Switch interval: {config_switch_interval} iterations")
         elif curriculum_schedule == 'adaptive':
             print(f"  Performance threshold: {performance_threshold} avg reward")
+
+        print("\n  Config List:")
+        for idx, (path, desc) in enumerate(curriculum_configs):
+            print(f"    {idx + 1}. {desc} ({path})")
     else:
-        print("Curriculum Learning: Disabled (single config)")
+        print("\nSingle Config Training:")
+        print(f"  Config: {curriculum_configs[0][1]} ({curriculum_configs[0][0]})")
 
     print("=" * 80)
 
-    # Helper function to create/reset environment with config
+    # Helper function to create environment with config
     def create_env_with_config(config_idx):
-        """Create environment with specified curriculum config."""
+        """Create environment with specified config."""
+        config_path, config_desc = curriculum_configs[config_idx]
+
+        print(f"\n{'='*80}")
         if use_curriculum:
-            hospital_config, config_desc = curriculum_configs[config_idx]
-            print(f"\n{'='*80}")
             print(f"Loading Config {config_idx + 1}/{len(curriculum_configs)}: {config_desc}")
-            print(f"{'='*80}")
         else:
-            hospital_config = None
-            config_desc = "Default 10-node hospital"
+            print(f"Loading Config: {config_desc}")
+        print(f"  Path: {config_path}")
+        print(f"{'='*80}")
 
-        # Determine num_nodes from config
-        if hospital_config is not None and hasattr(hospital_config, 'nodes'):
-            config_num_nodes = len(hospital_config.nodes)
-        else:
-            config_num_nodes = num_nodes
-
-        env = GAPOTaskAssignmentEnv(
+        env, num_nodes = create_env_from_config_file(
+            config_path,
             num_robots=num_robots,
-            num_nodes=config_num_nodes,
             max_episode_time=max_episode_time,
-            timestep_seconds=timestep_seconds,
-            hospital_config=hospital_config
+            timestep_seconds=timestep_seconds
         )
+
+        print(f"  Nodes: {num_nodes}")
+        print(f"  Robots: {env.num_robots}")
+        print(f"  Edges: {len(env.graph_state.edges)}")
+
+        # Print category info if available
+        total_categories = set()
+        for node in env.graph_state.nodes:
+            total_categories.update(node.get_all_categories())
+
+        if total_categories:
+            print(f"  Categories: {len(total_categories)} - {', '.join(sorted(total_categories))}")
+
+        print(f"{'='*80}")
 
         return env, config_desc
 
@@ -254,9 +329,9 @@ def main():
 
     # Create GAPO PPO
     ppo = GAPOPPO(
-        node_continuous_dim=15,
+        node_continuous_dim=18,  # Enhanced with category info
         num_node_types=4,
-        edge_feat_dim=12,
+        edge_feat_dim=15,  # Enhanced with congestion info
         robot_feat_dim=12,
         task_feat_dim=12,
         hidden_dim=hidden_dim,
@@ -276,16 +351,16 @@ def main():
     memory = Memory()
     running_reward = 0
     iteration_rewards = []
-    config_rewards = []  # Track rewards per config for curriculum
+    config_rewards = []
     total_timesteps = 0
     iterations_on_current_config = 0
 
-    print("\nStarting Continuous Training...")
+    print("\nStarting Training...")
     print("-" * 80)
 
     start_time = time.time()
 
-    # Initialize environment (continuous operation, no resets during training!)
+    # Initialize environment
     state_dict = env.reset()
 
     for iteration in range(1, max_training_iterations + 1):
@@ -299,114 +374,92 @@ def main():
         for step in range(rollout_steps):
             total_timesteps += 1
 
-            # ===== AUTOREGRESSIVE TASK ASSIGNMENT PHASE =====
-            # Assign ALL pending tasks before advancing time
-            # Each assignment updates state for next decision
+            # Autoregressive task assignment phase
             while len(env.pending_tasks) > 0:
-                # Get current task to assign
                 task = env.pending_tasks[0]
 
-                # Build action mask (which robots can handle this task)
+                # Build action mask
                 action_mask = np.ones(env.num_robots + 1, dtype=bool)
                 for i, robot in enumerate(env.robots):
                     if not robot.can_accept_items(task.num_items):
                         action_mask[i] = False
 
-                # Select action with CURRENT state
+                # Select action
                 action = ppo.select_action(state_dict, memory, action_mask)
 
-                # Handle HOLD action (defer remaining tasks)
+                # Handle HOLD action
                 if action == env.num_robots:
                     num_holds += 1
-                    reward = -0.01  # Small penalty for holding
+                    reward = -0.01
 
-                    # Store experience and break (don't assign more tasks this timestep)
                     memory.rewards.append(reward)
                     memory.is_terminals.append(False)
                     iteration_reward += reward
-                    break  # Stop assigning, advance time
+                    break
 
                 # Assign task to robot
                 success = env.assign_task_to_robot(action, task)
                 if success:
                     num_assignments += 1
-                    reward = 1.0  # Immediate reward for assignment
-
-                    # ✅ UPDATE STATE IMMEDIATELY after assignment
+                    reward = 1.0
                     state_dict = env._get_state_dict()
-                    # Next assignment will see updated robot availability!
                 else:
-                    reward = -1.0  # Penalty for failed assignment
+                    reward = -1.0
 
-                # Store experience
                 iteration_reward += reward
                 memory.rewards.append(reward)
                 memory.is_terminals.append(False)
 
-            # ===== SIMULATION TIME STEP =====
-            # Advance simulation time (robots move, tasks complete, inventory depletes)
+            # Simulation time step
             state_dict, step_reward, done, info = env.step(Δt=timesteps_per_decision)
 
-            # Accumulate step rewards (task completions, penalties, stockouts)
             if step_reward != 0:
                 iteration_reward += step_reward
-
-                # Credit step reward to most recent assignment decision
-                # (if any assignments were made this timestep)
                 if len(memory.rewards) > 0:
                     memory.rewards[-1] += step_reward
 
-            # If we've reached max episode time, reset (but this is rare)
             if done:
                 state_dict = env.reset()
 
-        # Store final state for bootstrapping
+        # Update policy
         next_state_dict = state_dict
-
-        # Update policy with GAE
         ppo.update(memory, next_state_dict)
         memory.clear_memory()
 
-        # Iteration metrics
+        # Metrics
         iteration_time = time.time() - iteration_start_time
         iteration_rewards.append(iteration_reward)
-        config_rewards.append(iteration_reward)  # Track for curriculum
+        config_rewards.append(iteration_reward)
         running_reward = 0.05 * iteration_reward + (1 - 0.05) * running_reward
 
-        # ===== CURRICULUM SWITCHING LOGIC =====
+        # Curriculum switching logic
         should_switch_config = False
 
         if use_curriculum and current_config_idx < len(curriculum_configs) - 1:
             if curriculum_schedule == 'fixed':
-                # Switch every N iterations
                 if iterations_on_current_config >= config_switch_interval:
                     should_switch_config = True
 
             elif curriculum_schedule == 'adaptive':
-                # Switch when performance threshold met
-                if len(config_rewards) >= 20:  # Need at least 20 iterations
+                if len(config_rewards) >= 20:
                     recent_avg = np.mean(config_rewards[-20:])
                     if recent_avg >= performance_threshold:
                         should_switch_config = True
 
             elif curriculum_schedule == 'random':
-                # Randomly switch (10% chance per iteration after 100 iters)
                 if iterations_on_current_config >= 100 and np.random.random() < 0.1:
                     should_switch_config = True
 
         if should_switch_config:
-            # Advance to next config
             current_config_idx += 1
             print(f"\n{'='*80}")
             print(f"CURRICULUM ADVANCE: Moving to config {current_config_idx + 1}/{len(curriculum_configs)}")
             print(f"  Previous config avg reward: {np.mean(config_rewards[-20:]):.2f}")
             print(f"{'='*80}\n")
 
-            # Reset environment with new config
             env, current_config_desc = create_env_with_config(current_config_idx)
             state_dict = env.reset()
 
-            # Reset curriculum tracking
             config_rewards = []
             iterations_on_current_config = 0
 

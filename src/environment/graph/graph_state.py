@@ -385,3 +385,250 @@ class GraphState:
         if 0 <= idx < len(self.nodes):
             return self.nodes[idx]
         return self.nodes[0]
+
+    # ===========================================================================
+    # ENHANCED FEATURE EXTRACTION WITH CATEGORY EMBEDDINGS
+    # ===========================================================================
+
+    def get_node_features_with_categories(
+        self,
+        category_names: Optional[List[str]] = None,
+        max_categories: int = 10
+    ) -> tuple:
+        """
+        Extract node features including category-based inventory with embedding indices.
+
+        This is the ENHANCED version that includes per-category stock information
+        and prepares category embedding indices for the neural network.
+
+        Args:
+            category_names: List of category names to extract (e.g., ['iv_therapy', 'ppe'])
+                           If None, automatically discovers categories from nodes
+            max_categories: Maximum number of categories to track (for fixed tensor size)
+
+        Returns:
+            tuple of:
+            - node_continuous: [num_nodes, N] - continuous features (geometry, total stock, etc.)
+            - node_categorical: [num_nodes, 1] - node_type_id
+            - category_features: [num_nodes, max_categories, 4] - per-category features
+              Each category: [stock_level, max_stock, num_skus, consumption_rate]
+            - category_mask: [num_nodes, max_categories] - 1 if category exists, 0 if padding
+            - category_ids: [num_nodes, max_categories] - category embedding indices
+            - location_ids: [num_nodes] - location embedding indices (or -1 if none)
+            - floor_ids: [num_nodes] - floor numbers
+
+        Continuous node features (15 + 3 = 18 total):
+        [Same as get_node_features_complete, plus:]
+        16. total_num_skus: Total distinct SKUs at this node
+        17. num_categories: Number of inventory categories
+        18. num_shelves: Number of shelf IDs
+
+        Category features per node (max_categories × 4):
+        For each category slot:
+        - stock_level: Current stock in this category
+        - max_stock: Max capacity for this category
+        - num_skus: Number of distinct SKUs in category
+        - consumption_rate: Consumption rate for category
+        """
+        # Auto-discover categories if not provided
+        if category_names is None:
+            category_set = set()
+            for node in self.nodes:
+                category_set.update(node.get_all_categories())
+            category_names = sorted(list(category_set))
+
+        # Truncate to max_categories if needed
+        if len(category_names) > max_categories:
+            print(f"Warning: {len(category_names)} categories found, truncating to {max_categories}")
+            category_names = category_names[:max_categories]
+
+        # Build category name → ID mapping
+        category_to_id = {cat: idx for idx, cat in enumerate(category_names)}
+
+        node_type_to_id = {
+            'storage': 0,
+            'corridor': 1,
+            'recovery': 2,
+            'hub': 3
+        }
+
+        # Initialize arrays
+        num_nodes = len(self.nodes)
+        node_continuous = []
+        node_categorical = []
+        category_features = []
+        category_mask = []
+        category_ids = []
+        location_ids = []
+        floor_ids = []
+
+        for node in self.nodes:
+            # ===== Continuous features (18) =====
+            node_cont = [
+                node.center_x,
+                node.center_y,
+                node.width,
+                node.height,
+                node.area,
+                node.clearance_m,
+                node.max_reach_height,
+                node.unit_height,
+                float(node.has_wash_basin),
+                float(node.is_cluttered),
+                node.stock_level,  # Total aggregate stock
+                node.consumption_rate,  # Total aggregate consumption
+                min(node.time_to_stockout, 999.0),
+                float(node.occupancy_count),
+                float(node.urgency_level),
+                float(node.get_total_num_skus()),  # NEW
+                float(len(node.category_inventory)),  # NEW: num categories
+                float(len(node.shelf_ids))  # NEW: num shelves
+            ]
+            node_continuous.append(node_cont)
+
+            # ===== Categorical feature (1) =====
+            node_type_id = node_type_to_id.get(node.node_type, 0)
+            node_categorical.append([node_type_id])
+
+            # ===== Category features (max_categories × 4) =====
+            node_cat_features = []
+            node_cat_mask = []
+            node_cat_ids = []
+
+            for cat_name in category_names:
+                if cat_name in node.category_inventory:
+                    # Category exists at this node
+                    cat_data = [
+                        node.get_category_stock_level(cat_name),
+                        node.get_category_max_stock(cat_name),
+                        float(node.get_category_num_skus(cat_name)),
+                        node.get_category_consumption_rate(cat_name)
+                    ]
+                    node_cat_features.append(cat_data)
+                    node_cat_mask.append(1.0)
+                    node_cat_ids.append(category_to_id[cat_name])
+                else:
+                    # Category doesn't exist - pad with zeros
+                    node_cat_features.append([0.0, 0.0, 0.0, 0.0])
+                    node_cat_mask.append(0.0)
+                    node_cat_ids.append(-1)  # -1 = no category
+
+            # Pad to max_categories if needed
+            while len(node_cat_features) < max_categories:
+                node_cat_features.append([0.0, 0.0, 0.0, 0.0])
+                node_cat_mask.append(0.0)
+                node_cat_ids.append(-1)
+
+            category_features.append(node_cat_features)
+            category_mask.append(node_cat_mask)
+            category_ids.append(node_cat_ids)
+
+            # ===== Location and floor IDs =====
+            # Location ID: if node.location_id exists, map to index (or use -1)
+            # For simplicity, we'll use a hash or assign sequential IDs
+            # In practice, you'd maintain a global location_id → index mapping
+            if node.location_id:
+                # Simple hash to int (replace with proper mapping in production)
+                loc_idx = hash(node.location_id) % 1000
+            else:
+                loc_idx = -1
+            location_ids.append(loc_idx)
+
+            floor_ids.append(node.floor)
+
+        return (
+            np.array(node_continuous, dtype=np.float32),  # [num_nodes, 18]
+            np.array(node_categorical, dtype=np.int64),    # [num_nodes, 1]
+            np.array(category_features, dtype=np.float32), # [num_nodes, max_categories, 4]
+            np.array(category_mask, dtype=np.float32),     # [num_nodes, max_categories]
+            np.array(category_ids, dtype=np.int64),        # [num_nodes, max_categories]
+            np.array(location_ids, dtype=np.int64),        # [num_nodes]
+            np.array(floor_ids, dtype=np.int64)            # [num_nodes]
+        )
+
+    def get_edge_features_enhanced(self) -> tuple:
+        """
+        Extract ENHANCED edge features including physical constraints.
+
+        Returns:
+            (continuous_features, categorical_features, node_indices) where:
+            - continuous_features: [num_edges, 15] numpy array
+            - categorical_features: [num_edges, 2] numpy array (bidirectional, obstacle_type)
+            - node_indices: [num_edges, 2] numpy array (from_node_idx, to_node_idx)
+
+        NEW continuous features (15 total, added 3 more):
+        [Same 12 as get_edge_features_complete, plus:]
+        13. congestion_factor: len(active_robots) / corridor_capacity
+        14. corridor_capacity: width / 0.6 (assumes 60cm per robot)
+        15. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
+
+        Categorical features per edge (2 total):
+        1. is_bidirectional: 1 (all hospital corridors are bidirectional)
+        2. obstacle_type: 0=none, 1=patient_bed, 2=clutter, 3=both
+        """
+        node_id_to_idx = {node.node_id: idx for idx, node in enumerate(self.nodes)}
+
+        continuous_features = []
+        categorical_features = []
+        node_indices = []
+
+        for edge in self.edges:
+            # ===== Continuous features (15) =====
+            entry_x = edge.entry_point[0] if edge.entry_point else 0.0
+            entry_y = edge.entry_point[1] if edge.entry_point else 0.0
+            exit_x = edge.exit_point[0] if edge.exit_point else 0.0
+            exit_y = edge.exit_point[1] if edge.exit_point else 0.0
+
+            base_cost = edge.distance_m / edge.max_v_ms
+
+            # NEW: Congestion metrics
+            corridor_capacity = edge.corridor_width / 0.6  # Assume 60cm per robot
+            num_active = len(edge.active_robot_ids)
+            congestion_factor = num_active / max(1.0, corridor_capacity)
+            is_congested = 1.0 if congestion_factor > 0.8 else 0.0
+
+            edge_continuous = [
+                edge.distance_m,
+                edge.corridor_width,
+                edge.max_v_ms,
+                entry_x,
+                entry_y,
+                exit_x,
+                exit_y,
+                edge.clutter_level,
+                float(num_active),
+                float(edge.has_patient_bed),
+                edge.current_weight,
+                base_cost,
+                congestion_factor,  # NEW
+                corridor_capacity,  # NEW
+                is_congested        # NEW
+            ]
+            continuous_features.append(edge_continuous)
+
+            # ===== Categorical features (2) =====
+            is_bidirectional = 1  # All hospital corridors are bidirectional
+
+            # Obstacle type encoding
+            if edge.has_patient_bed and edge.clutter_level > 0.5:
+                obstacle_type = 3  # Both bed and clutter
+            elif edge.has_patient_bed:
+                obstacle_type = 1  # Patient bed
+            elif edge.clutter_level > 0.5:
+                obstacle_type = 2  # Clutter
+            else:
+                obstacle_type = 0  # No obstacles
+
+            edge_categorical = [is_bidirectional, obstacle_type]
+            categorical_features.append(edge_categorical)
+
+            # ===== Node connectivity (2 indices) =====
+            from_idx = node_id_to_idx.get(edge.from_node, 0)
+            to_idx = node_id_to_idx.get(edge.to_node, 0)
+            node_indices.append([from_idx, to_idx])
+
+        return (
+            np.array(continuous_features, dtype=np.float32),  # [num_edges, 15]
+            np.array(categorical_features, dtype=np.int64),   # [num_edges, 2]
+            np.array(node_indices, dtype=np.int64)            # [num_edges, 2]
+        )

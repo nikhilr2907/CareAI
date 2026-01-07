@@ -32,6 +32,11 @@ class Task:
     is_assigned: bool = False
     assigned_robot_id: Optional[int] = None
 
+    # Intra-room coordinates (for precise positioning within nodes)
+    from_coordinates: Optional[tuple] = None  # (x, y) exact pickup point in meters
+    to_coordinates: Optional[tuple] = None    # (x, y) exact delivery point in meters
+    # If None, defaults to node center. If specified, enables intra-room navigation.
+
     def get_age(self, current_time: float) -> float:
         """Calculate how long this task has been waiting."""
         return current_time - self.arrival_time

@@ -1,0 +1,219 @@
+{
+  "name": "detailed_hospital_config",
+  "metadata": {
+    "num_nodes": 3,
+    "num_storage": 1,
+    "num_recovery": 2,
+    "version": "2.0_extended"
+  },
+  "nodes": [
+    {
+      "id": 0,
+      "type": "storage",
+      "name": "Central Pharmacy Storage",
+      "pos": [5.0, 5.0],
+      "size": [6.0, 5.0],
+
+      "construction": {
+        "equipment": [
+          "refrigerated_unit",
+          "controlled_substance_safe",
+          "automated_dispensing_cabinet"
+        ],
+        "shelving": {
+          "num_shelves": 12,
+          "shelf_height": 0.4,
+          "shelf_width": 2.0
+        },
+        "environmental": {
+          "temperature_range": [15, 25],
+          "humidity_controlled": true
+        }
+      },
+
+      "inventory": {
+        "categories": {
+          "analgesics": {
+            "stock_level": 500,
+            "max_stock": 800,
+            "consumption_rate": 4.0,
+            "items": ["paracetamol", "ibuprofen", "morphine"]
+          },
+          "antibiotics": {
+            "stock_level": 300,
+            "max_stock": 500,
+            "consumption_rate": 3.0,
+            "items": ["amoxicillin", "ciprofloxacin"]
+          },
+          "iv_fluids": {
+            "stock_level": 200,
+            "max_stock": 400,
+            "consumption_rate": 6.0,
+            "items": ["saline", "dextrose", "ringer_lactate"]
+          },
+          "ppe": {
+            "stock_level": 1000,
+            "max_stock": 2000,
+            "consumption_rate": 8.0,
+            "items": ["gloves", "masks", "gowns"]
+          }
+        },
+        "storage_zones": {
+          "refrigerated": ["insulin", "vaccines"],
+          "controlled_substances": ["morphine", "fentanyl"],
+          "general": ["bandages", "syringes"]
+        }
+      }
+    },
+
+    {
+      "id": 1,
+      "type": "recovery",
+      "name": "Cardiology Ward 10817",
+      "pos": [20.0, 10.0],
+      "size": [5.0, 4.0],
+
+      "construction": {
+        "num_beds": 2,
+        "equipment": [
+          "cardiac_monitor_1",
+          "cardiac_monitor_2",
+          "defibrillator",
+          "medication_cart",
+          "iv_pole_1",
+          "iv_pole_2"
+        ],
+        "bedside_storage": {
+          "num_drawers": 4,
+          "capacity_per_drawer": 20
+        }
+      },
+
+      "inventory": {
+        "categories": {
+          "cardiac_meds": {
+            "stock_level": 50,
+            "max_stock": 100,
+            "consumption_rate": 8.0,
+            "buffer_time": 2.0,
+            "items": ["aspirin", "heparin", "metoprolol"]
+          },
+          "iv_fluids": {
+            "stock_level": 30,
+            "max_stock": 60,
+            "consumption_rate": 5.0,
+            "items": ["saline", "dextrose"]
+          },
+          "monitoring_supplies": {
+            "stock_level": 100,
+            "max_stock": 200,
+            "consumption_rate": 12.0,
+            "items": ["ecg_electrodes", "pulse_ox_sensors"]
+          }
+        },
+        "priority_items": ["aspirin", "heparin"],
+        "critical_stock_threshold": 20
+      },
+
+      "patient_info": {
+        "specialization": "cardiology",
+        "acuity_level": "high",
+        "typical_length_of_stay": "3-7 days"
+      }
+    },
+
+    {
+      "id": 2,
+      "type": "recovery",
+      "name": "Orthopedics Ward 10820",
+      "pos": [20.0, 20.0],
+      "size": [5.0, 4.0],
+
+      "construction": {
+        "num_beds": 2,
+        "equipment": [
+          "patient_lift",
+          "walker_1",
+          "walker_2",
+          "medication_cart"
+        ]
+      },
+
+      "inventory": {
+        "categories": {
+          "pain_management": {
+            "stock_level": 80,
+            "max_stock": 150,
+            "consumption_rate": 10.0,
+            "buffer_time": 2.0,
+            "items": ["ibuprofen", "acetaminophen", "tramadol"]
+          },
+          "wound_care": {
+            "stock_level": 60,
+            "max_stock": 100,
+            "consumption_rate": 6.0,
+            "items": ["bandages", "gauze", "antiseptic"]
+          },
+          "mobility_aids": {
+            "stock_level": 20,
+            "max_stock": 40,
+            "consumption_rate": 2.0,
+            "items": ["crutches", "canes", "braces"]
+          }
+        }
+      },
+
+      "patient_info": {
+        "specialization": "orthopedics",
+        "acuity_level": "medium",
+        "typical_length_of_stay": "5-10 days"
+      }
+    }
+  ],
+
+  "edges": [
+    [0, 1],
+    [0, 2],
+    [1, 2]
+  ],
+
+  "item_database": {
+    "paracetamol": {
+      "category": "analgesic",
+      "unit": "tablet",
+      "size": "small",
+      "weight_g": 5,
+      "temperature_sensitive": false,
+      "controlled_substance": false
+    },
+    "morphine": {
+      "category": "analgesic",
+      "unit": "vial",
+      "size": "small",
+      "weight_g": 10,
+      "temperature_sensitive": false,
+      "controlled_substance": true,
+      "requires_signature": true
+    },
+    "saline": {
+      "category": "iv_fluid",
+      "unit": "bag",
+      "size": "large",
+      "weight_g": 1000,
+      "temperature_sensitive": false
+    }
+  },
+
+  "task_type_item_mapping": {
+    "replenishment": {
+      "from_category": "any_storage",
+      "to_category": "matching_ward_need",
+      "priority_items": ["cardiac_meds", "pain_management"]
+    },
+    "controlled_substance_delivery": {
+      "from_category": "controlled_substances",
+      "requires_verification": true,
+      "max_items_per_trip": 5
+    }
+  }
+}

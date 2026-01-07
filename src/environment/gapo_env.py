@@ -86,7 +86,7 @@ class GAPOTaskAssignmentEnv(gym.Env):
         """Reset environment and return initial state dict."""
         # Initialize graph (use custom config if provided)
         self.graph_state = GraphState(config=self.hospital_config)
-
+    
         # Initialize robots
         self.robots = []
         self.robot_simulators = []
