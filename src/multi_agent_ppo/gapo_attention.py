@@ -55,12 +55,23 @@ class TaskRobotAttention(nn.Module):
         if robot_embeddings.dim() == 2:
             robot_embeddings = robot_embeddings.unsqueeze(0)
 
+        # Prepare key_padding_mask: must be 2-D [batch_size, num_robots] for batched input
+        key_padding_mask = None
+        if attention_mask is not None:
+            # attention_mask is [num_robots] boolean (True = available, False = unavailable)
+            # key_padding_mask expects True = ignore, False = use
+            # So we need to invert and add batch dimension
+            if attention_mask.dim() == 1:
+                key_padding_mask = (~attention_mask).unsqueeze(0)  # [1, num_robots]
+            else:
+                key_padding_mask = ~attention_mask  # Already batched
+
         # Apply attention
         attn_output, attn_weights = self.multihead_attn(
             query=task_embedding,      # [batch, 1, embed_dim]
             key=robot_embeddings,       # [batch, num_robots, embed_dim]
             value=robot_embeddings,
-            key_padding_mask=~attention_mask if attention_mask is not None else None,
+            key_padding_mask=key_padding_mask,  # [batch, num_robots] or None
             need_weights=True,
             average_attn_weights=True
         )
@@ -149,7 +160,7 @@ class RobotScorer(nn.Module):
 
         # Score individual robots
         self.scorer = nn.Sequential(
-            nn.Linear(embed_dim * 3, hidden_dim),  # Robot + Task + Context
+            nn.Linear(embed_dim * 4, hidden_dim),  # Robot + Task + RobotContext + NodeContext
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -179,13 +190,15 @@ class RobotScorer(nn.Module):
         # Expand task and contexts to match num_robots
         task_expanded = task_embedding.unsqueeze(0).expand(num_robots, -1)
         robot_context_expanded = robot_context.unsqueeze(0).expand(num_robots, -1)
+        node_context_expanded = node_context.unsqueeze(0).expand(num_robots, -1)
 
         # Combine robot features with task context
         combined = torch.cat([
             robot_embeddings,           # Robot's own state
             task_expanded,              # What task needs
             robot_context_expanded,     # What other robots are doing
-        ], dim=-1)  # [num_robots, embed_dim * 3]
+            node_context_expanded,      # Spatial context (relevant locations)
+        ], dim=-1)  # [num_robots, embed_dim * 4]
 
         # Score each robot
         scores = self.scorer(combined).squeeze(-1)  # [num_robots]
@@ -303,9 +316,9 @@ def test_attention():
 
     print(f"Action logits (masked): {action_logits_masked}")
     print(f"Robot attention (masked): {attn_info_masked['robot_attn_weights']}")
-    print("  ↑ Notice robots 1 and 4 have near-zero attention!")
+    print("  ^ Notice robots 1 and 4 have near-zero attention!")
 
-    print("\n✓ Attention modules working!")
+    print("\nAttention modules working!")
 
 
 if __name__ == '__main__':

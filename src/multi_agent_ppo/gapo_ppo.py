@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 from typing import List, Dict, Tuple
 import numpy as np
+from tqdm import tqdm
 
 from .gapo_policy import GAPOPolicyNetwork
 
@@ -53,7 +54,6 @@ class GAPOPPO:
         gamma=0.99,
         K_epochs=4,
         eps_clip=0.2,
-        use_gnn=True,
         use_debiasing=True,
         lambda_debias=0.1,
         lambda_gae=0.95,
@@ -75,7 +75,6 @@ class GAPOPPO:
             task_feat_dim=task_feat_dim,
             hidden_dim=hidden_dim,
             num_attention_heads=num_attention_heads,
-            use_gnn=use_gnn,
             use_debiasing=use_debiasing,
             lambda_state_delta=lambda_debias
         ).to(self.device)
@@ -92,7 +91,6 @@ class GAPOPPO:
             task_feat_dim=task_feat_dim,
             hidden_dim=hidden_dim,
             num_attention_heads=num_attention_heads,
-            use_gnn=use_gnn,
             use_debiasing=False  # Don't need debiasing in old policy
         ).to(self.device)
 
@@ -238,7 +236,8 @@ class GAPOPPO:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
 
         # Optimize policy for K epochs
-        for epoch in range(self.K_epochs):
+        epoch_pbar = tqdm(range(self.K_epochs), desc="    PPO Update", unit="epoch", leave=False)
+        for epoch in epoch_pbar:
             # Evaluate actions
             logprobs, state_values, dist_entropy = self.policy.evaluate_actions(
                 state_dict_tensors,
@@ -274,6 +273,13 @@ class GAPOPPO:
             # Total loss
             loss = actor_loss + critic_loss + entropy_loss + debias_loss
 
+            # Update progress bar with loss info
+            epoch_pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'actor': f'{actor_loss.item():.4f}',
+                'critic': f'{critic_loss.item():.4f}'
+            })
+
             # Take gradient step
             self.optimizer.zero_grad()
             loss.backward()
@@ -290,6 +296,9 @@ class GAPOPPO:
                     'debias_loss': debias_loss.item() if self.use_debiasing else 0.0,
                     **debias_breakdown
                 }
+
+        # Close epoch progress bar
+        epoch_pbar.close()
 
         # Copy new weights to old policy
         self.policy_old.load_state_dict(self.policy.state_dict())
@@ -346,10 +355,14 @@ class GAPOPPO:
     def _state_dict_to_tensor(self, state_dict: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
         """Convert numpy state dict to tensor dict."""
         tensor_dict = {}
+        int64_keys = {"node_categorical", "edge_index", "edge_node_indices"}
 
         for key, value in state_dict.items():
             if isinstance(value, np.ndarray):
-                tensor_dict[key] = torch.tensor(value, dtype=torch.float32).to(self.device)
+                if key in int64_keys:
+                    tensor_dict[key] = torch.tensor(value, dtype=torch.int64).to(self.device)
+                else:
+                    tensor_dict[key] = torch.tensor(value, dtype=torch.float32).to(self.device)
             else:
                 tensor_dict[key] = value
 
@@ -391,7 +404,6 @@ def test_gapo_ppo():
         task_feat_dim=12,
         hidden_dim=64,
         lr=0.0003,
-        use_gnn=True,
         use_debiasing=True
     )
 

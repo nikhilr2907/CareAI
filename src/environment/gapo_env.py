@@ -4,8 +4,8 @@ GAPO-compatible environment for hospital robot task allocation.
 Returns graph-structured states (dict) instead of flat vectors.
 Compatible with GNN-based GAPO policy network.
 """
-import gym
-from gym import spaces
+# import gym
+# from gym import spaces
 import numpy as np
 from typing import List, Dict, Optional
 
@@ -22,7 +22,7 @@ from .tasks.task_generator import (
 from .graph_helpers import dijkstra_shortest_path
 
 
-class GAPOTaskAssignmentEnv(gym.Env):
+class GAPOTaskAssignmentEnv:#(gym.Env):
     """
     GAPO-compatible environment with graph-structured states.
 
@@ -50,18 +50,18 @@ class GAPOTaskAssignmentEnv(gym.Env):
         self.hospital_config = hospital_config  # Optional custom config
 
         # Action space
-        self.action_space = spaces.Discrete(num_robots + 1)
+        # self.action_space = spaces.Discrete(num_robots + 1)
         self.HOLD_ACTION = num_robots
 
         # Observation space (dict-based)
-        self.observation_space = spaces.Dict({
-            'task_features': spaces.Box(-np.inf, np.inf, (12,), np.float32),
-            'node_features': spaces.Box(-np.inf, np.inf, (num_nodes, 5), np.float32),
-            'edge_features': spaces.Box(-np.inf, np.inf, (20, 3), np.float32),
-            'robot_features': spaces.Box(-np.inf, np.inf, (num_robots, 12), np.float32),
-            'robot_positions': spaces.Box(-np.inf, np.inf, (num_robots, 2), np.float32),
-            'queue_features': spaces.Box(-np.inf, np.inf, (5,), np.float32),
-        })
+        # self.observation_space = spaces.Dict({
+        #     'task_features': spaces.Box(-np.inf, np.inf, (12,), np.float32),
+        #     'node_features': spaces.Box(-np.inf, np.inf, (num_nodes, 5), np.float32),
+        #     'edge_features': spaces.Box(-np.inf, np.inf, (20, 3), np.float32),
+        #     'robot_features': spaces.Box(-np.inf, np.inf, (num_robots, 12), np.float32),
+        #     'robot_positions': spaces.Box(-np.inf, np.inf, (num_robots, 2), np.float32),
+        #     'queue_features': spaces.Box(-np.inf, np.inf, (5,), np.float32),
+        # })
 
         # Environment components
         self.graph_state = None
@@ -86,7 +86,7 @@ class GAPOTaskAssignmentEnv(gym.Env):
         """Reset environment and return initial state dict."""
         # Initialize graph (use custom config if provided)
         self.graph_state = GraphState(config=self.hospital_config)
-    
+
         # Initialize robots
         self.robots = []
         self.robot_simulators = []
@@ -275,7 +275,7 @@ class GAPOTaskAssignmentEnv(gym.Env):
             start_node,
             task.to_location_index,
             self.graph_state,
-            self.num_nodes
+            len(self.graph_state.nodes)  # Use actual number of nodes in graph
         )
 
         # Set path in simulator
@@ -421,7 +421,7 @@ class GAPOTaskAssignmentEnv(gym.Env):
                     robot.current_node_index,
                     task.to_location_index,
                     self.graph_state,
-                    self.num_nodes
+                    len(self.graph_state.nodes)
                 )
                 battery_needed = distance * 0.001
                 if robot.battery_level < battery_needed:
@@ -459,12 +459,20 @@ class GAPOTaskAssignmentEnv(gym.Env):
         # node_categorical: [num_nodes, 1]
 
         # Edge features (COMPLETE extraction)
-        edge_features, edge_node_indices = self.graph_state.get_edge_features_complete()
-        # edge_features: [num_edges, 12]
-        # edge_node_indices: [num_edges, 2]
+        edge_features_orig, edge_node_indices_orig = self.graph_state.get_edge_features_complete()
+        # edge_features_orig: [num_orig_edges, 12]
+        # edge_node_indices_orig: [num_orig_edges, 2]
+
+        # Make edges bidirectional to match edge_index
+        # Edge index is bidirectional, so edge features must be too
+        edge_features = np.vstack([edge_features_orig, edge_features_orig])  # [num_edges * 2, 12]
+        edge_node_indices = np.vstack([
+            edge_node_indices_orig,                          # Original: from -> to
+            edge_node_indices_orig[:, [1, 0]]                # Reverse: to -> from
+        ])  # [num_edges * 2, 2]
 
         # Edge index (connectivity for GNN message passing)
-        edge_index = self._build_edge_index()  # [2, num_edges]
+        edge_index = self._build_edge_index()  # [2, num_edges * 2]
 
         # Robot features
         robot_features = []
@@ -580,7 +588,7 @@ class GAPOTaskAssignmentEnv(gym.Env):
                     robot.current_node_index,
                     current_task.to_location_index,
                     self.graph_state,
-                    self.num_nodes
+                    len(self.graph_state.nodes)
                 )
                 battery_needed = distance * 0.001
                 if robot.battery_level < battery_needed:
@@ -598,7 +606,7 @@ class GAPOTaskAssignmentEnv(gym.Env):
             start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
 
         path, distance = dijkstra_shortest_path(
-            start_node, task.to_location_index, self.graph_state, self.num_nodes
+            start_node, task.to_location_index, self.graph_state, len(self.graph_state.nodes)
         )
 
         simulator.set_path(path, task.task_id, task.num_items)
@@ -666,7 +674,7 @@ class GAPOTaskAssignmentEnv(gym.Env):
 
         start_node = robot.current_node_index or 0
         path, distance = dijkstra_shortest_path(
-            start_node, task.to_location_index, self.graph_state, self.num_nodes
+            start_node, task.to_location_index, self.graph_state, len(self.graph_state.nodes)
         )
         reward -= 0.1 * distance
 

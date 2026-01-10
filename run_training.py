@@ -24,6 +24,11 @@ import numpy as np
 from pathlib import Path
 import time
 import argparse
+from tqdm import tqdm
+import sys
+import logging
+import json
+from datetime import datetime
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.environment.graph.graph_state import GraphState
@@ -60,8 +65,6 @@ def parse_args():
                         help='Learning rate (default: 0.0003)')
     parser.add_argument('--hidden-dim', type=int, default=64,
                         help='Hidden dimension for GNN (default: 64)')
-    parser.add_argument('--no-gnn', action='store_true',
-                        help='Disable GNN encoders (use MLP fallback)')
     parser.add_argument('--no-debiasing', action='store_true',
                         help='Disable de-biasing loss')
 
@@ -76,6 +79,20 @@ def parse_args():
                         help='Number of robots (default: read from config or 5)')
     parser.add_argument('--max-episode-time', type=float, default=28800.0,
                         help='Max episode time in seconds (default: 28800 = 8 hours)')
+
+    # Logging and output (important for GPU clusters)
+    parser.add_argument('--output-dir', type=str, default='outputs',
+                        help='Directory for checkpoints and logs (default: outputs)')
+    parser.add_argument('--exp-name', type=str, default=None,
+                        help='Experiment name (default: auto-generated timestamp)')
+    parser.add_argument('--log-file', action='store_true',
+                        help='Enable logging to file (important for cluster jobs)')
+    parser.add_argument('--log-interval', type=int, default=10,
+                        help='Logging interval in iterations (default: 10)')
+    parser.add_argument('--save-interval', type=int, default=100,
+                        help='Model save interval in iterations (default: 100)')
+    parser.add_argument('--disable-tqdm', action='store_true',
+                        help='Disable progress bars (useful for cluster log files)')
 
     return parser.parse_args()
 
@@ -176,15 +193,102 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
     return env, num_nodes
 
 
+def setup_logging_and_output(args):
+    """
+    Setup logging, output directories, and system monitoring for GPU cluster training.
+
+    Returns:
+        logger: Configured logger
+        output_dir: Path to output directory
+        exp_name: Experiment name
+    """
+    # Generate experiment name if not provided
+    if args.exp_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.exp_name = f"gapo_{timestamp}"
+
+    # Create output directory
+    output_dir = Path(args.output_dir) / args.exp_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create subdirectories
+    (output_dir / "checkpoints").mkdir(exist_ok=True)
+    (output_dir / "logs").mkdir(exist_ok=True)
+    (output_dir / "metrics").mkdir(exist_ok=True)
+
+    # Setup logger
+    logger = logging.getLogger('GAPO_Training')
+    logger.setLevel(logging.INFO)
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s',
+                                         datefmt='%Y-%m-%d %H:%M:%S')
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    # File handler (if enabled)
+    if args.log_file:
+        log_file = output_dir / "logs" / "training.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        file_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s',
+                                          datefmt='%Y-%m-%d %H:%M:%S')
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+        logger.info(f"Logging to file: {log_file}")
+
+    # Log system information
+    logger.info("="*80)
+    logger.info("GAPO Training Session")
+    logger.info("="*80)
+    logger.info(f"Experiment: {args.exp_name}")
+    logger.info(f"Output Directory: {output_dir}")
+
+    # GPU information
+    if torch.cuda.is_available():
+        logger.info(f"GPU Available: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA Version: {torch.version.cuda}")
+        logger.info(f"Number of GPUs: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            logger.info(f"  GPU {i}: {props.name} ({props.total_memory / 1e9:.2f} GB)")
+    else:
+        logger.info("GPU: Not available, using CPU")
+
+    # Save configuration
+    config_dict = vars(args)
+    config_file = output_dir / "config.json"
+    with open(config_file, 'w') as f:
+        json.dump(config_dict, f, indent=2, default=str)
+    logger.info(f"Configuration saved to: {config_file}")
+    logger.info("="*80)
+
+    return logger, output_dir, args.exp_name
+
+
+def log_gpu_memory(logger):
+    """Log current GPU memory usage."""
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            allocated = torch.cuda.memory_allocated(i) / 1e9
+            reserved = torch.cuda.memory_reserved(i) / 1e9
+            logger.info(f"GPU {i} Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+
+
 def main():
     # Parse command-line arguments
     args = parse_args()
+
+    # Setup logging and output directories
+    logger, output_dir, exp_name = setup_logging_and_output(args)
 
     # Set random seed if provided
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
-        print(f"Random seed set to: {args.seed}")
+        logger.info(f"Random seed set to: {args.seed}")
 
     ############## Load Configs ##############
     use_curriculum = args.curriculum != 'none'
@@ -195,12 +299,12 @@ def main():
             raise FileNotFoundError(f"Config file not found: {args.config}")
         curriculum_configs = [(args.config, Path(args.config).stem)]
         use_curriculum = False
-        print(f"Single-config mode: {args.config}")
+        logger.info(f"Single-config mode: {args.config}")
 
     elif args.config_list:
         # Explicit list of configs for curriculum
         curriculum_configs = load_curriculum_from_configs(args.config_list)
-        print(f"Multi-config mode: {len(curriculum_configs)} configs specified")
+        logger.info(f"Multi-config mode: {len(curriculum_configs)} configs specified")
 
     elif args.configs_dir:
         # Load all configs from directory
@@ -208,7 +312,7 @@ def main():
         if not available_configs:
             raise ValueError(f"No config files found in directory: {args.configs_dir}")
         curriculum_configs = load_curriculum_from_configs(available_configs)
-        print(f"Curriculum mode: {len(curriculum_configs)} configs from {args.configs_dir}")
+        logger.info(f"Curriculum mode: {len(curriculum_configs)} configs from {args.configs_dir}")
 
     else:
         raise ValueError("Must specify --config, --config-list, or --configs-dir")
@@ -232,7 +336,6 @@ def main():
     # GAPO parameters
     hidden_dim = args.hidden_dim
     num_attention_heads = 4
-    use_gnn = not args.no_gnn
     use_debiasing = not args.no_debiasing
 
     # PPO parameters
@@ -247,8 +350,8 @@ def main():
     max_training_iterations = args.iterations
     rollout_steps = 2000
     timesteps_per_decision = 60.0
-    save_interval = 100
-    log_interval = 10
+    save_interval = args.save_interval
+    log_interval = args.log_interval
 
     # Device
     if args.device == 'auto':
@@ -256,24 +359,26 @@ def main():
     else:
         device = args.device
 
-    # Create checkpoint directory
-    checkpoint_dir = Path("checkpoints/gapo")
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    # Use output directory from setup
+    checkpoint_dir = output_dir / "checkpoints"
 
-    print("=" * 80)
-    print("GAPO TRAINING - Real Hospital Configs with Category Tracking")
-    print("=" * 80)
-    print(f"Device: {device}")
-    print(f"GNN Enabled: {use_gnn}")
-    print(f"De-biasing Enabled: {use_debiasing}")
-    print(f"Hidden Dimension: {hidden_dim}")
-    print(f"Attention Heads: {num_attention_heads}")
-    print(f"Learning Rate: {lr}")
-    print(f"De-bias Lambda: {lambda_debias}")
+    logger.info("\n" + "=" * 80)
+    logger.info("GAPO TRAINING - Hospital Robot Task Assignment")
+    logger.info("=" * 80)
+    logger.info(f"Device: {device}")
+    logger.info(f"De-biasing Enabled: {use_debiasing}")
+    logger.info(f"Hidden Dimension: {hidden_dim}")
+    logger.info(f"Attention Heads: {num_attention_heads}")
+    logger.info(f"Learning Rate: {lr}")
+    logger.info(f"De-bias Lambda: {lambda_debias}")
+    logger.info(f"Max Iterations: {max_training_iterations}")
+    logger.info(f"Rollout Steps: {rollout_steps}")
+    logger.info(f"Save Interval: {save_interval}")
+    logger.info(f"Log Interval: {log_interval}")
 
     if use_curriculum:
-        print(f"\nCurriculum Learning: Enabled ({curriculum_schedule} schedule)")
-        print(f"  Stages: {len(curriculum_configs)} configurations")
+        logger.info(f"\nCurriculum Learning: Enabled ({curriculum_schedule} schedule)")
+        logger.info(f"  Stages: {len(curriculum_configs)} configurations")
         if curriculum_schedule == 'fixed':
             print(f"  Switch interval: {config_switch_interval} iterations")
         elif curriculum_schedule == 'adaptive':
@@ -329,9 +434,9 @@ def main():
 
     # Create GAPO PPO
     ppo = GAPOPPO(
-        node_continuous_dim=18,  # Enhanced with category info
+        node_continuous_dim=15,  # Enhanced with category info
         num_node_types=4,
-        edge_feat_dim=15,  # Enhanced with congestion info
+        edge_feat_dim=12,  # 12 continuous edge features (distance, width, velocity, etc.)
         robot_feat_dim=12,
         task_feat_dim=12,
         hidden_dim=hidden_dim,
@@ -340,7 +445,6 @@ def main():
         gamma=gamma,
         K_epochs=K_epochs,
         eps_clip=eps_clip,
-        use_gnn=use_gnn,
         use_debiasing=use_debiasing,
         lambda_debias=lambda_debias,
         lambda_gae=lambda_gae,
@@ -355,15 +459,30 @@ def main():
     total_timesteps = 0
     iterations_on_current_config = 0
 
-    print("\nStarting Training...")
-    print("-" * 80)
+    logger.info("\nStarting Training...")
+    logger.info("-" * 80)
+
+    # Log initial GPU memory
+    log_gpu_memory(logger)
 
     start_time = time.time()
 
     # Initialize environment
     state_dict = env.reset()
 
-    for iteration in range(1, max_training_iterations + 1):
+    # Progress bar for training iterations (disable if requested for cluster logs)
+    if args.disable_tqdm:
+        pbar_iter = range(1, max_training_iterations + 1)
+        # Dummy object with set_postfix method
+        class DummyPbar:
+            def set_postfix(self, *args, **kwargs): pass
+            def close(self): pass
+        pbar = DummyPbar()
+    else:
+        pbar_iter = tqdm(range(1, max_training_iterations + 1), desc="Training", unit="iter")
+        pbar = pbar_iter
+
+    for iteration in (pbar_iter if not args.disable_tqdm else pbar_iter):
         iterations_on_current_config += 1
         iteration_reward = 0.0
         num_assignments = 0
@@ -371,21 +490,31 @@ def main():
         iteration_start_time = time.time()
 
         # Collect rollout_steps timesteps of experience
-        for step in range(rollout_steps):
+        if args.disable_tqdm:
+            rollout_pbar_iter = range(rollout_steps)
+            class DummyRolloutPbar:
+                def set_postfix(self, *args, **kwargs): pass
+                def close(self): pass
+            rollout_pbar = DummyRolloutPbar()
+        else:
+            rollout_pbar_iter = tqdm(range(rollout_steps), desc=f"  Rollout", unit="step", leave=False)
+            rollout_pbar = rollout_pbar_iter
+        for step in rollout_pbar:
             total_timesteps += 1
 
             # Autoregressive task assignment phase
             while len(env.pending_tasks) > 0:
                 task = env.pending_tasks[0]
 
-                # Build action mask
-                action_mask = np.ones(env.num_robots + 1, dtype=bool)
+                # Build robot availability mask (without HOLD action)
+                # HOLD action is always available and will be added by the policy
+                robot_mask = np.ones(env.num_robots, dtype=bool)
                 for i, robot in enumerate(env.robots):
                     if not robot.can_accept_items(task.num_items):
-                        action_mask[i] = False
+                        robot_mask[i] = False
 
                 # Select action
-                action = ppo.select_action(state_dict, memory, action_mask)
+                action = ppo.select_action(state_dict, memory, robot_mask)
 
                 # Handle HOLD action
                 if action == env.num_robots:
@@ -410,6 +539,13 @@ def main():
                 memory.rewards.append(reward)
                 memory.is_terminals.append(False)
 
+            # Update rollout progress bar
+            rollout_pbar.set_postfix({
+                'pending': len(env.pending_tasks),
+                'assigned': num_assignments,
+                'holds': num_holds
+            })
+
             # Simulation time step
             state_dict, step_reward, done, info = env.step(Δt=timesteps_per_decision)
 
@@ -420,6 +556,9 @@ def main():
 
             if done:
                 state_dict = env.reset()
+
+        # Close rollout progress bar
+        rollout_pbar.close()
 
         # Update policy
         next_state_dict = state_dict
@@ -452,10 +591,10 @@ def main():
 
         if should_switch_config:
             current_config_idx += 1
-            print(f"\n{'='*80}")
-            print(f"CURRICULUM ADVANCE: Moving to config {current_config_idx + 1}/{len(curriculum_configs)}")
-            print(f"  Previous config avg reward: {np.mean(config_rewards[-20:]):.2f}")
-            print(f"{'='*80}\n")
+            tqdm.write(f"\n{'='*80}")
+            tqdm.write(f"CURRICULUM ADVANCE: Moving to config {current_config_idx + 1}/{len(curriculum_configs)}")
+            tqdm.write(f"  Previous config avg reward: {np.mean(config_rewards[-20:]):.2f}")
+            tqdm.write(f"{'='*80}\n")
 
             env, current_config_desc = create_env_with_config(current_config_idx)
             state_dict = env.reset()
@@ -463,45 +602,58 @@ def main():
             config_rewards = []
             iterations_on_current_config = 0
 
+        # Update progress bar with current metrics
+        pbar.set_postfix({
+            'reward': f'{iteration_reward:.2f}',
+            'running': f'{running_reward:.2f}',
+            'assigned': num_assignments,
+            'holds': num_holds,
+            'completed': len(env.completed_tasks)
+        })
+
         # Logging
         if iteration % log_interval == 0:
             avg_reward = np.mean(iteration_rewards[-log_interval:])
             loss_info = ppo.get_last_loss_info()
 
-            print(f"\nIteration {iteration}")
+            # Use tqdm.write() to avoid interfering with progress bar
+            tqdm.write(f"\nIteration {iteration}")
             if use_curriculum:
-                print(f"  Config: {current_config_idx + 1}/{len(curriculum_configs)} - {current_config_desc}")
-                print(f"  Iterations on config: {iterations_on_current_config}")
-            print(f"  Iteration Reward: {iteration_reward:.2f}")
-            print(f"  Avg Reward ({log_interval} iters): {avg_reward:.2f}")
-            print(f"  Running Reward: {running_reward:.2f}")
-            print(f"  Tasks Assigned: {num_assignments}")
-            print(f"  Tasks Deferred (HOLD): {num_holds}")
-            print(f"  Total Timesteps: {total_timesteps}")
-            print(f"  Simulation Time: {env.current_time / 3600:.2f} hours")
-            print(f"  Pending Tasks: {len(env.pending_tasks)}")
-            print(f"  Completed Tasks: {len(env.completed_tasks)}")
-            print(f"  Iteration Time: {iteration_time:.2f}s")
+                tqdm.write(f"  Config: {current_config_idx + 1}/{len(curriculum_configs)} - {current_config_desc}")
+                tqdm.write(f"  Iterations on config: {iterations_on_current_config}")
+            tqdm.write(f"  Iteration Reward: {iteration_reward:.2f}")
+            tqdm.write(f"  Avg Reward ({log_interval} iters): {avg_reward:.2f}")
+            tqdm.write(f"  Running Reward: {running_reward:.2f}")
+            tqdm.write(f"  Tasks Assigned: {num_assignments}")
+            tqdm.write(f"  Tasks Deferred (HOLD): {num_holds}")
+            tqdm.write(f"  Total Timesteps: {total_timesteps}")
+            tqdm.write(f"  Simulation Time: {env.current_time / 3600:.2f} hours")
+            tqdm.write(f"  Pending Tasks: {len(env.pending_tasks)}")
+            tqdm.write(f"  Completed Tasks: {len(env.completed_tasks)}")
+            tqdm.write(f"  Iteration Time: {iteration_time:.2f}s")
 
             if loss_info:
-                print(f"\n  Loss Breakdown:")
-                print(f"    Total: {loss_info.get('total_loss', 0):.4f}")
-                print(f"    Actor: {loss_info.get('actor_loss', 0):.4f}")
-                print(f"    Critic: {loss_info.get('critic_loss', 0):.4f}")
-                print(f"    Entropy: {loss_info.get('entropy_loss', 0):.4f}")
+                tqdm.write(f"\n  Loss Breakdown:")
+                tqdm.write(f"    Total: {loss_info.get('total_loss', 0):.4f}")
+                tqdm.write(f"    Actor: {loss_info.get('actor_loss', 0):.4f}")
+                tqdm.write(f"    Critic: {loss_info.get('critic_loss', 0):.4f}")
+                tqdm.write(f"    Entropy: {loss_info.get('entropy_loss', 0):.4f}")
 
                 if use_debiasing:
-                    print(f"    De-bias Total: {loss_info.get('debias_loss', 0):.4f}")
-                    print(f"      - State Delta: {loss_info.get('state_delta', 0):.4f}")
-                    print(f"      - Consistency: {loss_info.get('consistency', 0):.4f}")
+                    tqdm.write(f"    De-bias Total: {loss_info.get('debias_loss', 0):.4f}")
+                    tqdm.write(f"      - State Delta: {loss_info.get('state_delta', 0):.4f}")
+                    tqdm.write(f"      - Consistency: {loss_info.get('consistency', 0):.4f}")
 
-            print("-" * 80)
+            tqdm.write("-" * 80)
 
         # Save model
         if iteration % save_interval == 0:
             save_path = checkpoint_dir / f"gapo_iter{iteration}.pth"
             ppo.save(str(save_path))
-            print(f"✓ Model saved to {save_path}\n")
+            tqdm.write(f"✓ Model saved to {save_path}\n")
+
+    # Close progress bar
+    pbar.close()
 
     total_time = time.time() - start_time
 

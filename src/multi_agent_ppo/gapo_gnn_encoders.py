@@ -6,19 +6,15 @@ Implements:
 - Robot Fleet Encoder (dynamic proximity graph)
 - Task Encoder
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Tuple, Optional
 
-try:
-    from torch_geometric.nn import GATConv, SAGEConv
-    TORCH_GEOMETRIC_AVAILABLE = True
-except ImportError:
-    TORCH_GEOMETRIC_AVAILABLE = False
-    print("WARNING: torch_geometric not installed. Install with: pip install torch-geometric")
-    print("Falling back to simple MLP encoders.")
+
+from torch_geometric.nn import GATConv, SAGEConv
 
 
 class HospitalGraphEncoder(nn.Module):
@@ -38,8 +34,7 @@ class HospitalGraphEncoder(nn.Module):
         num_node_types=4,
         edge_feat_dim=12,
         hidden_dim=64,
-        node_type_embedding_dim=8,
-        use_gnn=True
+        node_type_embedding_dim=8
     ):
         """
         Initialize Hospital Graph Encoder with enhanced feature extraction.
@@ -56,11 +51,9 @@ class HospitalGraphEncoder(nn.Module):
                  clutter_level, num_active_robots, has_patient_bed, current_weight, base_cost]
             hidden_dim: Hidden embedding dimension (default 64)
             node_type_embedding_dim: Dimension for node_type embeddings (default 8)
-            use_gnn: Whether to use GNN layers (requires torch_geometric)
         """
         super().__init__()
 
-        self.use_gnn = use_gnn and TORCH_GEOMETRIC_AVAILABLE
         self.hidden_dim = hidden_dim
         self.node_type_embedding_dim = node_type_embedding_dim
 
@@ -70,48 +63,34 @@ class HospitalGraphEncoder(nn.Module):
         # Total node feature dimension after concatenating continuous + embedded categorical
         node_input_dim = node_continuous_dim + node_type_embedding_dim  # 15 + 8 = 23
 
-        if self.use_gnn:
-            # PASS 1: Initial node encoding
-            self.gat1 = GATConv(
-                in_channels=node_input_dim,
-                out_channels=hidden_dim // 4,
-                heads=4,
-                concat=True,
-                edge_dim=edge_feat_dim
-            )
+        self.gat1 = GATConv(
+            in_channels=node_input_dim,
+            out_channels=hidden_dim // 4,
+            heads=4,
+            concat=True,
+            edge_dim=edge_feat_dim
+        )
 
-            # Edge feature dimension after augmentation:
-            # Original 12 + from_node_embedding (64) + to_node_embedding (64) = 140
-            augmented_edge_dim = edge_feat_dim + hidden_dim + hidden_dim
+        # Edge feature dimension after augmentation:
+        # Original 12 + from_node_embedding (64) + to_node_embedding (64) = 140
+        augmented_edge_dim = edge_feat_dim + hidden_dim + hidden_dim
 
-            # PASS 2: Refine nodes with augmented edge features
-            self.gat2 = GATConv(
-                in_channels=hidden_dim,
-                out_channels=hidden_dim,
-                heads=1,
-                concat=False,
-                edge_dim=augmented_edge_dim
-            )
+        # PASS 2: Refine nodes with augmented edge features
+        self.gat2 = GATConv(
+            in_channels=hidden_dim,
+            out_channels=hidden_dim,
+            heads=1,
+            concat=False,
+            edge_dim=augmented_edge_dim
+        )
 
-            # Edge feature encoder (for final edge embeddings)
-            self.edge_encoder = nn.Sequential(
-                nn.Linear(augmented_edge_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim)
-            )
-        else:
-            # Fallback: Simple MLP encoder
-            self.node_encoder = nn.Sequential(
-                nn.Linear(node_input_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim)
-            )
+        # Edge feature encoder (for final edge embeddings)
+        self.edge_encoder = nn.Sequential(
+            nn.Linear(augmented_edge_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
 
-            self.edge_encoder = nn.Sequential(
-                nn.Linear(edge_feat_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim)
-            )
 
     def forward(
         self,
@@ -142,36 +121,44 @@ class HospitalGraphEncoder(nn.Module):
         # Concatenate continuous + embedded categorical
         node_features = torch.cat([node_continuous, node_type_embeds], dim=-1)  # [num_nodes, 23]
 
-        if self.use_gnn and edge_index is not None:
-            # PASS 1: Initial node encoding
-            x = self.gat1(node_features, edge_index, edge_attr=edge_features)
-            x = F.elu(x)
-            node_embeddings_pass1 = x  # [num_nodes, 64]
+        # Validate edge_node_indices format
+        if edge_node_indices.dim() != 2:
+            raise ValueError(f"edge_node_indices must be 2D, got {edge_node_indices.shape}")
 
-            # Augment edges with from/to node embeddings
-            from_node_embeds = node_embeddings_pass1[edge_node_indices[:, 0]]  # [num_edges, 64]
-            to_node_embeds = node_embeddings_pass1[edge_node_indices[:, 1]]    # [num_edges, 64]
+        if edge_node_indices.shape[1] != 2:
+            raise ValueError(f"edge_node_indices must be [num_edges, 2], got {edge_node_indices.shape}")
 
-            augmented_edge_features = torch.cat([
-                edge_features,      # [num_edges, 12]
-                from_node_embeds,   # [num_edges, 64]
-                to_node_embeds      # [num_edges, 64]
-            ], dim=-1)  # [num_edges, 140]
+        # Validate edge_index format (should be [2, num_edges_bidirectional])
+        if edge_index is None:
+            raise ValueError("edge_index must be provided for GNN message passing")
 
-            # PASS 2: Refine nodes with augmented edges
-            node_embeddings = self.gat2(
-                node_embeddings_pass1,
-                edge_index,
-                edge_attr=augmented_edge_features
-            )  # [num_nodes, 64]
+        if edge_index.shape[0] != 2:
+            raise ValueError(f"edge_index must be [2, num_edges], got {edge_index.shape}")
 
-            # Final edge embeddings
-            edge_embeddings = self.edge_encoder(augmented_edge_features)  # [num_edges, 64]
+        # PASS 1: Initial node encoding
+        x = self.gat1(node_features, edge_index, edge_attr=edge_features)
+        x = F.elu(x)
+        node_embeddings_pass1 = x  # [num_nodes, 64]
 
-        else:
-            # MLP encoding (fallback)
-            node_embeddings = self.node_encoder(node_features)
-            edge_embeddings = self.edge_encoder(edge_features)
+        # Augment edges with from/to node embeddings
+        from_node_embeds = node_embeddings_pass1[edge_node_indices[:, 0]]  # [num_edges, 64]
+        to_node_embeds = node_embeddings_pass1[edge_node_indices[:, 1]]    # [num_edges, 64]
+
+        augmented_edge_features = torch.cat([
+            edge_features,      # [num_edges, 12]
+            from_node_embeds,   # [num_edges, 64]
+            to_node_embeds      # [num_edges, 64]
+        ], dim=-1)  # [num_edges, 140]
+
+        # PASS 2: Refine nodes with augmented edges
+        node_embeddings = self.gat2(
+            node_embeddings_pass1,
+            edge_index,
+            edge_attr=augmented_edge_features
+        )  # [num_nodes, 64]
+
+        # Final edge embeddings
+        edge_embeddings = self.edge_encoder(augmented_edge_features)  # [num_edges, 64]
 
         # Global graph embedding (mean pooling)
         graph_embedding = torch.mean(node_embeddings, dim=0)
@@ -187,32 +174,23 @@ class RobotFleetEncoder(nn.Module):
     Output: Robot embeddings + fleet embedding
     """
 
-    def __init__(self, robot_feat_dim=12, hidden_dim=64, use_gnn=True):
+    def __init__(self, robot_feat_dim=12, hidden_dim=64):
         super().__init__()
 
-        self.use_gnn = use_gnn and TORCH_GEOMETRIC_AVAILABLE
         self.hidden_dim = hidden_dim
 
-        if self.use_gnn:
-            # GraphSAGE for variable number of robots
-            self.sage1 = SAGEConv(
-                in_channels=robot_feat_dim,
-                out_channels=hidden_dim,
-                aggr='mean'
-            )
+        # GraphSAGE for variable number of robots
+        self.sage1 = SAGEConv(
+            in_channels=robot_feat_dim,
+            out_channels=hidden_dim,
+            aggr='mean'
+        )
 
-            self.sage2 = SAGEConv(
-                in_channels=hidden_dim,
-                out_channels=hidden_dim,
-                aggr='mean'
-            )
-        else:
-            # Fallback: Simple MLP
-            self.robot_encoder = nn.Sequential(
-                nn.Linear(robot_feat_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim)
-            )
+        self.sage2 = SAGEConv(
+            in_channels=hidden_dim,
+            out_channels=hidden_dim,
+            aggr='mean'
+        )
 
     def forward(
         self,
@@ -230,20 +208,21 @@ class RobotFleetEncoder(nn.Module):
             robot_embeddings: [num_robots, hidden_dim]
             fleet_embedding: [hidden_dim]
         """
-        if self.use_gnn and robot_positions is not None:
+        if robot_positions is not None:
             # Build proximity graph
-            proximity_edges = self._build_proximity_graph(
+            edge_index = self._build_proximity_graph(
                 robot_positions,
                 threshold=proximity_threshold
             )
-
-            # GNN encoding
-            x = self.sage1(robot_features, proximity_edges)
-            x = F.relu(x)
-            robot_embeddings = self.sage2(x, proximity_edges)
         else:
-            # MLP encoding (fallback)
-            robot_embeddings = self.robot_encoder(robot_features)
+            num_robots = robot_features.shape[0]
+            edge_index = torch.arange(num_robots, device=robot_features.device)
+            edge_index = torch.stack([edge_index, edge_index], dim=0)
+
+        # GNN encoding
+        x = self.sage1(robot_features, edge_index)
+        x = F.relu(x)
+        robot_embeddings = self.sage2(x, edge_index)
 
         # Global fleet embedding (mean pooling)
         fleet_embedding = torch.mean(robot_embeddings, dim=0)
@@ -327,8 +306,7 @@ def test_encoders():
         num_node_types=4,
         edge_feat_dim=12,
         hidden_dim=64,
-        node_type_embedding_dim=8,
-        use_gnn=True
+        node_type_embedding_dim=8
     )
 
     node_continuous = torch.randn(10, 15)  # 10 nodes, 15 continuous features

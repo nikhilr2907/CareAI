@@ -33,7 +33,6 @@ class GAPOPolicyNetwork(nn.Module):
         task_feat_dim=12,
         hidden_dim=64,
         num_attention_heads=4,
-        use_gnn=True,
         use_debiasing=True,
         lambda_state_delta=0.1,
         lambda_consistency=0.05
@@ -49,12 +48,11 @@ class GAPOPolicyNetwork(nn.Module):
             num_node_types=num_node_types,
             edge_feat_dim=edge_feat_dim,
             hidden_dim=hidden_dim,
-            node_type_embedding_dim=node_type_embedding_dim,
-            use_gnn=use_gnn
+            node_type_embedding_dim=node_type_embedding_dim
         )
 
         self.robot_encoder = RobotFleetEncoder(
-            robot_feat_dim, hidden_dim, use_gnn
+            robot_feat_dim, hidden_dim
         )
 
         self.task_encoder = TaskEncoder(
@@ -201,7 +199,7 @@ class GAPOPolicyNetwork(nn.Module):
             # Extend mask for HOLD action (always available)
             extended_mask = torch.cat([
                 robot_availability_mask,
-                torch.tensor([True])
+                torch.tensor([True], dtype=torch.bool, device=robot_availability_mask.device)
             ])
 
             action_logits = action_logits.masked_fill(~extended_mask, float('-inf'))
@@ -255,7 +253,10 @@ class GAPOPolicyNetwork(nn.Module):
 
             # Apply mask
             if mask is not None:
-                extended_mask = torch.cat([mask, torch.tensor([True])])
+                extended_mask = torch.cat([
+                    mask,
+                    torch.tensor([True], dtype=torch.bool, device=mask.device)
+                ])
                 action_logits = action_logits.masked_fill(~extended_mask, float('-inf'))
 
             # Compute log prob
@@ -325,7 +326,6 @@ def test_gapo_policy():
         robot_feat_dim=12,
         task_feat_dim=12,
         hidden_dim=64,
-        use_gnn=True,
         use_debiasing=True
     )
 
