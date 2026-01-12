@@ -84,8 +84,19 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
     def reset(self):
         """Reset environment and return initial state dict."""
-        # Initialize graph (use custom config if provided)
-        self.graph_state = GraphState(config=self.hospital_config)
+        # Initialize graph (use custom graph if provided, otherwise use config)
+        if hasattr(self, '_custom_graph_state') and self._custom_graph_state is not None:
+            # Use the custom graph state (from config file)
+            # Note: Reusing the same graph_state object, so inventory persists across episodes
+            self.graph_state = self._custom_graph_state
+
+            # Reset edge congestion states
+            for edge in self.graph_state.edges:
+                edge.active_robot_ids = []
+                edge.current_weight = edge.distance_m / edge.max_v_ms
+        else:
+            # Create new graph from hospital_config or default
+            self.graph_state = GraphState(config=self.hospital_config)
 
         # Initialize robots
         self.robots = []

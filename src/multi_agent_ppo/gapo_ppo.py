@@ -9,9 +9,9 @@ Implements PPO training for GAPO policy network with:
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import numpy as np
-from tqdm import tqdm
+import logging
 
 from .gapo_policy import GAPOPolicyNetwork
 
@@ -57,7 +57,8 @@ class GAPOPPO:
         use_debiasing=True,
         lambda_debias=0.1,
         lambda_gae=0.95,
-        device='cpu'
+        device='cpu',
+        logger: Optional[logging.Logger] = None
     ):
         self.gamma = gamma
         self.eps_clip = eps_clip
@@ -65,6 +66,7 @@ class GAPOPPO:
         self.lambda_gae = lambda_gae
         self.use_debiasing = use_debiasing
         self.device = torch.device(device)
+        self.logger = logger if logger is not None else logging.getLogger(__name__)
 
         # GAPO policy network
         self.policy = GAPOPolicyNetwork(
@@ -235,9 +237,10 @@ class GAPOPPO:
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
 
+        self.logger.info(f"  Starting PPO update ({self.K_epochs} epochs)...")
+
         # Optimize policy for K epochs
-        epoch_pbar = tqdm(range(self.K_epochs), desc="    PPO Update", unit="epoch", leave=False)
-        for epoch in epoch_pbar:
+        for epoch in range(self.K_epochs):
             # Evaluate actions
             logprobs, state_values, dist_entropy = self.policy.evaluate_actions(
                 state_dict_tensors,
@@ -273,20 +276,23 @@ class GAPOPPO:
             # Total loss
             loss = actor_loss + critic_loss + entropy_loss + debias_loss
 
-            # Update progress bar with loss info
-            epoch_pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'actor': f'{actor_loss.item():.4f}',
-                'critic': f'{critic_loss.item():.4f}'
-            })
-
             # Take gradient step
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
             self.optimizer.step()
 
-            # Log losses (first epoch only)
+            # Log losses for each epoch
+            self.logger.info(
+                f"    Epoch {epoch+1}/{self.K_epochs}: "
+                f"Loss={loss.item():.4f} | "
+                f"Actor={actor_loss.item():.4f} | "
+                f"Critic={critic_loss.item():.4f} | "
+                f"Entropy={entropy_loss.item():.4f}" +
+                (f" | Debias={debias_loss.item():.4f}" if self.use_debiasing else "")
+            )
+
+            # Store last loss info (for backward compatibility)
             if epoch == 0:
                 self.last_loss_info = {
                     'total_loss': loss.item(),
@@ -297,8 +303,7 @@ class GAPOPPO:
                     **debias_breakdown
                 }
 
-        # Close epoch progress bar
-        epoch_pbar.close()
+        self.logger.info(f"  PPO update completed.")
 
         # Copy new weights to old policy
         self.policy_old.load_state_dict(self.policy.state_dict())
