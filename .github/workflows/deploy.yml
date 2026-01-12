@@ -1,0 +1,54 @@
+name: Deploy to IC GPU cluster
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_KEY }}
+
+      - name: Configure SSH jump host
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          cat > ~/.ssh/config << 'EOF'
+          Host ic-shell
+              HostName shell1.doc.ic.ac.uk
+              User nr125
+              ForwardAgent yes
+
+          Host ic-gpu3
+              HostName gpucluster3.doc.ic.ac.uk
+              User nr125
+              ProxyJump ic-shell
+              ForwardAgent yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Add host keys
+        run: |
+          ssh-keyscan -H shell1.doc.ic.ac.uk gpucluster3.doc.ic.ac.uk >> ~/.ssh/known_hosts
+
+      - name: Sync repo to server
+        run: |
+          rsync -az --delete \
+            --exclude ".git/" \
+            --exclude ".github/" \
+            -e "ssh -F ~/.ssh/config" \
+            ./ ic-gpu3:/vol/bitbucket/nr125/project_code
+
+      - name: Submit training job (optional)
+        if: ${{ secrets.RUN_SBATCH == 'true' }}
+        run: |
+          ssh -F ~/.ssh/config ic-shell \
+            "cd /vol/bitbucket/nr125/project_code && sbatch train_gpu.sh"
