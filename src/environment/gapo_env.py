@@ -93,7 +93,6 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             # Reset edge congestion states
             for edge in self.graph_state.edges:
                 edge.active_robot_ids = []
-                edge.current_weight = edge.distance_m / edge.max_v_ms
         else:
             # Create new graph from hospital_config or default
             self.graph_state = GraphState(config=self.hospital_config)
