@@ -81,6 +81,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         # Episode metrics
         self.episode_stockouts = 0
         self.cumulative_reward = 0.0
+        self.episode_collisions = 0
+        self.last_collision_count = 0
 
     def reset(self):
         """Reset environment and return initial state dict."""
@@ -141,6 +143,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         # Reset metrics
         self.episode_stockouts = 0
         self.cumulative_reward = 0.0
+        self.episode_collisions = 0
+        self.last_collision_count = 0
 
         return self._get_state_dict()
 
@@ -219,6 +223,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             'completed_tasks': len(completed_tasks),
             'total_robot_tasks': sum(r.num_queued_tasks for r in self.robots),
             'stockouts': sum(1 for n in self.graph_state.nodes if n.is_stockout),
+            'collisions': self.last_collision_count,
             'cumulative_reward': self.cumulative_reward
         }
 
@@ -403,6 +408,28 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             loads = [robot.current_load for robot in self.robots]
             load_variance = np.var(loads)
             reward -= 0.1 * load_variance
+
+        # 5. Collision penalty (robots too close)
+        collision_distance_m = 0.5
+        collision_count = 0
+        for i in range(len(self.robots)):
+            ri = self.robots[i]
+            if not ri.telemetry:
+                continue
+            for j in range(i + 1, len(self.robots)):
+                rj = self.robots[j]
+                if not rj.telemetry:
+                    continue
+                dx = ri.telemetry.x - rj.telemetry.x
+                dy = ri.telemetry.y - rj.telemetry.y
+                if (dx * dx + dy * dy) ** 0.5 < collision_distance_m:
+                    collision_count += 1
+
+        if collision_count > 0:
+            reward -= 5.0 * collision_count
+
+        self.episode_collisions += collision_count
+        self.last_collision_count = collision_count
 
         return reward
 

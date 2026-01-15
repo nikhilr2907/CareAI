@@ -45,6 +45,8 @@ class TaskRobotAttention(nn.Module):
             robot_context: [embed_dim] - attended robot context
             attention_weights: [num_robots] - attention distribution
         """
+        input_batched = task_embedding.dim() > 1
+
         # Ensure task embedding has batch dimension
         if task_embedding.dim() == 1:
             task_embedding = task_embedding.unsqueeze(0).unsqueeze(0)
@@ -79,9 +81,13 @@ class TaskRobotAttention(nn.Module):
         # Normalize
         attn_output = self.layer_norm(attn_output)
 
-        # Remove batch/sequence dimensions
-        robot_context = attn_output.squeeze(1).squeeze(0)  # [embed_dim]
-        attention_weights = attn_weights.squeeze(0).squeeze(0)  # [num_robots]
+        # Remove sequence dimension
+        robot_context = attn_output.squeeze(1)  # [batch, embed_dim]
+        attention_weights = attn_weights.squeeze(1)  # [batch, num_robots]
+
+        if not input_batched:
+            robot_context = robot_context.squeeze(0)  # [embed_dim]
+            attention_weights = attention_weights.squeeze(0)  # [num_robots]
 
         return robot_context, attention_weights
 
@@ -118,6 +124,8 @@ class TaskNodeAttention(nn.Module):
             node_context: [embed_dim] - attended node context
             attention_weights: [num_nodes] - attention distribution
         """
+        input_batched = task_embedding.dim() > 1
+
         # Ensure task embedding has batch dimension
         if task_embedding.dim() == 1:
             task_embedding = task_embedding.unsqueeze(0).unsqueeze(0)
@@ -140,9 +148,13 @@ class TaskNodeAttention(nn.Module):
         # Normalize
         attn_output = self.layer_norm(attn_output)
 
-        # Remove batch/sequence dimensions
-        node_context = attn_output.squeeze(1).squeeze(0)
-        attention_weights = attn_weights.squeeze(0).squeeze(0)
+        # Remove sequence dimension
+        node_context = attn_output.squeeze(1)
+        attention_weights = attn_weights.squeeze(1)
+
+        if not input_batched:
+            node_context = node_context.squeeze(0)
+            attention_weights = attention_weights.squeeze(0)
 
         return node_context, attention_weights
 
@@ -185,24 +197,39 @@ class RobotScorer(nn.Module):
         Returns:
             robot_scores: [num_robots]
         """
-        num_robots = robot_embeddings.shape[0]
+        if robot_embeddings.dim() == 2:
+            num_robots = robot_embeddings.shape[0]
 
-        # Expand task and contexts to match num_robots
-        task_expanded = task_embedding.unsqueeze(0).expand(num_robots, -1)
-        robot_context_expanded = robot_context.unsqueeze(0).expand(num_robots, -1)
-        node_context_expanded = node_context.unsqueeze(0).expand(num_robots, -1)
+            # Expand task and contexts to match num_robots
+            task_expanded = task_embedding.unsqueeze(0).expand(num_robots, -1)
+            robot_context_expanded = robot_context.unsqueeze(0).expand(num_robots, -1)
+            node_context_expanded = node_context.unsqueeze(0).expand(num_robots, -1)
 
-        # Combine robot features with task context
+            # Combine robot features with task context
+            combined = torch.cat([
+                robot_embeddings,           # Robot's own state
+                task_expanded,              # What task needs
+                robot_context_expanded,     # What other robots are doing
+                node_context_expanded,      # Spatial context (relevant locations)
+            ], dim=-1)  # [num_robots, embed_dim * 4]
+
+            # Score each robot
+            scores = self.scorer(combined).squeeze(-1)  # [num_robots]
+            return scores
+
+        batch_size, num_robots, _ = robot_embeddings.shape
+        task_expanded = task_embedding.unsqueeze(1).expand(batch_size, num_robots, -1)
+        robot_context_expanded = robot_context.unsqueeze(1).expand(batch_size, num_robots, -1)
+        node_context_expanded = node_context.unsqueeze(1).expand(batch_size, num_robots, -1)
+
         combined = torch.cat([
-            robot_embeddings,           # Robot's own state
-            task_expanded,              # What task needs
-            robot_context_expanded,     # What other robots are doing
-            node_context_expanded,      # Spatial context (relevant locations)
-        ], dim=-1)  # [num_robots, embed_dim * 4]
+            robot_embeddings,
+            task_expanded,
+            robot_context_expanded,
+            node_context_expanded,
+        ], dim=-1)  # [batch, num_robots, embed_dim * 4]
 
-        # Score each robot
-        scores = self.scorer(combined).squeeze(-1)  # [num_robots]
-
+        scores = self.scorer(combined).squeeze(-1)  # [batch, num_robots]
         return scores
 
 
@@ -263,7 +290,11 @@ class GAPOAttentionModule(nn.Module):
         )
 
         # Add HOLD action score
-        action_logits = torch.cat([robot_scores, self.hold_bias], dim=0)
+        if robot_scores.dim() == 1:
+            action_logits = torch.cat([robot_scores, self.hold_bias], dim=0)
+        else:
+            hold_bias = self.hold_bias.view(1, 1).expand(robot_scores.size(0), 1)
+            action_logits = torch.cat([robot_scores, hold_bias], dim=1)
 
         # Collect attention info for analysis
         attention_info = {

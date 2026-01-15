@@ -254,8 +254,17 @@ class ComprehensiveDebiasing(nn.Module):
                 action_logits_sequence,
                 task_similarity
             )
+            similarity_threshold = 0.7
+            upper_tri = torch.triu(task_similarity, diagonal=1)
+            similar_pairs = int((upper_tri > similarity_threshold).sum().item())
+            sim_mean = float(upper_tri[upper_tri > 0].mean().item()) if (upper_tri > 0).any() else 0.0
+            sim_max = float(upper_tri.max().item()) if upper_tri.numel() > 0 else 0.0
         else:
             consistency_loss = torch.tensor(0.0)
+            similarity_threshold = 0.7
+            similar_pairs = 0
+            sim_mean = 0.0
+            sim_max = 0.0
 
         # 3. Total loss
         total_loss = state_delta_loss + consistency_loss
@@ -263,7 +272,12 @@ class ComprehensiveDebiasing(nn.Module):
         loss_breakdown = {
             'state_delta': state_delta_loss.item(),
             'consistency': consistency_loss.item(),
-            'total_debias': total_loss.item()
+            'total_debias': total_loss.item(),
+            'debias_seq_len': len(task_features_sequence),
+            'debias_sim_threshold': similarity_threshold,
+            'debias_sim_pairs': similar_pairs,
+            'debias_sim_mean': sim_mean,
+            'debias_sim_max': sim_max
         }
 
         return total_loss, loss_breakdown

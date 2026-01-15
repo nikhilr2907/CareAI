@@ -238,43 +238,151 @@ class GAPOPolicyNetwork(nn.Module):
             entropy: [batch_size] - policy entropy
         """
         batch_size = len(state_dicts)
-
-        log_probs = []
-        state_values = []
-        entropies = []
-
-        for i in range(batch_size):
-            mask = robot_masks[i] if robot_masks else None
-
-            action_logits, state_value, _ = self.forward(
-                state_dicts[i],
-                robot_availability_mask=mask
+        if batch_size == 0:
+            return (
+                torch.tensor([], device=actions.device),
+                torch.tensor([], device=actions.device),
+                torch.tensor([], device=actions.device)
             )
 
-            # Apply mask
-            if mask is not None:
-                extended_mask = torch.cat([
-                    mask,
-                    torch.tensor([True], dtype=torch.bool, device=mask.device)
-                ])
-                action_logits = action_logits.masked_fill(~extended_mask, float('-inf'))
+        action_logits, state_values, _ = self._forward_batched(state_dicts, robot_masks)
 
-            # Compute log prob
-            action_probs = F.softmax(action_logits, dim=-1)
-            log_prob = F.log_softmax(action_logits, dim=-1)[actions[i]]
+        # Apply mask
+        if robot_masks is not None:
+            mask_list = []
+            num_robots = action_logits.shape[1] - 1
+            for mask in robot_masks:
+                if mask is None:
+                    mask_list.append(torch.ones(num_robots, dtype=torch.bool, device=actions.device))
+                else:
+                    mask_list.append(mask.to(actions.device))
+            mask_tensor = torch.stack(mask_list, dim=0)
 
-            # Compute entropy
-            entropy = -(action_probs * log_prob).sum()
+            extended_mask = torch.cat([
+                mask_tensor,
+                torch.ones(batch_size, 1, dtype=torch.bool, device=actions.device)
+            ], dim=1)
+            action_logits = action_logits.masked_fill(~extended_mask, float('-inf'))
 
-            log_probs.append(log_prob)
-            state_values.append(state_value)
-            entropies.append(entropy)
+        # Compute log prob
+        action_probs = F.softmax(action_logits, dim=-1)
+        log_probs = F.log_softmax(action_logits, dim=-1).gather(
+            1, actions.view(-1, 1)
+        ).squeeze(1)
 
-        log_probs = torch.stack(log_probs)
-        state_values = torch.stack(state_values).squeeze(-1)
-        entropies = torch.stack(entropies)
+        # Compute entropy
+        entropies = -(action_probs * torch.log(action_probs + 1e-8)).sum(dim=-1)
 
-        return log_probs, state_values, entropies
+        return log_probs, state_values.squeeze(-1), entropies
+
+    def _forward_batched(
+        self,
+        state_dicts: List[Dict[str, torch.Tensor]],
+        robot_masks: Optional[List[torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict]]:
+        """
+        Batched forward pass for PPO evaluation.
+        """
+        batch_size = len(state_dicts)
+        device = next(self.parameters()).device
+
+        # Shapes from first sample
+        num_nodes = state_dicts[0]['node_continuous'].shape[0]
+        num_edges = state_dicts[0]['edge_features'].shape[0]
+        num_robots = state_dicts[0]['robot_features'].shape[0]
+
+        # Stack per-sample inputs
+        node_continuous = torch.stack(
+            [sd['node_continuous'] for sd in state_dicts], dim=0
+        ).to(device)
+        node_categorical = torch.stack(
+            [sd['node_categorical'] for sd in state_dicts], dim=0
+        ).to(device)
+        edge_features = torch.stack(
+            [sd['edge_features'] for sd in state_dicts], dim=0
+        ).to(device)
+        edge_node_indices = torch.stack(
+            [sd['edge_node_indices'] for sd in state_dicts], dim=0
+        ).to(device)
+        edge_index = torch.stack(
+            [sd['edge_index'] for sd in state_dicts], dim=0
+        ).to(device)
+
+        robot_features = torch.stack(
+            [sd['robot_features'] for sd in state_dicts], dim=0
+        ).to(device)
+        robot_positions = None
+        if 'robot_positions' in state_dicts[0]:
+            robot_positions = torch.stack(
+                [sd['robot_positions'] for sd in state_dicts], dim=0
+            ).to(device)
+
+        task_features = torch.stack(
+            [sd['task_features'] for sd in state_dicts], dim=0
+        ).to(device)
+        queue_features = torch.stack(
+            [sd['queue_features'] for sd in state_dicts], dim=0
+        ).to(device)
+
+        # Build batched graph inputs via disjoint union
+        node_offsets = (torch.arange(batch_size, device=device) * num_nodes).view(-1, 1, 1)
+        edge_node_indices = (edge_node_indices + node_offsets).view(-1, 2)
+
+        edge_index = edge_index + node_offsets.view(-1, 1, 1)
+        edge_index = edge_index.permute(1, 0, 2).reshape(2, -1)
+
+        node_continuous = node_continuous.view(batch_size * num_nodes, -1)
+        node_categorical = node_categorical.view(batch_size * num_nodes, -1)
+        edge_features = edge_features.view(batch_size * num_edges, -1)
+
+        # Encode hospital graph
+        node_embeddings, _, _ = self.hospital_encoder(
+            node_continuous,
+            node_categorical,
+            edge_features,
+            edge_node_indices,
+            edge_index
+        )
+        node_embeddings = node_embeddings.view(batch_size, num_nodes, self.hidden_dim)
+        graph_embedding = torch.mean(node_embeddings, dim=1)
+
+        # Encode robots and tasks
+        robot_embeddings, fleet_embedding = self.robot_encoder(
+            robot_features,
+            robot_positions
+        )
+        task_embedding = self.task_encoder(task_features)
+
+        # Build mask tensor for attention
+        mask_tensor = None
+        if robot_masks is not None:
+            mask_list = []
+            for mask in robot_masks:
+                if mask is None:
+                    mask_list.append(torch.ones(num_robots, dtype=torch.bool, device=device))
+                else:
+                    mask_list.append(mask.to(device))
+            mask_tensor = torch.stack(mask_list, dim=0)
+
+        # Attention
+        action_logits, attention_info = self.attention_module(
+            task_embedding,
+            robot_embeddings,
+            node_embeddings,
+            mask_tensor
+        )
+
+        # Value estimation
+        global_state = torch.cat([
+            graph_embedding,
+            fleet_embedding,
+            task_embedding,
+            queue_features
+        ], dim=-1)
+
+        state_value = self.critic(global_state)
+
+        return action_logits, state_value, attention_info
 
     def compute_debias_loss(self) -> Tuple[torch.Tensor, Dict]:
         """

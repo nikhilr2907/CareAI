@@ -57,6 +57,7 @@ class GAPOPPO:
         use_debiasing=True,
         lambda_debias=0.1,
         lambda_gae=0.95,
+        normalize_returns=True,
         device='cpu',
         logger: Optional[logging.Logger] = None
     ):
@@ -65,8 +66,10 @@ class GAPOPPO:
         self.K_epochs = K_epochs
         self.lambda_gae = lambda_gae
         self.use_debiasing = use_debiasing
+        self.normalize_returns = normalize_returns
         self.device = torch.device(device)
         self.logger = logger if logger is not None else logging.getLogger(__name__)
+        self.critic_coef = 0.05
 
         # GAPO policy network
         self.policy = GAPOPolicyNetwork(
@@ -233,6 +236,8 @@ class GAPOPPO:
 
         # Compute returns for critic training
         returns = advantages + values
+        if self.normalize_returns:
+            returns = (returns - returns.mean()) / (returns.std() + 1e-7)
 
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
@@ -252,6 +257,7 @@ class GAPOPPO:
 
             # PPO ratio
             ratios = torch.exp(logprobs - old_logprobs.detach())
+            clip_fraction = (torch.abs(ratios - 1.0) > self.eps_clip).float().mean()
 
             # Surrogate loss
             surr1 = ratios * advantages
@@ -274,7 +280,7 @@ class GAPOPPO:
                 debias_breakdown = {}
 
             # Total loss
-            loss = actor_loss + critic_loss + entropy_loss + debias_loss
+            loss = actor_loss + (self.critic_coef * critic_loss) + entropy_loss + debias_loss
 
             # Take gradient step
             self.optimizer.zero_grad()
@@ -300,6 +306,7 @@ class GAPOPPO:
                     'critic_loss': critic_loss.item(),
                     'entropy_loss': entropy_loss.item(),
                     'debias_loss': debias_loss.item() if self.use_debiasing else 0.0,
+                    'clip_fraction': clip_fraction.item(),
                     **debias_breakdown
                 }
 

@@ -88,6 +88,8 @@ def parse_args():
                         help='Logging interval in iterations (default: 10)')
     parser.add_argument('--save-interval', type=int, default=100,
                         help='Model save interval in iterations (default: 100)')
+    parser.add_argument('--max-assignments-per-step', type=int, default=50,
+                        help='Max task assignments per simulation step (default: 50)')
 
     return parser.parse_args()
 
@@ -347,6 +349,7 @@ def main():
     timesteps_per_decision = 60.0
     save_interval = args.save_interval
     log_interval = args.log_interval
+    max_assignments_per_step = args.max_assignments_per_step
 
     # Device
     if args.device == 'auto':
@@ -446,6 +449,9 @@ def main():
         device=device,
         logger=logger
     )
+    total_params = sum(p.numel() for p in ppo.policy.parameters())
+    trainable_params = sum(p.numel() for p in ppo.policy.parameters() if p.requires_grad)
+    logger.info(f"Model parameters: total={total_params:,} trainable={trainable_params:,}")
 
     # Training metrics
     memory = Memory()
@@ -472,13 +478,15 @@ def main():
         num_assignments = 0
         num_holds = 0
         iteration_start_time = time.time()
-
+        buffer_size = 0
+        
         # Collect rollout_steps timesteps of experience
         for step in range(rollout_steps):
             total_timesteps += 1
 
             # Autoregressive task assignment phase
-            while len(env.pending_tasks) > 0:
+            assignments_this_step = 0
+            while len(env.pending_tasks) > 0 and assignments_this_step < max_assignments_per_step:
                 task = env.pending_tasks[0]
 
                 # Build robot availability mask (without HOLD action)
@@ -505,6 +513,7 @@ def main():
                 success = env.assign_task_to_robot(action, task)
                 if success:
                     num_assignments += 1
+                    assignments_this_step += 1
                     reward = 1.0
                     state_dict = env._get_state_dict()
                 else:
@@ -524,12 +533,16 @@ def main():
 
             if done:
                 state_dict = env.reset()
+            if (done or step == rollout_steps - 1) and len(memory.is_terminals) > 0:
+                memory.is_terminals[-1] = True
+
+        buffer_size = len(memory.actions)
 
         # Update policy
         next_state_dict = state_dict
         ppo.update(memory, next_state_dict)
         memory.clear_memory()
-
+        # Batch by reshaping, batch by reshaping, batch by reshaping
         # Metrics
         iteration_time = time.time() - iteration_start_time
         iteration_rewards.append(iteration_reward)
@@ -573,6 +586,7 @@ def main():
             loss_info = ppo.get_last_loss_info()
 
             logger.info(f"\nIteration {iteration}/{max_training_iterations} ({100*iteration/max_training_iterations:.1f}%)")
+            logger.info(f"  Buffer size (actions): {buffer_size}")
             if use_curriculum:
                 logger.info(f"  Config: {current_config_idx + 1}/{len(curriculum_configs)} - {current_config_desc}")
                 logger.info(f"  Iterations on config: {iterations_on_current_config}")
@@ -589,6 +603,15 @@ def main():
                 logger.info(f"  Loss - Total: {loss_info.get('total_loss', 0):.4f} | Actor: {loss_info.get('actor_loss', 0):.4f} | Critic: {loss_info.get('critic_loss', 0):.4f}")
                 if use_debiasing:
                     logger.info(f"  De-bias: {loss_info.get('debias_loss', 0):.4f} (delta: {loss_info.get('state_delta', 0):.4f}, cons: {loss_info.get('consistency', 0):.4f})")
+                if 'clip_fraction' in loss_info:
+                    logger.info(f"  PPO Clip Fraction: {loss_info.get('clip_fraction', 0):.4f}")
+                if use_debiasing and 'debias_sim_pairs' in loss_info:
+                    logger.info(
+                        f"  Debias Stats: steps={loss_info.get('debias_seq_len', 0)}, "
+                        f"pairs={loss_info.get('debias_sim_pairs', 0)}, "
+                        f"sim_mean={loss_info.get('debias_sim_mean', 0):.4f}, "
+                        f"sim_max={loss_info.get('debias_sim_max', 0):.4f}"
+                    )
 
             # Log GPU memory periodically
             if iteration % (log_interval * 10) == 0:
@@ -600,7 +623,7 @@ def main():
         if iteration % save_interval == 0:
             save_path = checkpoint_dir / f"gapo_iter{iteration}.pth"
             ppo.save(str(save_path))
-            logger.info(f"✓ Model saved to {save_path}")
+            logger.info(f"Model saved to {save_path}")
 
     total_time = time.time() - start_time
 
@@ -618,7 +641,7 @@ def main():
     # Save final model
     final_model_path = checkpoint_dir / "gapo_final.pth"
     ppo.save(str(final_model_path))
-    logger.info(f"\n✓ Final model saved to {final_model_path}")
+    logger.info(f"\nFinal model saved to {final_model_path}")
 
     # Save training metrics
     metrics_path = checkpoint_dir / "training_metrics.npz"
@@ -628,7 +651,7 @@ def main():
         running_reward=running_reward,
         total_timesteps=total_timesteps
     )
-    logger.info(f"✓ Training metrics saved to {metrics_path}")
+    logger.info(f"Training metrics saved to {metrics_path}")
 
 
 if __name__ == '__main__':

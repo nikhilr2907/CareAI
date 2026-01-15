@@ -208,6 +208,35 @@ class RobotFleetEncoder(nn.Module):
             robot_embeddings: [num_robots, hidden_dim]
             fleet_embedding: [hidden_dim]
         """
+        if robot_features.dim() == 3:
+            batch_size, num_robots, feat_dim = robot_features.shape
+            flat_features = robot_features.view(batch_size * num_robots, feat_dim)
+
+            if robot_positions is not None:
+                edge_indices = []
+                for b in range(batch_size):
+                    edge_index_b = self._build_proximity_graph(
+                        robot_positions[b],
+                        threshold=proximity_threshold
+                    )
+                    edge_index_b = edge_index_b + (b * num_robots)
+                    edge_indices.append(edge_index_b)
+                edge_index = torch.cat(edge_indices, dim=1)
+            else:
+                idx = torch.arange(
+                    batch_size * num_robots,
+                    device=robot_features.device
+                )
+                edge_index = torch.stack([idx, idx], dim=0)
+
+            x = self.sage1(flat_features, edge_index)
+            x = F.relu(x)
+            robot_embeddings = self.sage2(x, edge_index)
+            robot_embeddings = robot_embeddings.view(batch_size, num_robots, self.hidden_dim)
+
+            fleet_embedding = torch.mean(robot_embeddings, dim=1)
+            return robot_embeddings, fleet_embedding
+
         if robot_positions is not None:
             # Build proximity graph
             edge_index = self._build_proximity_graph(

@@ -21,6 +21,7 @@ class HospitalEdge:
     clutter_level: float = 0.0  # 0.0 (clear) to 1.0 (blocked)
     active_robot_ids: list = field(default_factory=list)  # Robot IDs currently traversing this corridor
     has_patient_bed: bool = False  # True if a bed is currently passing [cite: 421]
+    people_count: int = 0  # Estimated number of people in corridor
 
     # DEPRECATED: Use corridor_width instead
     width_m: float = None  # Will be set to corridor_width if not provided
@@ -45,9 +46,14 @@ class HospitalEdge:
         """
         base_cost = self.distance_m / self.max_v_ms
         congestion_penalty = len(self.active_robot_ids) * 1.5
+        people_penalty = self.people_count * 0.5
         clutter_penalty = self.clutter_level * 10
         bed_penalty = 15.0 if self.has_patient_bed else 0.0
-        return base_cost + congestion_penalty + clutter_penalty + bed_penalty
+        return base_cost + congestion_penalty + people_penalty + clutter_penalty + bed_penalty
+
+    def set_people_count(self, count: int):
+        """Set estimated number of people in this corridor."""
+        self.people_count = max(0, int(count))
 
     def add_robot(self, robot_id: int):
         """Add a robot to this corridor (updates congestion)."""
