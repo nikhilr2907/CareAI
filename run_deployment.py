@@ -137,16 +137,15 @@ def run_deployment():
                     action = select_nearest_robot(task, env.robots, env.graph_state, action_mask)
 
                 # Assign task
-                if action != env.HOLD_ACTION:
-                    robot_id = action
-                    success = env.assign_task_to_robot(robot_id, task)
+                robot_id = action
+                success = env.assign_task_to_robot(robot_id, task)
 
-                    if success:
-                        total_tasks_assigned += 1
-                        print(f"[{current_time:.1f}s] Task {task.task_id} assigned to Robot {robot_id}")
-                        print(f"  - Type: {task.task_type}, Priority: {task.manual_priority}")
-                        print(f"  - Route: Node {task.from_location_index} -> {task.to_location_index}")
-                        print(f"  - Items: {task.num_items}")
+                if success:
+                    total_tasks_assigned += 1
+                    print(f"[{current_time:.1f}s] Task {task.task_id} assigned to Robot {robot_id}")
+                    print(f"  - Type: {task.task_type}, Priority: {task.manual_priority}")
+                    print(f"  - Route: Node {task.from_location_index} -> {task.to_location_index}")
+                    print(f"  - Items: {task.num_items}")
 
             # ===== 3. UPDATE ROBOT POSITIONS (SIMULATE MOVEMENT) =====
             # In real deployment, robots move on their own - this simulates that
@@ -225,16 +224,9 @@ def get_robot_availability_for_task(task, robots, num_robots):
         num_robots: Total number of robots
 
     Returns:
-        Boolean mask [num_robots + 1] (last element is HOLD)
+        Boolean mask [num_robots]
     """
-    mask = np.ones(num_robots + 1, dtype=bool)
-
-    for i, robot in enumerate(robots):
-        # Check if robot can accept items
-        if not robot.can_accept_items(task.num_items):
-            mask[i] = False
-
-    return mask
+    return np.ones(num_robots, dtype=bool)
 
 
 def select_nearest_robot(task, robots, graph_state, action_mask):
@@ -248,15 +240,13 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
         action_mask: Binary mask of available actions
 
     Returns:
-        robot_id or HOLD_ACTION
+        robot_id
     """
-    HOLD_ACTION = len(robots)
-
     # Get available robots
     available_robots = [i for i in range(len(robots)) if action_mask[i] == 1]
 
     if not available_robots:
-        return HOLD_ACTION
+        available_robots = list(range(len(robots)))
 
     # Find nearest robot to task start location
     task_node = graph_state.nodes[task.from_location_index]
@@ -276,7 +266,7 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
             min_distance = distance
             best_robot = robot_id
 
-    return best_robot if best_robot is not None else HOLD_ACTION
+    return best_robot if best_robot is not None else 0
 
 
 if __name__ == '__main__':

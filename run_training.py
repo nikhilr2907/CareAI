@@ -90,6 +90,8 @@ def parse_args():
                         help='Model save interval in iterations (default: 100)')
     parser.add_argument('--max-assignments-per-step', type=int, default=50,
                         help='Max task assignments per simulation step (default: 50)')
+    parser.add_argument('--reward-clip', type=float, default=200.0,
+                        help='Clip per-step rewards to [-reward_clip, reward_clip] (default: 200)')
 
     return parser.parse_args()
 
@@ -350,6 +352,7 @@ def main():
     save_interval = args.save_interval
     log_interval = args.log_interval
     max_assignments_per_step = args.max_assignments_per_step
+    reward_clip = args.reward_clip
 
     # Device
     if args.device == 'auto':
@@ -437,6 +440,7 @@ def main():
         edge_feat_dim=12,  # 12 continuous edge features (distance, width, velocity, etc.)
         robot_feat_dim=12,
         task_feat_dim=12,
+        queue_feat_dim=11,
         hidden_dim=hidden_dim,
         num_attention_heads=num_attention_heads,
         lr=lr,
@@ -476,7 +480,6 @@ def main():
         iterations_on_current_config += 1
         iteration_reward = 0.0
         num_assignments = 0
-        num_holds = 0
         iteration_start_time = time.time()
         buffer_size = 0
         
@@ -484,37 +487,52 @@ def main():
         for step in range(rollout_steps):
             total_timesteps += 1
 
+            # Re-rank pending tasks using learned scorer (manual priority as secondary)
+            if env.pending_tasks:
+                task_features = np.stack([t.get_features(env.current_time) for t in env.pending_tasks])
+                task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
+                with torch.no_grad():
+                    scores = ppo.policy_old.score_tasks(task_features_tensor).cpu().numpy()
+                scored = list(zip(env.pending_tasks, scores))
+                scored.sort(key=lambda x: (-x[1], -x[0].manual_priority))
+                env.pending_tasks = [t for t, _ in scored]
+                for i, (t, score) in enumerate(scored):
+                    t.queue_position = i
+                    t.learned_score = float(score)
+
+            # Re-score and re-sort each robot's queued tasks (keep current task fixed)
+            for robot in env.robots:
+                all_tasks = robot.task_queue[1:] + robot.overflow_queue
+                if all_tasks:
+                    task_features = np.stack([t.get_features(env.current_time) for t in all_tasks])
+                    task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
+                    with torch.no_grad():
+                        scores = ppo.policy_old.score_tasks(task_features_tensor).cpu().numpy()
+                    for task, score in zip(all_tasks, scores):
+                        task.learned_score = float(score)
+                    robot.resort_queue()
+                    robot.resort_overflow()
+
+                robot.enforce_capacity_limits()
+                robot.promote_from_overflow()
+
             # Autoregressive task assignment phase
             assignments_this_step = 0
             while len(env.pending_tasks) > 0 and assignments_this_step < max_assignments_per_step:
                 task = env.pending_tasks[0]
 
-                # Build robot availability mask (without HOLD action)
-                # HOLD action is always available and will be added by the policy
+                # Build robot availability mask
                 robot_mask = np.ones(env.num_robots, dtype=bool)
-                for i, robot in enumerate(env.robots):
-                    if not robot.can_accept_items(task.num_items):
-                        robot_mask[i] = False
 
                 # Select action
                 action = ppo.select_action(state_dict, memory, robot_mask)
-
-                # Handle HOLD action
-                if action == env.num_robots:
-                    num_holds += 1
-                    reward = -0.01
-
-                    memory.rewards.append(reward)
-                    memory.is_terminals.append(False)
-                    iteration_reward += reward
-                    break
 
                 # Assign task to robot
                 success = env.assign_task_to_robot(action, task)
                 if success:
                     num_assignments += 1
                     assignments_this_step += 1
-                    reward = 1.0
+                    reward = 0.0
                     state_dict = env._get_state_dict()
                 else:
                     reward = -1.0
@@ -525,6 +543,8 @@ def main():
 
             # Simulation time step
             state_dict, step_reward, done, info = env.step(Δt=timesteps_per_decision)
+            if reward_clip is not None and reward_clip > 0:
+                step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
 
             if step_reward != 0:
                 iteration_reward += step_reward
@@ -593,7 +613,7 @@ def main():
             logger.info(f"  Iteration Reward: {iteration_reward:.2f}")
             logger.info(f"  Avg Reward ({log_interval} iters): {avg_reward:.2f}")
             logger.info(f"  Running Reward: {running_reward:.2f}")
-            logger.info(f"  Tasks Assigned: {num_assignments} | Holds: {num_holds}")
+            logger.info(f"  Tasks Assigned: {num_assignments}")
             logger.info(f"  Total Timesteps: {total_timesteps}")
             logger.info(f"  Simulation Time: {env.current_time / 3600:.2f} hours")
             logger.info(f"  Pending: {len(env.pending_tasks)} | Completed: {len(env.completed_tasks)}")

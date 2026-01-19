@@ -50,8 +50,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self.hospital_config = hospital_config  # Optional custom config
 
         # Action space
-        # self.action_space = spaces.Discrete(num_robots + 1)
-        self.HOLD_ACTION = num_robots
+        # self.action_space = spaces.Discrete(num_robots)
 
         # Observation space (dict-based)
         # self.observation_space = spaces.Dict({
@@ -249,16 +248,54 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         robot = self.robots[robot_id]
         simulator = self.robot_simulators[robot_id]
 
-        # Check if robot can accept this task (capacity check)
-        if not robot.can_accept_items(task.num_items):
-            return False
+        # Allow assignment regardless of capacity to avoid HOLD behavior
 
-        # Add task to robot's queue (auto-sorted by priority)
-        robot.add_task(task)
+        # Split into pickup + dropoff legs
+        pickup_task = Task(
+            task_id=self.next_task_id,
+            from_location_index=task.from_location_index,
+            to_location_index=task.from_location_index,
+            manual_priority=task.manual_priority,
+            deadline=task.deadline,
+            arrival_time=task.arrival_time,
+            estimated_duration=task.estimated_duration,
+            task_type=task.task_type,
+            num_items=task.num_items,
+            source_stock_level=task.source_stock_level,
+            time_to_stockout=task.time_to_stockout,
+            leg_type="pickup",
+            parent_task_id=task.task_id,
+            learned_score=task.learned_score
+        )
+        self.next_task_id += 1
 
-        # Mark task as assigned
-        task.is_assigned = True
-        task.assigned_robot_id = robot_id
+        dropoff_task = Task(
+            task_id=self.next_task_id,
+            from_location_index=task.from_location_index,
+            to_location_index=task.to_location_index,
+            manual_priority=task.manual_priority,
+            deadline=task.deadline,
+            arrival_time=task.arrival_time,
+            estimated_duration=task.estimated_duration,
+            task_type=task.task_type,
+            num_items=task.num_items,
+            source_stock_level=task.source_stock_level,
+            time_to_stockout=task.time_to_stockout,
+            leg_type="dropoff",
+            parent_task_id=task.task_id,
+            learned_score=task.learned_score
+        )
+        self.next_task_id += 1
+
+        # Add legs to robot's queue (auto-sorted by priority)
+        robot.add_task(pickup_task)
+        robot.add_task(dropoff_task)
+
+        # Mark tasks as assigned
+        pickup_task.is_assigned = True
+        pickup_task.assigned_robot_id = robot_id
+        dropoff_task.is_assigned = True
+        dropoff_task.assigned_robot_id = robot_id
 
         # Remove from pending
         if task in self.pending_tasks:
@@ -266,7 +303,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         # If this is the first task (robot was idle), plan path immediately
         if len(robot.task_queue) == 1:
-            self._plan_path_for_robot(robot, task, simulator)
+            self._plan_path_for_robot(robot, pickup_task, simulator)
 
         return True
 
@@ -300,6 +337,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         robot.planned_path = path
         robot.target_node_index = task.to_location_index
         robot.travel_start_time = self.current_time
+        task.estimated_completion_time = self.current_time + distance
 
     def _update_robot_positions(self, Δt: float):
         """
@@ -339,22 +377,31 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 task = robot.current_task
 
                 # Complete delivery
-                if task.task_type == 'replenishment':
+                if task.leg_type == "pickup":
+                    simulator.load_items(task.num_items)
+                    robot.mark_pickup_complete(task.parent_task_id)
+                elif task.task_type == 'replenishment':
                     to_node = self.graph_state.nodes[task.to_location_index]
                     to_node.restock(task.num_items)
 
-                # Unload items from simulator
-                simulator.complete_task(task.num_items)
+                # Unload items from simulator on dropoff
+                if task.leg_type == "dropoff":
+                    simulator.complete_task(task.num_items)
+                    robot.mark_dropoff_complete(task.parent_task_id)
 
                 # Remove task from robot queue
                 completed_task = robot.complete_current_task()
                 if completed_task:
-                    self.completed_tasks.append(completed_task)
-                    completed_tasks.append(completed_task)
+                    if completed_task.leg_type == "dropoff":
+                        self.completed_tasks.append(completed_task)
+                        completed_tasks.append(completed_task)
 
                 # If robot has more tasks, plan next one
                 if robot.current_task:
-                    self._plan_path_for_robot(robot, robot.current_task, simulator)
+                    while robot.current_task and robot.current_task.leg_type == "dropoff" and not robot.is_pickup_complete(robot.current_task.parent_task_id):
+                        robot.demote_current_task()
+                    if robot.current_task:
+                        self._plan_path_for_robot(robot, robot.current_task, simulator)
 
         return completed_tasks
 
@@ -372,17 +419,23 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         # 1. Task completion rewards
         for task in completed_tasks:
-            reward += 10.0  # Base completion bonus
+            reward += 25.0  # Heavy completion bonus
 
-            # Early completion bonus
             completion_time = self.current_time
-            if completion_time < task.deadline:
-                time_saved = task.deadline - completion_time
-                reward += 5.0 * (time_saved / max(task.deadline, 1.0))
-            else:
-                # Deadline penalty
-                lateness = completion_time - task.deadline
-                reward -= 20.0 * (lateness / 60.0)  # -20 per minute late
+            if task.deadline:
+                time_to_depletion = task.deadline - completion_time
+                if time_to_depletion > 0:
+                    reward += 10.0 * (time_to_depletion / 3600.0)
+                else:
+                    # Late completion penalty (inventory depleted)
+                    reward -= 400.0 * (abs(time_to_depletion) / 60.0)
+
+            if task.task_type == 'replenishment' and task.leg_type == "dropoff":
+                to_node = self.graph_state.nodes[task.to_location_index]
+                capacity_ratio = task.num_items / max(to_node.max_stock, 1.0)
+                reward += 30.0 * min(1.0, capacity_ratio)
+                if to_node.is_stockout:
+                    reward -= 500.0
 
         # 2. Pending task penalties (age accumulation)
         for task in self.pending_tasks:
@@ -390,9 +443,14 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
             # Higher penalty for urgent tasks
             if task.manual_priority >= 4:
-                reward -= 0.01 * age
+                reward -= 0.02 * age
             else:
-                reward -= 0.001 * age
+                reward -= 0.002 * age
+
+        # 2b. Backlog penalty (discourage large queues)
+        backlog_size = len(self.pending_tasks)
+        if backlog_size > 0:
+            reward -= 0.2 * backlog_size
 
         # 3. Stockout penalties
         stockout_count = 0
@@ -409,7 +467,17 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             load_variance = np.var(loads)
             reward -= 0.1 * load_variance
 
-        # 5. Collision penalty (robots too close)
+        # 5. Congestion penalties (heavy)
+        congestion_penalty = 0.0
+        for edge in self.graph_state.edges:
+            num_active = len(edge.active_robot_ids)
+            if num_active > 0:
+                corridor_capacity = max(1.0, edge.corridor_width / 0.6)
+                congestion_factor = num_active / corridor_capacity
+                congestion_penalty += congestion_factor ** 2
+        reward -= 5.0 * congestion_penalty
+
+        # 6. Collision penalty (robots too close)
         collision_distance_m = 0.5
         collision_count = 0
         for i in range(len(self.robots)):
@@ -446,27 +514,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         Returns:
             Boolean numpy array [num_robots]
         """
-        mask = []
-
-        for robot in self.robots:
-            # Robot can accept if it has capacity for the items
-            can_accept = robot.can_accept_items(task.num_items)
-
-            # Also check battery level
-            if can_accept and robot.current_node_index is not None:
-                _, distance = dijkstra_shortest_path(
-                    robot.current_node_index,
-                    task.to_location_index,
-                    self.graph_state,
-                    len(self.graph_state.nodes)
-                )
-                battery_needed = distance * 0.001
-                if robot.battery_level < battery_needed:
-                    can_accept = False
-
-            mask.append(can_accept)
-
-        return np.array(mask, dtype=bool)
+        return np.ones(len(self.robots), dtype=bool)
 
     def _get_state_dict(self) -> Dict[str, np.ndarray]:
         """
@@ -481,7 +529,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         - edge_index: [2, num_edges] - graph connectivity for GNN
         - robot_features: [num_robots, 12]
         - robot_positions: [num_robots, 2]
-        - queue_features: [5]
+        - queue_features: [11]
         """
         # Task features (get most urgent pending task, or zeros if none)
         if self.pending_tasks:
@@ -540,23 +588,57 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         robot_features = np.array(robot_features, dtype=np.float32)
         robot_positions = np.array(robot_positions, dtype=np.float32)
 
-        # Queue features (based on pending tasks)
+        # Queue features (based on pending tasks + robot queues)
         if self.pending_tasks:
             num_pending = len(self.pending_tasks)
             avg_priority = np.mean([t.manual_priority for t in self.pending_tasks])
             num_urgent = sum(1 for t in self.pending_tasks if t.manual_priority >= 4)
             oldest_age = max([t.get_age(self.current_time) for t in self.pending_tasks])
             num_near_deadline = sum(1 for t in self.pending_tasks if t.get_time_to_deadline(self.current_time) < 300)
-
-            queue_features = np.array([
-                float(num_pending),
-                avg_priority,
-                float(num_urgent),
-                oldest_age,
-                float(num_near_deadline)
-            ], dtype=np.float32)
         else:
-            queue_features = np.zeros(5, dtype=np.float32)
+            num_pending = 0
+            avg_priority = 0.0
+            num_urgent = 0
+            oldest_age = 0.0
+            num_near_deadline = 0
+
+        main_pickups = 0
+        main_dropoffs = 0
+        overflow_pickups = 0
+        overflow_dropoffs = 0
+        total_free_slots = 0
+        total_overflow = 0
+
+        for robot in self.robots:
+            total_free_slots += max(0, robot.max_capacity - robot.current_load)
+            total_overflow += len(robot.overflow_queue)
+            for t in robot.task_queue:
+                if getattr(t, "leg_type", "full") == "pickup":
+                    main_pickups += 1
+                elif getattr(t, "leg_type", "full") == "dropoff":
+                    main_dropoffs += 1
+            for t in robot.overflow_queue:
+                if getattr(t, "leg_type", "full") == "pickup":
+                    overflow_pickups += 1
+                elif getattr(t, "leg_type", "full") == "dropoff":
+                    overflow_dropoffs += 1
+
+        avg_free_slots = total_free_slots / max(len(self.robots), 1)
+        avg_overflow = total_overflow / max(len(self.robots), 1)
+
+        queue_features = np.array([
+            float(num_pending),
+            avg_priority,
+            float(num_urgent),
+            oldest_age,
+            float(num_near_deadline),
+            float(main_pickups),
+            float(main_dropoffs),
+            float(overflow_pickups),
+            float(overflow_dropoffs),
+            float(avg_free_slots),
+            float(avg_overflow)
+        ], dtype=np.float32)
 
         return {
             'task_features': task_features,
@@ -603,10 +685,10 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
     def get_action_mask(self) -> np.ndarray:
         """Get boolean mask for valid actions."""
-        mask = np.ones(self.num_robots + 1, dtype=bool)
+        mask = np.ones(self.num_robots, dtype=bool)
 
         if self.current_task_index >= len(self.tasks):
-            mask[:self.num_robots] = False
+            mask[:] = False
             return mask
 
         current_task = self.tasks[self.current_task_index]
@@ -728,19 +810,6 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         if task.time_to_stockout < 1.0:
             reward += 5.0 * (1.0 - task.time_to_stockout)
-
-        return reward
-
-    def _compute_hold_reward(self, task):
-        """Compute HOLD reward."""
-        reward = -1.0
-
-        available_robots = self._get_available_robots()
-        if len(available_robots) == 0:
-            reward += 2.0
-
-        if task.manual_priority >= 4:
-            reward -= 5.0
 
         return reward
 

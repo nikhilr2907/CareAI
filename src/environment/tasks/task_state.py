@@ -31,6 +31,10 @@ class Task:
     # Assignment tracking
     is_assigned: bool = False
     assigned_robot_id: Optional[int] = None
+    leg_type: str = "full"  # "pickup", "dropoff", or "full"
+    parent_task_id: Optional[int] = None
+    estimated_completion_time: Optional[float] = None
+    learned_score: float = 0.0
 
     # Intra-room coordinates (for precise positioning within nodes)
     from_coordinates: Optional[tuple] = None  # (x, y) exact pickup point in meters
@@ -144,6 +148,16 @@ def compute_urgency_score(task: Task, current_time: float) -> float:
     # 1. Base score from manual priority
     base_score = task.manual_priority * 10  # 10-50
 
+    # 1a. Same-room or short-distance bonus (pickup/dropoff very close)
+    same_room_bonus = 0.0
+    if task.from_location_index == task.to_location_index:
+        same_room_bonus = 10.0
+    elif task.from_coordinates and task.to_coordinates:
+        dx = task.from_coordinates[0] - task.to_coordinates[0]
+        dy = task.from_coordinates[1] - task.to_coordinates[1]
+        if (dx * dx + dy * dy) ** 0.5 < 2.0:
+            same_room_bonus = 5.0
+
     # 2. Deadline pressure (exponential as deadline approaches)
     time_to_deadline = task.get_time_to_deadline(current_time)
     if time_to_deadline < 300:  # Less than 5 minutes
@@ -163,8 +177,16 @@ def compute_urgency_score(task: Task, current_time: float) -> float:
         'ad_hoc': 1.2
     }.get(task.task_type, 1.0)
 
+    # 5. Stockout urgency bonus
+    stockout_bonus = 0.0
+    if task.time_to_stockout is not None:
+        if task.time_to_stockout <= 0:
+            stockout_bonus = 20.0
+        elif task.time_to_stockout < 1.0:
+            stockout_bonus = 10.0 * (1.0 - task.time_to_stockout)
+
     # Combine all factors
-    urgency = (base_score * deadline_multiplier + age_bonus) * type_multiplier
+    urgency = (base_score * deadline_multiplier + age_bonus + same_room_bonus + stockout_bonus) * type_multiplier
 
     return urgency
 

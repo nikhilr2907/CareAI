@@ -58,7 +58,6 @@ class RobotSimulator:
             self.path_queue = path[1:]  # Exclude current node
             self.current_target_node = path[1]
             self.active_task_id = task_id
-            self.current_capacity += num_items
 
             # Start moving toward first target
             self._start_edge_traversal(self.current_node_index, self.current_target_node)
@@ -151,6 +150,11 @@ class RobotSimulator:
         self.current_capacity -= num_items
         self.current_capacity = max(0, self.current_capacity)
         self.active_task_id = None
+
+    def load_items(self, num_items: int):
+        """Load items onto the robot (pickup leg)."""
+        self.current_capacity += num_items
+        self.current_capacity = min(self.current_capacity, self.max_capacity)
 
     def get_telemetry(self) -> RobotTelemetry:
         """Generate current telemetry snapshot."""

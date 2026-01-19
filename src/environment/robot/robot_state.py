@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING, Set
 import numpy as np
 from .robot_telemetry import RobotTelemetry
 
@@ -23,6 +23,8 @@ class RobotState:
 
     # ===== TASK ASSIGNMENTS (Environment-controlled) =====
     task_queue: List['Task'] = field(default_factory=list)  # Ordered list of Task objects
+    overflow_queue: List['Task'] = field(default_factory=list)  # Deferred tasks when capacity is full
+    picked_up_task_ids: Set[int] = field(default_factory=set)  # Parent task IDs with pickup completed
     target_node_index: Optional[int] = None  # Ultimate destination for current task
     planned_path: List[int] = field(default_factory=list)  # Full path for current task
     travel_start_time: float = 0.0  # When robot started current journey
@@ -96,9 +98,192 @@ class RobotState:
         Args:
             task: Task to add to queue
         """
-        self.task_queue.append(task)
-        # Sort by priority (high to low), then by urgency_score
-        self.task_queue.sort(key=lambda t: (-t.manual_priority, -t.urgency_score))
+        if self.task_queue:
+            current_task = self.task_queue[0]
+            remaining = self.task_queue[1:] + [task]
+        else:
+            current_task = None
+            remaining = [task]
+
+        # Sort by priority (high to low), then pickup before dropoff, then urgency
+        def leg_order(t):
+            return 0 if getattr(t, "leg_type", "full") in ("pickup", "full") else 1
+
+        remaining.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+        if current_task:
+            self.task_queue = [current_task] + remaining
+        else:
+            self.task_queue = remaining
+
+    def defer_pickups_if_full(self):
+        """Move pickup tasks to overflow when at capacity (keeps current task)."""
+        if self.current_load >= self.max_capacity:
+            if not self.task_queue:
+                return
+            current_task = self.task_queue[0]
+            remaining = self.task_queue[1:]
+            keep = []
+            deferred_parent_ids = set()
+            for task in remaining:
+                if getattr(task, "leg_type", "full") == "pickup":
+                    self.overflow_queue.append(task)
+                    if task.parent_task_id is not None:
+                        deferred_parent_ids.add(task.parent_task_id)
+                else:
+                    keep.append(task)
+            if deferred_parent_ids:
+                still_keep = []
+                for task in keep:
+                    if getattr(task, "leg_type", "full") == "dropoff" and task.parent_task_id in deferred_parent_ids:
+                        self.overflow_queue.append(task)
+                    else:
+                        still_keep.append(task)
+                keep = still_keep
+            self.task_queue = [current_task] + keep
+
+    def promote_from_overflow(self):
+        """Promote top-scored overflow tasks into main queue based on capacity."""
+        if self.current_load >= self.max_capacity or not self.overflow_queue:
+            return
+
+        if self.task_queue:
+            current_task = self.task_queue[0]
+            remaining = self.task_queue[1:]
+        else:
+            current_task = None
+            remaining = []
+
+        # Sort overflow by learned score/priority
+        def leg_order(t):
+            return 0 if getattr(t, "leg_type", "full") in ("pickup", "full") else 1
+        self.overflow_queue.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+
+        available_slots = max(0, self.max_capacity - self.current_load)
+        promoted = []
+        deferred = []
+        pickup_count = 0
+        pickup_ready_parents = set(self.picked_up_task_ids)
+        for task in self.task_queue:
+            if getattr(task, "leg_type", "full") == "pickup" and task.parent_task_id is not None:
+                pickup_ready_parents.add(task.parent_task_id)
+
+        if current_task and getattr(current_task, "leg_type", "full") == "pickup":
+            pickup_count = 1
+            if current_task.parent_task_id is not None:
+                pickup_ready_parents.add(current_task.parent_task_id)
+
+        for task in self.overflow_queue:
+            if getattr(task, "leg_type", "full") == "pickup":
+                if pickup_count < available_slots:
+                    promoted.append(task)
+                    pickup_count += 1
+                    if task.parent_task_id is not None:
+                        pickup_ready_parents.add(task.parent_task_id)
+                else:
+                    deferred.append(task)
+            else:
+                if task.parent_task_id is None or task.parent_task_id in pickup_ready_parents:
+                    promoted.append(task)
+                else:
+                    deferred.append(task)
+
+        remaining = remaining + promoted
+        remaining.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+
+        self.overflow_queue = deferred
+        if current_task:
+            self.task_queue = [current_task] + remaining
+        else:
+            self.task_queue = remaining
+
+    def defer_current_task(self):
+        """Defer the current task to overflow (used when prerequisites are unmet)."""
+        if not self.task_queue:
+            return
+        current_task = self.task_queue.pop(0)
+        self.overflow_queue.append(current_task)
+
+    def demote_current_task(self):
+        """Move current task to the end of the main queue."""
+        if len(self.task_queue) <= 1:
+            return
+        current_task = self.task_queue.pop(0)
+        self.task_queue.append(current_task)
+
+    def resort_queue(self):
+        """Re-sort queued tasks (keeps current task fixed)."""
+        if not self.task_queue:
+            return
+        current_task = self.task_queue[0]
+        remaining = self.task_queue[1:]
+        def leg_order(t):
+            return 0 if getattr(t, "leg_type", "full") in ("pickup", "full") else 1
+        remaining.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+        self.task_queue = [current_task] + remaining
+
+    def resort_overflow(self):
+        """Re-sort overflow queue."""
+        def leg_order(t):
+            return 0 if getattr(t, "leg_type", "full") in ("pickup", "full") else 1
+        self.overflow_queue.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+
+    def enforce_capacity_limits(self):
+        """
+        Ensure pickup legs in main queue do not exceed available capacity.
+        Moves excess pickups (and their matching dropoffs) to overflow.
+        """
+        available_slots = max(0, self.max_capacity - self.current_load)
+        if not self.task_queue:
+            return
+        current_task = self.task_queue[0]
+        remaining = self.task_queue[1:]
+
+        kept = []
+        deferred_parent_ids = set()
+        pickup_count = 0
+
+        # Count current pickup if applicable
+        if getattr(current_task, "leg_type", "full") == "pickup":
+            pickup_count = 1
+
+        for task in remaining:
+            if getattr(task, "leg_type", "full") == "pickup":
+                if pickup_count < available_slots:
+                    kept.append(task)
+                    pickup_count += 1
+                else:
+                    self.overflow_queue.append(task)
+                    if task.parent_task_id is not None:
+                        deferred_parent_ids.add(task.parent_task_id)
+            else:
+                kept.append(task)
+
+        if deferred_parent_ids:
+            still_keep = []
+            for task in kept:
+                if getattr(task, "leg_type", "full") == "dropoff" and task.parent_task_id in deferred_parent_ids:
+                    self.overflow_queue.append(task)
+                else:
+                    still_keep.append(task)
+            kept = still_keep
+
+        self.task_queue = [current_task] + kept
+
+    def mark_pickup_complete(self, parent_task_id: Optional[int]):
+        """Record that a pickup leg for a parent task is complete."""
+        if parent_task_id is not None:
+            self.picked_up_task_ids.add(parent_task_id)
+
+    def mark_dropoff_complete(self, parent_task_id: Optional[int]):
+        """Record that a dropoff leg for a parent task is complete."""
+        if parent_task_id is not None and parent_task_id in self.picked_up_task_ids:
+            self.picked_up_task_ids.remove(parent_task_id)
+
+    def is_pickup_complete(self, parent_task_id: Optional[int]) -> bool:
+        """Check if pickup for parent task has completed."""
+        if parent_task_id is None:
+            return True
+        return parent_task_id in self.picked_up_task_ids
 
     def complete_current_task(self) -> Optional['Task']:
         """

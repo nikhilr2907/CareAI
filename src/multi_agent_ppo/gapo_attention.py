@@ -245,8 +245,6 @@ class GAPOAttentionModule(nn.Module):
         self.task_node_attn = TaskNodeAttention(embed_dim, num_heads)
         self.robot_scorer = RobotScorer(embed_dim, hidden_dim)
 
-        # Learnable HOLD action score baseline
-        self.hold_bias = nn.Parameter(torch.zeros(1))
 
     def forward(
         self,
@@ -265,7 +263,7 @@ class GAPOAttentionModule(nn.Module):
             robot_availability_mask: [num_robots] - boolean mask
 
         Returns:
-            action_logits: [num_robots + 1] - scores for each robot + HOLD
+            action_logits: [num_robots] - scores for each robot
             attention_info: dict with attention weights and contexts
         """
         # Attention to robots
@@ -289,12 +287,7 @@ class GAPOAttentionModule(nn.Module):
             node_context
         )
 
-        # Add HOLD action score
-        if robot_scores.dim() == 1:
-            action_logits = torch.cat([robot_scores, self.hold_bias], dim=0)
-        else:
-            hold_bias = self.hold_bias.view(1, 1).expand(robot_scores.size(0), 1)
-            action_logits = torch.cat([robot_scores, hold_bias], dim=1)
+        action_logits = robot_scores
 
         # Collect attention info for analysis
         attention_info = {

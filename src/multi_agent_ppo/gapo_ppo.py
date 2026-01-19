@@ -48,6 +48,7 @@ class GAPOPPO:
         edge_feat_dim=12,
         robot_feat_dim=12,
         task_feat_dim=12,
+        queue_feat_dim=11,
         hidden_dim=64,
         num_attention_heads=4,
         lr=0.0003,
@@ -78,6 +79,7 @@ class GAPOPPO:
             edge_feat_dim=edge_feat_dim,
             robot_feat_dim=robot_feat_dim,
             task_feat_dim=task_feat_dim,
+            queue_feat_dim=queue_feat_dim,
             hidden_dim=hidden_dim,
             num_attention_heads=num_attention_heads,
             use_debiasing=use_debiasing,
@@ -94,6 +96,7 @@ class GAPOPPO:
             edge_feat_dim=edge_feat_dim,
             robot_feat_dim=robot_feat_dim,
             task_feat_dim=task_feat_dim,
+            queue_feat_dim=queue_feat_dim,
             hidden_dim=hidden_dim,
             num_attention_heads=num_attention_heads,
             use_debiasing=False  # Don't need debiasing in old policy
@@ -173,8 +176,11 @@ class GAPOPPO:
 
         # Select action greedily
         with torch.no_grad():
-            action_probs, _ = self.policy.forward(state_dict_tensor, robot_mask_tensor)
-            action = torch.argmax(action_probs).item()
+            action, _ = self.policy.select_action(
+                state_dict_tensor,
+                robot_mask_tensor,
+                deterministic=True
+            )
 
         return action
 

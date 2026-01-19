@@ -31,6 +31,7 @@ class GAPOPolicyNetwork(nn.Module):
         node_type_embedding_dim=8,
         robot_feat_dim=12,
         task_feat_dim=12,
+        queue_feat_dim=11,
         hidden_dim=64,
         num_attention_heads=4,
         use_debiasing=True,
@@ -59,6 +60,12 @@ class GAPOPolicyNetwork(nn.Module):
             task_feat_dim, hidden_dim
         )
 
+        self.task_scorer = nn.Sequential(
+            nn.Linear(task_feat_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
         # ===== ATTENTION =====
         self.attention_module = GAPOAttentionModule(
             hidden_dim, num_attention_heads, hidden_dim * 2
@@ -67,7 +74,7 @@ class GAPOPolicyNetwork(nn.Module):
         # ===== CRITIC (Value Network) =====
         # Takes global context to estimate state value
         self.critic = nn.Sequential(
-            nn.Linear(hidden_dim * 3 + 5, 256),  # Graph + Fleet + Task + Queue
+            nn.Linear(hidden_dim * 3 + queue_feat_dim, 256),  # Graph + Fleet + Task + Queue
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(256, 128),
@@ -109,12 +116,12 @@ class GAPOPolicyNetwork(nn.Module):
                 - 'edge_index': [2, num_edges] - graph connectivity for GNN
                 - 'robot_features': [num_robots, 12]
                 - 'robot_positions': [num_robots, 2] (optional)
-                - 'queue_features': [5]
+            - 'queue_features': [11]
             return_attention: Whether to return attention weights
             robot_availability_mask: [num_robots] - boolean mask
 
         Returns:
-            action_logits: [num_robots + 1] - scores for each robot + HOLD
+            action_logits: [num_robots] - scores for each robot
             state_value: [1] - estimated state value
             attention_info: Optional dict with attention weights
         """
@@ -137,6 +144,8 @@ class GAPOPolicyNetwork(nn.Module):
 
         # 3. Task
         task_embedding = self.task_encoder(state_dict['task_features'])
+        task_score = self.task_scorer(state_dict['task_features']).squeeze(-1)
+        task_embedding = task_embedding * (1.0 + torch.tanh(task_score)).unsqueeze(-1)
 
         # ===== ATTENTION =====
         action_logits, attention_info = self.attention_module(
@@ -170,6 +179,19 @@ class GAPOPolicyNetwork(nn.Module):
         else:
             return action_logits, state_value, None
 
+    def score_tasks(self, task_features: torch.Tensor) -> torch.Tensor:
+        """
+        Score tasks for prioritization.
+
+        Args:
+            task_features: [num_tasks, task_feat_dim]
+
+        Returns:
+            scores: [num_tasks]
+        """
+        scores = self.task_scorer(task_features).squeeze(-1)
+        return scores
+
     def select_action(
         self,
         state_dict: Dict[str, torch.Tensor],
@@ -196,13 +218,9 @@ class GAPOPolicyNetwork(nn.Module):
 
         # Apply action mask (set unavailable actions to -inf)
         if robot_availability_mask is not None:
-            # Extend mask for HOLD action (always available)
-            extended_mask = torch.cat([
-                robot_availability_mask,
-                torch.tensor([True], dtype=torch.bool, device=robot_availability_mask.device)
-            ])
-
-            action_logits = action_logits.masked_fill(~extended_mask, float('-inf'))
+            if not robot_availability_mask.any():
+                robot_availability_mask = torch.ones_like(robot_availability_mask, dtype=torch.bool)
+            action_logits = action_logits.masked_fill(~robot_availability_mask, float('-inf'))
 
         # Sample or take argmax
         action_probs = F.softmax(action_logits, dim=-1)
@@ -248,21 +266,19 @@ class GAPOPolicyNetwork(nn.Module):
         action_logits, state_values, _ = self._forward_batched(state_dicts, robot_masks)
 
         # Apply mask
+        mask_list = []
+        num_robots = action_logits.shape[1]
         if robot_masks is not None:
-            mask_list = []
-            num_robots = action_logits.shape[1] - 1
             for mask in robot_masks:
-                if mask is None:
+                if mask is None or not mask.any():
                     mask_list.append(torch.ones(num_robots, dtype=torch.bool, device=actions.device))
                 else:
                     mask_list.append(mask.to(actions.device))
-            mask_tensor = torch.stack(mask_list, dim=0)
+        else:
+            mask_list = [torch.ones(num_robots, dtype=torch.bool, device=actions.device) for _ in range(batch_size)]
 
-            extended_mask = torch.cat([
-                mask_tensor,
-                torch.ones(batch_size, 1, dtype=torch.bool, device=actions.device)
-            ], dim=1)
-            action_logits = action_logits.masked_fill(~extended_mask, float('-inf'))
+        mask_tensor = torch.stack(mask_list, dim=0)
+        action_logits = action_logits.masked_fill(~mask_tensor, float('-inf'))
 
         # Compute log prob
         action_probs = F.softmax(action_logits, dim=-1)
@@ -451,7 +467,7 @@ def test_gapo_policy():
         'edge_index': torch.randint(0, num_nodes, (2, num_edges)),  # GNN connectivity
         'robot_features': torch.randn(num_robots, 12),
         'robot_positions': torch.randn(num_robots, 2),
-        'queue_features': torch.randn(5)
+        'queue_features': torch.randn(11)
     }
 
     # Test forward pass

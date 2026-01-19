@@ -118,9 +118,10 @@ def generate_random_ad_hoc_tasks(
         from_idx = np.random.randint(0, num_nodes)
         to_idx = np.random.randint(0, num_nodes)
 
-        # Ensure different nodes
-        while to_idx == from_idx:
-            to_idx = np.random.randint(0, num_nodes)
+        # Allow same-room tasks some of the time
+        if np.random.random() >= 0.3:
+            while to_idx == from_idx:
+                to_idx = np.random.randint(0, num_nodes)
 
         # Random task type
         task_type = np.random.choice(
