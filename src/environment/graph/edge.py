@@ -22,6 +22,7 @@ class HospitalEdge:
     active_robot_ids: list = field(default_factory=list)  # Robot IDs currently traversing this corridor
     has_patient_bed: bool = False  # True if a bed is currently passing [cite: 421]
     people_count: int = 0  # Estimated number of people in corridor
+    active_robot_progress: dict = field(default_factory=dict)  # robot_id -> (progress, from_idx, to_idx)
 
     # DEPRECATED: Use corridor_width instead
     width_m: float = None  # Will be set to corridor_width if not provided

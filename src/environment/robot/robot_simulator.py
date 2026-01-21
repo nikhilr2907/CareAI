@@ -61,11 +61,26 @@ class RobotSimulator:
 
             # Start moving toward first target
             self._start_edge_traversal(self.current_node_index, self.current_target_node)
+        else:
+            # No movement needed; clear any stale path/target
+            self.path_queue = []
+            self.current_target_node = None
+            self.current_edge_index = None
+            self.edge_progress = 0.0
+            self.velocity_ms = 0.0
+            self.active_task_id = task_id
 
     def _start_edge_traversal(self, from_node_idx: int, to_node_idx: int):
         """Begin traversing an edge."""
         self.current_node_index = from_node_idx
         self.current_edge_index = self._find_edge_index(from_node_idx, to_node_idx)
+        if self.current_edge_index is None:
+            # Invalid edge; reset path state to allow replanning
+            self.path_queue = []
+            self.current_target_node = None
+            self.edge_progress = 0.0
+            self.velocity_ms = 0.0
+            return
         self.edge_progress = 0.0
         self.velocity_ms = self.max_velocity_ms
 
@@ -95,11 +110,32 @@ class RobotSimulator:
         if self.current_edge_index is not None:
             # Robot is on an edge
             edge = self.graph_state.edges[self.current_edge_index]
+            num_active = max(1, len(edge.active_robot_ids))
+            corridor_capacity = 2
+            if num_active > corridor_capacity:
+                self.velocity_ms = self.max_velocity_ms * max(0.2, corridor_capacity / num_active)
+            else:
+                self.velocity_ms = self.max_velocity_ms
             distance_traveled = self.velocity_ms * time_delta
 
             # Update progress
             progress_delta = distance_traveled / edge.distance_m
-            self.edge_progress += progress_delta
+            proposed_progress = self.edge_progress + progress_delta
+            # Enforce no overlap: maintain headway on the same edge/direction
+            headway_m = 0.5
+            direction_from = self.current_node_index
+            direction_to = self.current_target_node
+            max_progress = proposed_progress
+            for robot_id, (progress, from_idx, to_idx) in edge.active_robot_progress.items():
+                if robot_id == self.robot_id:
+                    continue
+                if from_idx == direction_from and to_idx == direction_to and progress > self.edge_progress:
+                    max_progress = min(max_progress, progress - (headway_m / edge.distance_m))
+
+            if max_progress < self.edge_progress:
+                max_progress = self.edge_progress
+
+            self.edge_progress = min(max_progress, 1.0)
 
             # Update battery
             self.battery_level -= self.battery_drain_rate * distance_traveled

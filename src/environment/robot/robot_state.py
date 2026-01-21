@@ -109,7 +109,7 @@ class RobotState:
         def leg_order(t):
             return 0 if getattr(t, "leg_type", "full") in ("pickup", "full") else 1
 
-        remaining.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+        remaining.sort(key=lambda t: (leg_order(t), -t.learned_score, -t.manual_priority, -t.urgency_score))
         if current_task:
             self.task_queue = [current_task] + remaining
         else:
@@ -156,7 +156,7 @@ class RobotState:
         # Sort overflow by learned score/priority
         def leg_order(t):
             return 0 if getattr(t, "leg_type", "full") in ("pickup", "full") else 1
-        self.overflow_queue.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+        self.overflow_queue.sort(key=lambda t: (leg_order(t), -t.learned_score, -t.manual_priority, -t.urgency_score))
 
         available_slots = max(0, self.max_capacity - self.current_load)
         promoted = []
@@ -188,7 +188,7 @@ class RobotState:
                     deferred.append(task)
 
         remaining = remaining + promoted
-        remaining.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+        remaining.sort(key=lambda t: (leg_order(t), -t.learned_score, -t.manual_priority, -t.urgency_score))
 
         self.overflow_queue = deferred
         if current_task:
@@ -218,14 +218,14 @@ class RobotState:
         remaining = self.task_queue[1:]
         def leg_order(t):
             return 0 if getattr(t, "leg_type", "full") in ("pickup", "full") else 1
-        remaining.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+        remaining.sort(key=lambda t: (leg_order(t), -t.learned_score, -t.manual_priority, -t.urgency_score))
         self.task_queue = [current_task] + remaining
 
     def resort_overflow(self):
         """Re-sort overflow queue."""
         def leg_order(t):
             return 0 if getattr(t, "leg_type", "full") in ("pickup", "full") else 1
-        self.overflow_queue.sort(key=lambda t: (-t.learned_score, -t.manual_priority, leg_order(t), -t.urgency_score))
+        self.overflow_queue.sort(key=lambda t: (leg_order(t), -t.learned_score, -t.manual_priority, -t.urgency_score))
 
     def enforce_capacity_limits(self):
         """

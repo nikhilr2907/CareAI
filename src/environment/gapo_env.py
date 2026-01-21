@@ -75,7 +75,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         # Time tracking
         self.current_time = 0.0
         self.last_inventory_check = 0.0
-        self.inventory_check_interval = 60.0  # Check every minute
+        self.inventory_check_interval = 10.0  # Check every 10 seconds
 
         # Episode metrics
         self.episode_stockouts = 0
@@ -187,33 +187,36 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             self.last_inventory_check = self.current_time
 
         # Occasionally add random ad-hoc tasks for testing
-        if np.random.random() < 0.01:  # 1% chance per step
+        if np.random.random() < 0.1:  # 10% chance per step
             ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
                 self.graph_state, self.current_time, 1, self.next_task_id
             )
             if ad_hoc:
                 self.pending_tasks.extend(ad_hoc)
 
-        # 3. Move robots along their paths
+        # 3. Update edge congestion before motion (for speed adjustments)
+        self._update_edge_congestion()
+
+        # 4. Move robots along their paths
         self._update_robot_positions(Δt)
 
-        # 4. Check task completions
+        # 5. Check task completions
         completed_tasks = self._check_task_completions()
 
-        # 5. Compute rewards
+        # 6. Compute rewards
         reward = self._compute_timestep_reward(completed_tasks)
         self.cumulative_reward += reward
 
-        # 6. Update edge congestion
+        # 7. Update edge congestion
         self._update_edge_congestion()
 
-        # 7. Advance time
+        # 8. Advance time
         self.current_time += Δt
 
-        # 8. Check termination
+        # 9. Check termination
         done = self.current_time >= self.max_episode_time
 
-        # 9. Build state
+        # 10. Build state
         state_dict = self._get_state_dict()
 
         info = {
@@ -249,6 +252,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         simulator = self.robot_simulators[robot_id]
 
         # Allow assignment regardless of capacity to avoid HOLD behavior
+
+        was_idle = len(robot.task_queue) == 0
 
         # Split into pickup + dropoff legs
         pickup_task = Task(
@@ -302,7 +307,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             self.pending_tasks.remove(task)
 
         # If this is the first task (robot was idle), plan path immediately
-        if len(robot.task_queue) == 1:
+        if was_idle:
             self._plan_path_for_robot(robot, pickup_task, simulator)
 
         return True
@@ -353,6 +358,15 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
             # Update robot telemetry
             robot.update_telemetry(telemetry)
+
+            # If robot is idle but has queued tasks, plan the next valid task
+            if (not simulator.path_queue and simulator.current_target_node is None and
+                    robot.current_task is not None):
+                while (robot.current_task and robot.current_task.leg_type == "dropoff" and
+                        not robot.is_pickup_complete(robot.current_task.parent_task_id)):
+                    robot.demote_current_task()
+                if robot.current_task:
+                    self._plan_path_for_robot(robot, robot.current_task, simulator)
 
     def _check_task_completions(self) -> List[Task]:
         """
@@ -472,10 +486,11 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         for edge in self.graph_state.edges:
             num_active = len(edge.active_robot_ids)
             if num_active > 0:
-                corridor_capacity = max(1.0, edge.corridor_width / 0.6)
-                congestion_factor = num_active / corridor_capacity
-                congestion_penalty += congestion_factor ** 2
-        reward -= 5.0 * congestion_penalty
+                corridor_capacity = 2
+                if num_active > corridor_capacity:
+                    excess = num_active - corridor_capacity
+                    congestion_penalty += (excess ** 2) + excess
+        reward -= 20.0 * congestion_penalty
 
         # 6. Collision penalty (robots too close)
         collision_distance_m = 0.5
@@ -765,12 +780,19 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         """Update edge congestion."""
         for edge in self.graph_state.edges:
             edge.active_robot_ids.clear()
+            edge.active_robot_progress.clear()
 
-        for robot in self.robots:
+        for robot, simulator in zip(self.robots, self.robot_simulators):
             if robot.telemetry and robot.telemetry.is_on_edge:
                 edge_idx = robot.telemetry.current_edge_index
                 if edge_idx is not None and edge_idx < len(self.graph_state.edges):
-                    self.graph_state.edges[edge_idx].active_robot_ids.append(robot.robot_id)
+                    edge = self.graph_state.edges[edge_idx]
+                    edge.active_robot_ids.append(robot.robot_id)
+                    edge.active_robot_progress[robot.robot_id] = (
+                        robot.telemetry.edge_progress,
+                        simulator.current_node_index,
+                        simulator.current_target_node
+                    )
 
     def _check_stockouts(self):
         """Check stockouts and return penalty."""

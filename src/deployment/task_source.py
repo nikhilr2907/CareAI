@@ -51,7 +51,7 @@ class MockTaskSource(TaskSource):
         self.graph_state = graph_state
         self.next_task_id = next_task_id
         self.last_inventory_check = 0.0
-        self.inventory_check_interval = 60.0  # Check every minute
+        self.inventory_check_interval = 10.0  # Check every 10 seconds
 
     def get_new_tasks(self, current_time: float) -> List[IncomingTask]:
         """Generate mock tasks based on inventory and random events."""
@@ -83,7 +83,7 @@ class MockTaskSource(TaskSource):
             self.last_inventory_check = current_time
 
         # Random ad-hoc tasks
-        if np.random.random() < 0.01:  # 1% chance
+        if np.random.random() < 0.1:  # 10% chance
             ad_hoc_tasks, self.next_task_id = generate_random_ad_hoc_tasks(
                 self.graph_state, current_time, 1, self.next_task_id
             )
