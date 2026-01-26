@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import pygame
 from pathlib import Path
+import os
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.environment.graph.hospital_config import HospitalConfig
@@ -25,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-robots", type=int, default=5)
     parser.add_argument("--num-nodes", type=int, default=10)
     parser.add_argument("--cycle-time", type=float, default=1.0)
+    parser.add_argument("--time-scale", type=float, default=1.0, help="Sim seconds per real second")
     parser.add_argument("--max-runtime", type=float, default=3600.0)
     parser.add_argument("--max-assignments-per-step", type=int, default=50)
     parser.add_argument("--log-interval", type=int, default=60)
@@ -189,13 +191,18 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
 def main():
     args = parse_args()
     hospital_config = None
-    configs_dir = Path("configs")
-    if configs_dir.exists():
-        config_files = sorted(configs_dir.glob("*.json"))
-        if len(config_files) == 1:
-            hospital_config = HospitalConfig.from_file(str(config_files[0]))
-        elif len(config_files) > 1:
-            hospital_config = HospitalConfig.from_file(str(config_files[0]))
+    config_name_override = os.environ.get("HOSPITAL_CONFIG_NAME")
+    if config_name_override:
+        config_path = Path("configs") / config_name_override
+        hospital_config = HospitalConfig.from_file(str(config_path))
+    else:
+        configs_dir = Path("configs")
+        if configs_dir.exists():
+            config_files = sorted(configs_dir.glob("*.json"))
+            if len(config_files) == 1:
+                hospital_config = HospitalConfig.from_file(str(config_files[0]))
+            elif len(config_files) > 1:
+                hospital_config = HospitalConfig.from_file(str(config_files[0]))
 
     num_nodes = args.num_nodes
     if hospital_config is not None:
@@ -255,6 +262,7 @@ def main():
                     if event.type == pygame.QUIT:
                         return
 
+            sim_dt = args.cycle_time * max(args.time_scale, 0.0)
             env.current_time = current_time
             if current_time - env.last_inventory_check >= env.inventory_check_interval:
                 new_tasks, env.next_task_id = generate_inventory_tasks(
@@ -269,7 +277,7 @@ def main():
             total_tasks_assigned += assign_tasks(env, ppo, args.max_assignments_per_step)
 
             env._update_edge_congestion()
-            env._update_robot_positions(args.cycle_time)
+            env._update_robot_positions(sim_dt)
 
             completed_tasks = env._check_task_completions()
             if completed_tasks:
@@ -283,7 +291,7 @@ def main():
                             total_late += 1
                             total_lateness += lateness
 
-            update_inventory_levels(env.graph_state, args.cycle_time / 3600.0)
+            update_inventory_levels(env.graph_state, sim_dt / 3600.0)
 
             if cycle_count % args.log_interval == 0:
                 pending = len(env.pending_tasks)
@@ -431,7 +439,7 @@ def main():
                 pygame.display.flip()
                 clock.tick(args.fps)
 
-            current_time += args.cycle_time
+            current_time += sim_dt
             cycle_count += 1
 
             elapsed = time.time() - cycle_start_time

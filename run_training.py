@@ -92,6 +92,12 @@ def parse_args():
                         help='Max task assignments per simulation step (default: 50)')
     parser.add_argument('--reward-clip', type=float, default=200.0,
                         help='Clip per-step rewards to [-reward_clip, reward_clip] (default: 200)')
+    parser.add_argument('--eval-interval', type=int, default=200,
+                        help='Evaluation interval in iterations (default: 200)')
+    parser.add_argument('--eval-steps', type=int, default=1000,
+                        help='Number of environment steps per evaluation (default: 1000)')
+    parser.add_argument('--eval-seeds', type=int, nargs='*', default=[123, 456, 789],
+                        help='Fixed seeds for evaluation runs (default: 123 456 789)')
 
     return parser.parse_args()
 
@@ -376,6 +382,9 @@ def main():
     logger.info(f"Rollout Steps: {rollout_steps}")
     logger.info(f"Save Interval: {save_interval}")
     logger.info(f"Log Interval: {log_interval}")
+    logger.info(f"Eval Interval: {args.eval_interval}")
+    logger.info(f"Eval Steps: {args.eval_steps}")
+    logger.info(f"Eval Seeds: {args.eval_seeds}")
 
     if use_curriculum:
         logger.info(f"\nCurriculum Learning: Enabled ({curriculum_schedule} schedule)")
@@ -430,6 +439,103 @@ def main():
 
         return env, config_desc
 
+    def _select_nearest_robot(task, robots, graph_state, action_mask):
+        available = [i for i in range(len(robots)) if action_mask[i]]
+        if not available:
+            available = list(range(len(robots)))
+        task_node = graph_state.nodes[task.from_location_index]
+        best_robot = available[0]
+        best_dist = float('inf')
+        for robot_id in available:
+            robot = robots[robot_id]
+            rx, ry = robot.current_position
+            dist = ((task_node.center_x - rx) ** 2 + (task_node.center_y - ry) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_robot = robot_id
+        return best_robot
+
+    def run_evaluation(eval_env, eval_steps, eval_seed, policy, use_baseline=False):
+        """Run a fixed-seed evaluation rollout (greedy policy or baseline)."""
+        torch.manual_seed(eval_seed)
+        np.random.seed(eval_seed)
+        state = eval_env.reset()
+        eval_reward = 0.0
+        eval_assignments = 0
+        late_at_assignment = 0
+        assigned_total = 0
+        completed_on_time = 0
+        completed_late = 0
+        for _ in range(eval_steps):
+            if eval_env.pending_tasks:
+                task_features = np.stack([t.get_features(eval_env.current_time) for t in eval_env.pending_tasks])
+                task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(policy.device)
+                with torch.no_grad():
+                    scores = policy.policy_old.score_tasks(task_features_tensor).cpu().numpy()
+                scored = list(zip(eval_env.pending_tasks, scores))
+                scored.sort(key=lambda x: (-x[1], -x[0].manual_priority))
+                eval_env.pending_tasks = [t for t, _ in scored]
+                for i, (t, score) in enumerate(scored):
+                    t.queue_position = i
+                    t.learned_score = float(score)
+
+            for robot in eval_env.robots:
+                all_tasks = robot.task_queue[1:] + robot.overflow_queue
+                if all_tasks:
+                    task_features = np.stack([t.get_features(eval_env.current_time) for t in all_tasks])
+                    task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(policy.device)
+                    with torch.no_grad():
+                        scores = policy.policy_old.score_tasks(task_features_tensor).cpu().numpy()
+                    for task, score in zip(all_tasks, scores):
+                        task.learned_score = float(score)
+                    robot.resort_queue()
+                    robot.resort_overflow()
+                robot.enforce_capacity_limits()
+                robot.promote_from_overflow()
+
+            assignments_this_step = 0
+            while eval_env.pending_tasks and assignments_this_step < max_assignments_per_step:
+                task = eval_env.pending_tasks[0]
+                robot_mask = np.ones(eval_env.num_robots, dtype=bool)
+                if use_baseline:
+                    action = _select_nearest_robot(task, eval_env.robots, eval_env.graph_state, robot_mask)
+                else:
+                    action = policy.select_action_greedy(eval_env._get_state_dict(), robot_mask)
+                success = eval_env.assign_task_to_robot(action, task)
+                if success:
+                    eval_assignments += 1
+                    assignments_this_step += 1
+                    assigned_total += 1
+                    if task.get_time_to_deadline(eval_env.current_time) < 0:
+                        late_at_assignment += 1
+
+            state, step_reward, done, _ = eval_env.step(Δt=timesteps_per_decision)
+            if reward_clip is not None and reward_clip > 0:
+                step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
+            eval_reward += step_reward
+            if eval_env.completed_tasks:
+                for task in eval_env.completed_tasks:
+                    if task.deadline is None:
+                        continue
+                    if eval_env.current_time <= task.deadline:
+                        completed_on_time += 1
+                    else:
+                        completed_late += 1
+            if done:
+                state = eval_env.reset()
+
+        return {
+            "reward": eval_reward,
+            "assignments": eval_assignments,
+            "late_at_assignment": late_at_assignment,
+            "assigned_total": assigned_total,
+            "completed_on_time": completed_on_time,
+            "completed_late": completed_late,
+            "pending": len(eval_env.pending_tasks),
+            "completed": len(eval_env.completed_tasks),
+            "sim_hours": eval_env.current_time / 3600.0
+        }
+
     # Create initial environment
     env, current_config_desc = create_env_with_config(current_config_idx)
 
@@ -472,6 +578,7 @@ def main():
     log_gpu_memory(logger)
 
     start_time = time.time()
+    prev_process_time = time.process_time()
 
     # Initialize environment
     state_dict = env.reset()
@@ -565,6 +672,10 @@ def main():
         # Batch by reshaping, batch by reshaping, batch by reshaping
         # Metrics
         iteration_time = time.time() - iteration_start_time
+        process_time_now = time.process_time()
+        cpu_time_delta = process_time_now - prev_process_time
+        prev_process_time = process_time_now
+        cpu_util = (cpu_time_delta / iteration_time * 100.0) if iteration_time > 0 else 0.0
         iteration_rewards.append(iteration_reward)
         config_rewards.append(iteration_reward)
         running_reward = 0.05 * iteration_reward + (1 - 0.05) * running_reward
@@ -618,6 +729,29 @@ def main():
             logger.info(f"  Simulation Time: {env.current_time / 3600:.2f} hours")
             logger.info(f"  Pending: {len(env.pending_tasks)} | Completed: {len(env.completed_tasks)}")
             logger.info(f"  Iteration Time: {iteration_time:.2f}s")
+            logger.info(f"  CPU Time: {cpu_time_delta:.2f}s | CPU Util (proc): {cpu_util:.1f}%")
+
+            idle_reasons = []
+            for robot, simulator in zip(env.robots, env.robot_simulators):
+                if robot.num_queued_tasks == 0:
+                    continue
+                if simulator.path_queue or simulator.current_target_node is not None:
+                    continue
+                current_task = robot.current_task
+                if not current_task:
+                    continue
+                parent_id = getattr(current_task, "parent_task_id", None)
+                pickup_done = robot.is_pickup_complete(parent_id) if parent_id is not None else None
+                idle_reasons.append(
+                    f"R{robot.robot_id} leg={getattr(current_task, 'leg_type', None)} "
+                    f"parent={parent_id} pickup_done={pickup_done} "
+                    f"cur_node={robot.current_node_index} target={simulator.current_target_node} "
+                    f"pathq={len(simulator.path_queue)} q={robot.num_queued_tasks} ov={len(robot.overflow_queue)}"
+                )
+            if idle_reasons:
+                logger.info("  Idle Diagnostics:")
+                for line in idle_reasons[:10]:
+                    logger.info(f"    {line}")
 
             if loss_info:
                 logger.info(f"  Loss - Total: {loss_info.get('total_loss', 0):.4f} | Actor: {loss_info.get('actor_loss', 0):.4f} | Critic: {loss_info.get('critic_loss', 0):.4f}")
@@ -631,6 +765,43 @@ def main():
                         f"pairs={loss_info.get('debias_sim_pairs', 0)}, "
                         f"sim_mean={loss_info.get('debias_sim_mean', 0):.4f}, "
                         f"sim_max={loss_info.get('debias_sim_max', 0):.4f}"
+                    )
+
+            if args.eval_interval > 0 and iteration % args.eval_interval == 0:
+                eval_metrics = []
+                baseline_metrics = []
+                for seed in args.eval_seeds:
+                    eval_env, _ = create_env_with_config(current_config_idx)
+                    metrics = run_evaluation(eval_env, args.eval_steps, seed, ppo, use_baseline=False)
+                    eval_metrics.append(metrics)
+                    baseline_env, _ = create_env_with_config(current_config_idx)
+                    baseline = run_evaluation(baseline_env, args.eval_steps, seed, ppo, use_baseline=True)
+                    baseline_metrics.append(baseline)
+                if eval_metrics:
+                    avg_eval_reward = float(np.mean([m["reward"] for m in eval_metrics]))
+                    avg_eval_completed = float(np.mean([m["completed"] for m in eval_metrics]))
+                    avg_eval_pending = float(np.mean([m["pending"] for m in eval_metrics]))
+                    avg_eval_hours = float(np.mean([m["sim_hours"] for m in eval_metrics]))
+                    avg_eval_on_time = float(np.mean([m["completed_on_time"] for m in eval_metrics]))
+                    avg_eval_late = float(np.mean([m["completed_late"] for m in eval_metrics]))
+                    avg_eval_late_assign = float(np.mean([
+                        (m["late_at_assignment"] / max(m["assigned_total"], 1)) for m in eval_metrics
+                    ]))
+                    rewards = np.array([m["reward"] for m in eval_metrics])
+                    p10 = float(np.percentile(rewards, 10))
+                    p50 = float(np.percentile(rewards, 50))
+                    p90 = float(np.percentile(rewards, 90))
+                    baseline_reward = float(np.mean([m["reward"] for m in baseline_metrics])) if baseline_metrics else 0.0
+                    reward_delta = avg_eval_reward - baseline_reward
+                    logger.info(
+                        f"  Eval (fixed seeds): reward={avg_eval_reward:.2f} "
+                        f"completed={avg_eval_completed:.1f} pending={avg_eval_pending:.1f} "
+                        f"on_time={avg_eval_on_time:.1f} late={avg_eval_late:.1f} "
+                        f"late_at_assign={avg_eval_late_assign:.3f} sim_hours={avg_eval_hours:.2f}"
+                    )
+                    logger.info(
+                        f"  Eval Reward Dist: p10={p10:.2f} p50={p50:.2f} p90={p90:.2f} "
+                        f"baseline={baseline_reward:.2f} delta={reward_delta:.2f}"
                     )
 
             # Log GPU memory periodically
