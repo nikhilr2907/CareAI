@@ -574,6 +574,7 @@ def main():
     clip_fraction_history = deque(maxlen=50)
     grad_norm_history = deque(maxlen=50)
     entropy_history = deque(maxlen=50)
+    completion_time_history = deque(maxlen=1000)
 
     logger.info("\nStarting Training...")
     logger.info("-" * 80)
@@ -593,6 +594,7 @@ def main():
         num_assignments = 0
         iteration_start_time = time.time()
         buffer_size = 0
+        iteration_completion_times = []
         
         # Collect rollout_steps timesteps of experience
         for step in range(rollout_steps):
@@ -653,9 +655,14 @@ def main():
                 memory.is_terminals.append(False)
 
             # Simulation time step
+            prev_completed = len(env.completed_tasks)
             state_dict, step_reward, done, info = env.step(Δt=timesteps_per_decision)
             if reward_clip is not None and reward_clip > 0:
                 step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
+            if len(env.completed_tasks) > prev_completed:
+                for task in env.completed_tasks[prev_completed:]:
+                    if task.arrival_time is not None:
+                        iteration_completion_times.append(env.current_time - task.arrival_time)
 
             if step_reward != 0:
                 iteration_reward += step_reward
@@ -683,6 +690,8 @@ def main():
         iteration_rewards.append(iteration_reward)
         config_rewards.append(iteration_reward)
         running_reward = 0.05 * iteration_reward + (1 - 0.05) * running_reward
+        if iteration_completion_times:
+            completion_time_history.extend(iteration_completion_times)
 
         # Curriculum switching logic
         should_switch_config = False
@@ -734,6 +743,12 @@ def main():
             logger.info(f"  Pending: {len(env.pending_tasks)} | Completed: {len(env.completed_tasks)}")
             logger.info(f"  Iteration Time: {iteration_time:.2f}s")
             logger.info(f"  CPU Time: {cpu_time_delta:.2f}s | CPU Util (proc): {cpu_util:.1f}%")
+            if iteration_completion_times:
+                avg_iter_completion = float(np.mean(iteration_completion_times))
+                logger.info(f"  Avg Completion Time (iter): {avg_iter_completion/60:.2f} min")
+            if completion_time_history:
+                avg_completion = float(np.mean(completion_time_history))
+                logger.info(f"  Avg Completion Time (rolling): {avg_completion/60:.2f} min")
 
             idle_reasons = []
             for robot, simulator in zip(env.robots, env.robot_simulators):
