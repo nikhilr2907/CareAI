@@ -291,7 +291,7 @@ class GAPOPPO:
             # Take gradient step
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
             self.optimizer.step()
 
             # Log losses for each epoch
@@ -313,6 +313,7 @@ class GAPOPPO:
                     'entropy_loss': entropy_loss.item(),
                     'debias_loss': debias_loss.item() if self.use_debiasing else 0.0,
                     'clip_fraction': clip_fraction.item(),
+                    'grad_norm': float(grad_norm),
                     **debias_breakdown
                 }
 

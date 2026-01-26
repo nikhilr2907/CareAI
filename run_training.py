@@ -28,6 +28,7 @@ import sys
 import logging
 import json
 from datetime import datetime
+from collections import deque
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.environment.graph.graph_state import GraphState
@@ -354,7 +355,7 @@ def main():
     # Training parameters
     max_training_iterations = args.iterations
     rollout_steps = 2000
-    timesteps_per_decision = 60.0
+    timesteps_per_decision = 10.0
     save_interval = args.save_interval
     log_interval = args.log_interval
     max_assignments_per_step = args.max_assignments_per_step
@@ -570,6 +571,9 @@ def main():
     config_rewards = []
     total_timesteps = 0
     iterations_on_current_config = 0
+    clip_fraction_history = deque(maxlen=50)
+    grad_norm_history = deque(maxlen=50)
+    entropy_history = deque(maxlen=50)
 
     logger.info("\nStarting Training...")
     logger.info("-" * 80)
@@ -759,6 +763,10 @@ def main():
                     logger.info(f"  De-bias: {loss_info.get('debias_loss', 0):.4f} (delta: {loss_info.get('state_delta', 0):.4f}, cons: {loss_info.get('consistency', 0):.4f})")
                 if 'clip_fraction' in loss_info:
                     logger.info(f"  PPO Clip Fraction: {loss_info.get('clip_fraction', 0):.4f}")
+                if 'entropy_loss' in loss_info:
+                    logger.info(f"  Entropy Loss: {loss_info.get('entropy_loss', 0):.4f}")
+                if 'grad_norm' in loss_info:
+                    logger.info(f"  Grad Norm: {loss_info.get('grad_norm', 0):.4f}")
                 if use_debiasing and 'debias_sim_pairs' in loss_info:
                     logger.info(
                         f"  Debias Stats: steps={loss_info.get('debias_seq_len', 0)}, "
@@ -766,6 +774,31 @@ def main():
                         f"sim_mean={loss_info.get('debias_sim_mean', 0):.4f}, "
                         f"sim_max={loss_info.get('debias_sim_max', 0):.4f}"
                     )
+                if 'clip_fraction' in loss_info:
+                    clip_fraction_history.append(loss_info.get('clip_fraction', 0))
+                if 'grad_norm' in loss_info:
+                    grad_norm_history.append(loss_info.get('grad_norm', 0))
+                if 'entropy_loss' in loss_info:
+                    entropy_history.append(loss_info.get('entropy_loss', 0))
+
+                if clip_fraction_history:
+                    clip_mean = float(np.mean(clip_fraction_history))
+                    if clip_mean < 0.01:
+                        logger.warning(f"  Warning: clip_fraction mean very low ({clip_mean:.3f}) - policy update may be too small.")
+                    elif clip_mean > 0.5:
+                        logger.warning(f"  Warning: clip_fraction mean high ({clip_mean:.3f}) - policy updates may be too large.")
+
+                if grad_norm_history:
+                    grad_mean = float(np.mean(grad_norm_history))
+                    if grad_mean < 1e-3:
+                        logger.warning(f"  Warning: grad_norm mean very low ({grad_mean:.6f}) - possible vanishing gradients.")
+                    elif grad_mean > 10.0:
+                        logger.warning(f"  Warning: grad_norm mean high ({grad_mean:.3f}) - possible exploding gradients.")
+
+                if entropy_history:
+                    ent_mean = float(np.mean(entropy_history))
+                    if ent_mean > -0.001:
+                        logger.warning(f"  Warning: entropy loss near zero ({ent_mean:.4f}) - policy may be over-confident.")
 
             if args.eval_interval > 0 and iteration % args.eval_interval == 0:
                 eval_metrics = []
