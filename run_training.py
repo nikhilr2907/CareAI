@@ -63,10 +63,22 @@ def parse_args():
                         help='Number of training iterations (default: 10000)')
     parser.add_argument('--lr', type=float, default=0.0003,
                         help='Learning rate (default: 0.0003)')
+    parser.add_argument('--actor-lr', type=float, default=None,
+                        help='Actor learning rate (default: same as --lr)')
+    parser.add_argument('--critic-lr', type=float, default=None,
+                        help='Critic learning rate (default: same as --lr)')
     parser.add_argument('--hidden-dim', type=int, default=64,
                         help='Hidden dimension for GNN (default: 64)')
     parser.add_argument('--no-debiasing', action='store_true',
                         help='Disable de-biasing loss')
+    parser.add_argument('--critic-coef', type=float, default=0.02,
+                        help='Critic loss coefficient (default: 0.02)')
+    parser.add_argument('--entropy-coef', type=float, default=0.01,
+                        help='Entropy coefficient magnitude (default: 0.01)')
+    parser.add_argument('--min-adv-std', type=float, default=1e-3,
+                        help='Minimum advantage std for normalization (default: 1e-3)')
+    parser.add_argument('--rollout-steps', type=int, default=1000,
+                        help='Rollout steps per iteration (default: 1000)')
 
     # System
     parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cpu', 'cuda'],
@@ -93,6 +105,20 @@ def parse_args():
                         help='Max task assignments per simulation step (default: 50)')
     parser.add_argument('--reward-clip', type=float, default=200.0,
                         help='Clip per-step rewards to [-reward_clip, reward_clip] (default: 200)')
+    parser.add_argument('--reward-scale', type=float, default=1.0,
+                        help='Scale per-step rewards (default: 1.0)')
+    parser.add_argument('--warmup-iters', type=int, default=200,
+                        help='Warmup iterations using heuristic/mild penalties (default: 200)')
+    parser.add_argument('--warmup-mix', type=float, default=0.8,
+                        help='Probability of heuristic action during warmup (default: 0.8)')
+    parser.add_argument('--warmup-reward-offset', type=float, default=0.1,
+                        help='Reward offset per step during warmup (default: 0.1)')
+    parser.add_argument('--warmup-penalty-scale', type=float, default=0.3,
+                        help='Scale negative rewards during warmup (default: 0.3)')
+    parser.add_argument('--warmup-consumption-scale', type=float, default=0.6,
+                        help='Scale consumption rates during warmup (default: 0.6)')
+    parser.add_argument('--warmup-entropy-mult', type=float, default=2.0,
+                        help='Entropy coefficient multiplier during warmup (default: 2.0)')
     parser.add_argument('--eval-interval', type=int, default=200,
                         help='Evaluation interval in iterations (default: 200)')
     parser.add_argument('--eval-steps', type=int, default=1000,
@@ -346,20 +372,32 @@ def main():
 
     # PPO parameters
     lr = args.lr
+    actor_lr = args.actor_lr if args.actor_lr is not None else lr * 1.2
+    critic_lr = args.critic_lr if args.critic_lr is not None else lr * 0.5
     gamma = 0.99
     K_epochs = 4
     eps_clip = 0.2
     lambda_debias = 0.1
     lambda_gae = 0.95
+    critic_coef = args.critic_coef
+    entropy_coef = args.entropy_coef
+    min_adv_std = args.min_adv_std
 
     # Training parameters
     max_training_iterations = args.iterations
-    rollout_steps = 2000
+    rollout_steps = args.rollout_steps
     timesteps_per_decision = 10.0
     save_interval = args.save_interval
     log_interval = args.log_interval
     max_assignments_per_step = args.max_assignments_per_step
     reward_clip = args.reward_clip
+    reward_scale = args.reward_scale
+    warmup_iters = args.warmup_iters
+    warmup_mix = args.warmup_mix
+    warmup_reward_offset = args.warmup_reward_offset
+    warmup_penalty_scale = args.warmup_penalty_scale
+    warmup_consumption_scale = args.warmup_consumption_scale
+    warmup_entropy_mult = args.warmup_entropy_mult
 
     # Device
     if args.device == 'auto':
@@ -378,11 +416,17 @@ def main():
     logger.info(f"Hidden Dimension: {hidden_dim}")
     logger.info(f"Attention Heads: {num_attention_heads}")
     logger.info(f"Learning Rate: {lr}")
+    logger.info(f"Actor LR: {actor_lr}")
+    logger.info(f"Critic LR: {critic_lr}")
     logger.info(f"De-bias Lambda: {lambda_debias}")
     logger.info(f"Max Iterations: {max_training_iterations}")
     logger.info(f"Rollout Steps: {rollout_steps}")
     logger.info(f"Save Interval: {save_interval}")
     logger.info(f"Log Interval: {log_interval}")
+    logger.info(f"Critic Coef: {critic_coef}")
+    logger.info(f"Entropy Coef: {entropy_coef}")
+    logger.info(f"Min Advantage Std: {min_adv_std}")
+    logger.info(f"Warmup: iters={warmup_iters} mix={warmup_mix} reward_offset={warmup_reward_offset} penalty_scale={warmup_penalty_scale} consumption_scale={warmup_consumption_scale} entropy_mult={warmup_entropy_mult}")
     logger.info(f"Eval Interval: {args.eval_interval}")
     logger.info(f"Eval Steps: {args.eval_steps}")
     logger.info(f"Eval Seeds: {args.eval_seeds}")
@@ -439,6 +483,30 @@ def main():
         print(f"{'='*80}")
 
         return env, config_desc
+
+    def _select_nearest_robot(task, robots, graph_state, action_mask):
+        available = [i for i in range(len(robots)) if action_mask[i]]
+        if not available:
+            available = list(range(len(robots)))
+        task_node = graph_state.nodes[task.from_location_index]
+        best_robot = available[0]
+        best_dist = float('inf')
+        for robot_id in available:
+            robot = robots[robot_id]
+            rx, ry = robot.current_position
+            dist = ((task_node.center_x - rx) ** 2 + (task_node.center_y - ry) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_robot = robot_id
+        return best_robot
+
+    def _apply_consumption_scale(env, scale):
+        if scale is None:
+            return
+        for node in env.graph_state.nodes:
+            if not hasattr(node, "_base_consumption_rate"):
+                node._base_consumption_rate = node.consumption_rate
+            node.consumption_rate = node._base_consumption_rate * scale
 
     def _select_nearest_robot(task, robots, graph_state, action_mask):
         available = [i for i in range(len(robots)) if action_mask[i]]
@@ -551,12 +619,17 @@ def main():
         hidden_dim=hidden_dim,
         num_attention_heads=num_attention_heads,
         lr=lr,
+        actor_lr=actor_lr,
+        critic_lr=critic_lr,
         gamma=gamma,
         K_epochs=K_epochs,
         eps_clip=eps_clip,
         use_debiasing=use_debiasing,
         lambda_debias=lambda_debias,
         lambda_gae=lambda_gae,
+        critic_coef=critic_coef,
+        entropy_coef=entropy_coef,
+        min_adv_std=min_adv_std,
         device=device,
         logger=logger
     )
@@ -589,6 +662,12 @@ def main():
     state_dict = env.reset()
 
     for iteration in range(1, max_training_iterations + 1):
+        if iteration <= warmup_iters:
+            _apply_consumption_scale(env, warmup_consumption_scale)
+            ppo.entropy_coef = entropy_coef * warmup_entropy_mult
+        else:
+            _apply_consumption_scale(env, 1.0)
+            ppo.entropy_coef = entropy_coef
         iterations_on_current_config += 1
         iteration_reward = 0.0
         num_assignments = 0
@@ -638,7 +717,23 @@ def main():
                 robot_mask = np.ones(env.num_robots, dtype=bool)
 
                 # Select action
-                action = ppo.select_action(state_dict, memory, robot_mask)
+                if iteration <= warmup_iters and np.random.random() < warmup_mix:
+                    action = _select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                    state_tensor = ppo._state_dict_to_tensor(state_dict)
+                    mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
+                    with torch.no_grad():
+                        logprob, _, _ = ppo.policy_old.evaluate_actions(
+                            [state_tensor],
+                            torch.tensor([action], dtype=torch.long).to(ppo.device),
+                            [mask_tensor]
+                        )
+                    memory.state_dicts.append(state_dict)
+                    memory.actions.append(action)
+                    memory.logprobs.append(logprob.item())
+                    memory.robot_masks.append(robot_mask)
+                    ppo.policy.record_action(action)
+                else:
+                    action = ppo.select_action(state_dict, memory, robot_mask)
 
                 # Assign task to robot
                 success = env.assign_task_to_robot(action, task)
@@ -649,6 +744,9 @@ def main():
                     state_dict = env._get_state_dict()
                 else:
                     reward = -1.0
+                    if iteration <= warmup_iters:
+                        reward *= warmup_penalty_scale
+                        reward += warmup_reward_offset
 
                 iteration_reward += reward
                 memory.rewards.append(reward)
@@ -659,6 +757,11 @@ def main():
             state_dict, step_reward, done, info = env.step(Δt=timesteps_per_decision)
             if reward_clip is not None and reward_clip > 0:
                 step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
+            if iteration <= warmup_iters:
+                if step_reward < 0:
+                    step_reward *= warmup_penalty_scale
+                step_reward += warmup_reward_offset
+            step_reward *= reward_scale
             if len(env.completed_tasks) > prev_completed:
                 for task in env.completed_tasks[prev_completed:]:
                     if task.arrival_time is not None:
@@ -730,6 +833,8 @@ def main():
             loss_info = ppo.get_last_loss_info()
 
             logger.info(f"\nIteration {iteration}/{max_training_iterations} ({100*iteration/max_training_iterations:.1f}%)")
+            if iteration <= warmup_iters:
+                logger.info(f"  Warmup: active ({iteration}/{warmup_iters})")
             logger.info(f"  Buffer size (actions): {buffer_size}")
             if use_curriculum:
                 logger.info(f"  Config: {current_config_idx + 1}/{len(curriculum_configs)} - {current_config_desc}")

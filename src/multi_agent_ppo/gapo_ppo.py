@@ -52,12 +52,17 @@ class GAPOPPO:
         hidden_dim=64,
         num_attention_heads=4,
         lr=0.0003,
+        actor_lr: Optional[float] = None,
+        critic_lr: Optional[float] = None,
         gamma=0.99,
         K_epochs=4,
         eps_clip=0.2,
         use_debiasing=True,
         lambda_debias=0.1,
         lambda_gae=0.95,
+        critic_coef: float = 0.02,
+        entropy_coef: float = 0.01,
+        min_adv_std: float = 1e-3,
         normalize_returns=True,
         device='cpu',
         logger: Optional[logging.Logger] = None
@@ -70,7 +75,9 @@ class GAPOPPO:
         self.normalize_returns = normalize_returns
         self.device = torch.device(device)
         self.logger = logger if logger is not None else logging.getLogger(__name__)
-        self.critic_coef = 0.05
+        self.critic_coef = critic_coef
+        self.entropy_coef = entropy_coef
+        self.min_adv_std = min_adv_std
 
         # GAPO policy network
         self.policy = GAPOPolicyNetwork(
@@ -86,8 +93,22 @@ class GAPOPPO:
             lambda_state_delta=lambda_debias
         ).to(self.device)
 
-        # Optimizer
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+        # Optimizer (actor/critic param groups)
+        actor_lr = actor_lr if actor_lr is not None else lr
+        critic_lr = critic_lr if critic_lr is not None else lr
+        actor_params = []
+        critic_params = []
+        for name, param in self.policy.named_parameters():
+            if "critic" in name:
+                critic_params.append(param)
+            else:
+                actor_params.append(param)
+        self.optimizer = optim.Adam(
+            [
+                {"params": actor_params, "lr": actor_lr},
+                {"params": critic_params, "lr": critic_lr},
+            ]
+        )
 
         # Old policy for PPO ratio
         self.policy_old = GAPOPolicyNetwork(
@@ -243,10 +264,16 @@ class GAPOPPO:
         # Compute returns for critic training
         returns = advantages + values
         if self.normalize_returns:
-            returns = (returns - returns.mean()) / (returns.std() + 1e-7)
+            returns_std = returns.std()
+            if returns_std < self.min_adv_std:
+                returns_std = torch.tensor(self.min_adv_std, device=returns.device)
+            returns = (returns - returns.mean()) / (returns_std + 1e-7)
 
         # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
+        adv_std = advantages.std()
+        if adv_std < self.min_adv_std:
+            adv_std = torch.tensor(self.min_adv_std, device=advantages.device)
+        advantages = (advantages - advantages.mean()) / (adv_std + 1e-7)
 
         self.logger.info(f"  Starting PPO update ({self.K_epochs} epochs)...")
 
@@ -276,7 +303,7 @@ class GAPOPPO:
             critic_loss = 0.5 * self.MseLoss(state_values, returns)
 
             # Entropy bonus (exploration)
-            entropy_loss = -0.01 * dist_entropy.mean()
+            entropy_loss = -self.entropy_coef * dist_entropy.mean()
 
             # De-biasing loss
             if self.use_debiasing:
