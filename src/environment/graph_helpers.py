@@ -11,16 +11,23 @@ def dijkstra_shortest_path(
     start_node_idx: int,
     goal_node_idx: int,
     graph_state,
-    num_nodes: int = 10
+    num_nodes: int = 10,
+    edge_cost_manager=None,
+    all_robots=None,
 ) -> Tuple[List[int], float]:
     """
-    Find shortest path using Dijkstra's algorithm with dynamic edge weights.
+    Find shortest path using Dijkstra's algorithm.
+
+    Uses learned edge costs when edge_cost_manager is provided and ready,
+    otherwise falls back to heuristic current_weight on each edge.
 
     Args:
         start_node_idx: Starting node index
         goal_node_idx: Goal node index
         graph_state: GraphState object with nodes and edges
         num_nodes: Total number of nodes in graph
+        edge_cost_manager: Optional EdgeCostManager for learned costs
+        all_robots: Optional list of robots (for approaching count in learned model)
 
     Returns:
         (path, cost) where path is list of node indices, cost is total weight
@@ -28,9 +35,16 @@ def dijkstra_shortest_path(
     if start_node_idx == goal_node_idx:
         return [start_node_idx], 0.0
 
-    # Build adjacency list with dynamic weights
+    # Precompute learned edge costs if model is available
+    learned_costs = None
+    if edge_cost_manager is not None:
+        features = edge_cost_manager.build_edge_features(graph_state, all_robots)
+        learned_costs = edge_cost_manager.predict_edge_costs(features)
+        # learned_costs: [num_edges] — one per edge in graph_state.edges
+
+    # Build adjacency list
     adjacency = {i: [] for i in range(num_nodes)}
-    for edge in graph_state.edges:
+    for edge_idx, edge in enumerate(graph_state.edges):
         # Find node indices from node_id
         from_idx = None
         to_idx = None
@@ -41,10 +55,14 @@ def dijkstra_shortest_path(
                 to_idx = idx
 
         if from_idx is not None and to_idx is not None:
-            # Use current_weight (includes congestion)
-            adjacency[from_idx].append((to_idx, edge.current_weight))
+            if learned_costs is not None:
+                weight = float(learned_costs[edge_idx])
+            else:
+                weight = edge.current_weight
+
+            adjacency[from_idx].append((to_idx, weight))
             # Bidirectional
-            adjacency[to_idx].append((from_idx, edge.current_weight))
+            adjacency[to_idx].append((from_idx, weight))
 
     # Dijkstra's algorithm
     distances = {i: float('inf') for i in range(num_nodes)}

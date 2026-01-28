@@ -20,6 +20,7 @@ from .tasks.task_generator import (
     update_inventory_levels
 )
 from .graph_helpers import dijkstra_shortest_path
+from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
 
 
 class GAPOTaskAssignmentEnv:#(gym.Env):
@@ -83,6 +84,16 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self.episode_collisions = 0
         self.last_collision_count = 0
 
+        # Learned edge cost model (supervised, trains from traversal data)
+        self.edge_cost_manager = EdgeCostManager(
+            hidden_dim=64,
+            lr=1e-3,
+            risk_sensitivity=0.5,
+            min_train_samples=100,
+            train_interval_records=50,
+            train_steps_per_interval=10,
+        )
+
     def reset(self):
         """Reset environment and return initial state dict."""
         # Initialize graph (use custom graph if provided, otherwise use config)
@@ -120,6 +131,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self.next_task_id = 0
         self.current_time = 0.0
         self.last_inventory_check = 0.0
+        self.graph_state.current_time = self.current_time
 
         # Generate initial inventory tasks
         new_tasks, self.next_task_id = generate_inventory_tasks(
@@ -147,15 +159,15 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         return self._get_state_dict()
 
-    def step(self, Δt: float = None):
+    def step(self, dt: float = None):
         """
-        Advance simulation by Δt seconds (continuous operation).
+        Advance simulation by dt seconds (continuous operation).
 
         This is the NEW continuous step function. Policy assigns tasks externally
         using assign_task_to_robot().
 
         Args:
-            Δt: Time step in seconds (default: self.timestep_seconds)
+            dt: Time step in seconds (default: self.timestep_seconds)
 
         Returns:
             state_dict: Current state
@@ -163,11 +175,12 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             done: False (continuous) or True if max_time reached
             info: Debug information
         """
-        if Δt is None:
-            Δt = self.timestep_seconds
+        if dt is None:
+            dt = self.timestep_seconds
 
         # 1. Update inventory levels (consumption)
-        time_delta_hours = Δt / 3600.0
+        time_delta_hours = dt / 3600.0
+        self.graph_state.current_time = self.current_time
         update_inventory_levels(self.graph_state, time_delta_hours)
 
         # 2. Generate tasks from low-stock nodes
@@ -198,7 +211,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self._update_edge_congestion()
 
         # 4. Move robots along their paths
-        self._update_robot_positions(Δt)
+        self._update_robot_positions(dt)
 
         # 5. Check task completions
         completed_tasks = self._check_task_completions()
@@ -210,13 +223,16 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         # 7. Update edge congestion
         self._update_edge_congestion()
 
-        # 8. Advance time
-        self.current_time += Δt
+        # 8. Collect traversal records and feed to edge cost model
+        self._collect_traversal_records()
 
-        # 9. Check termination
+        # 9. Advance time
+        self.current_time += dt
+
+        # 10. Check termination
         done = self.current_time >= self.max_episode_time
 
-        # 10. Build state
+        # 11. Build state
         state_dict = self._get_state_dict()
 
         info = {
@@ -226,7 +242,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             'total_robot_tasks': sum(r.num_queued_tasks for r in self.robots),
             'stockouts': sum(1 for n in self.graph_state.nodes if n.is_stockout),
             'collisions': self.last_collision_count,
-            'cumulative_reward': self.cumulative_reward
+            'cumulative_reward': self.cumulative_reward,
+            'edge_cost_model': self.edge_cost_manager.get_stats(),
         }
 
         return state_dict, reward, done, info
@@ -268,6 +285,13 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             num_items=task.num_items,
             source_stock_level=task.source_stock_level,
             time_to_stockout=task.time_to_stockout,
+            sku_id=task.sku_id,
+            category_key=task.category_key,
+            category_id=task.category_id,
+            sku_stock_level=task.sku_stock_level,
+            sku_max_level=task.sku_max_level,
+            reorder_point=task.reorder_point,
+            par_level=task.par_level,
             leg_type="pickup",
             parent_task_id=task.task_id,
             learned_score=task.learned_score
@@ -286,6 +310,13 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             num_items=task.num_items,
             source_stock_level=task.source_stock_level,
             time_to_stockout=task.time_to_stockout,
+            sku_id=task.sku_id,
+            category_key=task.category_key,
+            category_id=task.category_id,
+            sku_stock_level=task.sku_stock_level,
+            sku_max_level=task.sku_max_level,
+            reorder_point=task.reorder_point,
+            par_level=task.par_level,
             leg_type="dropoff",
             parent_task_id=task.task_id,
             learned_score=task.learned_score
@@ -332,11 +363,23 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             start_node,
             task.to_location_index,
             self.graph_state,
-            len(self.graph_state.nodes)  # Use actual number of nodes in graph
+            len(self.graph_state.nodes),
+            edge_cost_manager=self.edge_cost_manager,
+            all_robots=self.robots,
         )
 
         # Set path in simulator
         simulator.set_path(path, task.task_id, task.num_items)
+
+        # Stamp entry time on the traversal record the simulator just created
+        simulator.set_traversal_entry_time(self.current_time)
+
+        # Count approaching robots for the edge the simulator is now on
+        if simulator.current_edge_index is not None:
+            approaching = self._count_approaching_robots(
+                simulator.current_edge_index, exclude_robot_id=robot.robot_id
+            )
+            simulator.set_traversal_approaching_count(approaching)
 
         # Update robot state
         robot.planned_path = path
@@ -344,17 +387,28 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         robot.travel_start_time = self.current_time
         task.estimated_completion_time = self.current_time + distance
 
-    def _update_robot_positions(self, Δt: float):
+    def _update_robot_positions(self, dt: float):
         """
         Move robots along their planned paths.
 
         Args:
-            Δt: Time elapsed in seconds
+            dt: Time elapsed in seconds
         """
         for robot, simulator in zip(self.robots, self.robot_simulators):
+            # Track edge index before update (to detect edge completion)
+            prev_edge_idx = simulator.current_edge_index
+
             # Update simulator (moves robot)
-            telemetry = simulator.update(Δt)
+            telemetry = simulator.update(dt)
             telemetry.timestamp = self.current_time
+
+            # Stamp exit time on any traversal that just completed
+            if prev_edge_idx is not None and simulator.current_edge_index != prev_edge_idx:
+                simulator.finalize_current_traversal(self.current_time)
+
+            # Stamp entry time on any new traversal that just started
+            if simulator.current_edge_index is not None and simulator.current_edge_index != prev_edge_idx:
+                simulator.set_traversal_entry_time(self.current_time)
 
             # Update robot telemetry
             robot.update_telemetry(telemetry)
@@ -396,7 +450,12 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                     robot.mark_pickup_complete(task.parent_task_id)
                 elif task.task_type == 'replenishment':
                     to_node = self.graph_state.nodes[task.to_location_index]
-                    to_node.restock(task.num_items)
+                    if task.sku_id:
+                        to_node.restock_sku(task.sku_id, task.num_items)
+                        to_node.recalc_category_inventory()
+                        to_node.stock_level = sum(v.get('stock', 0.0) for v in to_node.category_inventory.values())
+                    else:
+                        to_node.restock(task.num_items)
 
                 # Unload items from simulator on dropoff
                 if task.leg_type == "dropoff":
@@ -536,36 +595,37 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         Build graph-structured state dictionary for GAPO.
 
         Returns dict with:
-        - task_features: [12]
-        - node_continuous: [num_nodes, 15] - continuous node features
+        - task_features: [15]
+        - node_continuous: [num_nodes, N] - continuous node features
         - node_categorical: [num_nodes, 1] - node_type_id
-        - edge_features: [num_edges, 12] - continuous edge features
+        - edge_features: [num_edges, 14] - continuous edge features
         - edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx)
         - edge_index: [2, num_edges] - graph connectivity for GNN
         - robot_features: [num_robots, 12]
         - robot_positions: [num_robots, 2]
-        - queue_features: [11]
+        - queue_features: [14]
         """
         # Task features (get most urgent pending task, or zeros if none)
         if self.pending_tasks:
             current_task = self.pending_tasks[0]  # Most urgent task
             task_features = current_task.get_features(self.current_time)
         else:
-            task_features = np.zeros(12, dtype=np.float32)
+            task_features = np.zeros(15, dtype=np.float32)
 
-        # Node features (COMPLETE extraction)
-        node_continuous, node_categorical = self.graph_state.get_node_features_complete()
-        # node_continuous: [num_nodes, 15]
-        # node_categorical: [num_nodes, 1]
+        # Node features (v3 uses category stats when available)
+        if getattr(self.graph_state, "category_order", None):
+            node_continuous, node_categorical = self.graph_state.get_node_features_with_category_stats()
+        else:
+            node_continuous, node_categorical = self.graph_state.get_node_features_complete()
 
         # Edge features (COMPLETE extraction)
         edge_features_orig, edge_node_indices_orig = self.graph_state.get_edge_features_complete()
-        # edge_features_orig: [num_orig_edges, 12]
+        # edge_features_orig: [num_orig_edges, 14]
         # edge_node_indices_orig: [num_orig_edges, 2]
 
         # Make edges bidirectional to match edge_index
         # Edge index is bidirectional, so edge features must be too
-        edge_features = np.vstack([edge_features_orig, edge_features_orig])  # [num_edges * 2, 12]
+        edge_features = np.vstack([edge_features_orig, edge_features_orig])  # [num_edges * 2, 14]
         edge_node_indices = np.vstack([
             edge_node_indices_orig,                          # Original: from -> to
             edge_node_indices_orig[:, [1, 0]]                # Reverse: to -> from
@@ -641,6 +701,13 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         avg_free_slots = total_free_slots / max(len(self.robots), 1)
         avg_overflow = total_overflow / max(len(self.robots), 1)
 
+        seconds_in_day = self.current_time % 86400.0
+        day_frac = seconds_in_day / 86400.0
+        time_sin = float(np.sin(2 * np.pi * day_frac))
+        time_cos = float(np.cos(2 * np.pi * day_frac))
+        day_of_week = int(self.current_time // 86400.0) % 7
+        day_norm = day_of_week / 6.0 if 6.0 > 0 else 0.0
+
         queue_features = np.array([
             float(num_pending),
             avg_priority,
@@ -652,7 +719,10 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             float(overflow_pickups),
             float(overflow_dropoffs),
             float(avg_free_slots),
-            float(avg_overflow)
+            float(avg_overflow),
+            time_sin,
+            time_cos,
+            day_norm
         ], dtype=np.float32)
 
         return {
@@ -722,7 +792,9 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                     robot.current_node_index,
                     current_task.to_location_index,
                     self.graph_state,
-                    len(self.graph_state.nodes)
+                    len(self.graph_state.nodes),
+                    edge_cost_manager=self.edge_cost_manager,
+                    all_robots=self.robots,
                 )
                 battery_needed = distance * 0.001
                 if robot.battery_level < battery_needed:
@@ -740,7 +812,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
 
         path, distance = dijkstra_shortest_path(
-            start_node, task.to_location_index, self.graph_state, len(self.graph_state.nodes)
+            start_node, task.to_location_index, self.graph_state, len(self.graph_state.nodes),
+            edge_cost_manager=self.edge_cost_manager, all_robots=self.robots,
         )
 
         simulator.set_path(path, task.task_id, task.num_items)
@@ -815,7 +888,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         start_node = robot.current_node_index or 0
         path, distance = dijkstra_shortest_path(
-            start_node, task.to_location_index, self.graph_state, len(self.graph_state.nodes)
+            start_node, task.to_location_index, self.graph_state, len(self.graph_state.nodes),
+            edge_cost_manager=self.edge_cost_manager, all_robots=self.robots,
         )
         reward -= 0.1 * distance
 
@@ -851,3 +925,32 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 nearest_idx = i
 
         return nearest_idx
+
+    def _collect_traversal_records(self):
+        """Collect completed traversal records from all simulators and feed to edge cost model."""
+        all_records = []
+        for simulator in self.robot_simulators:
+            records = simulator.get_and_clear_traversal_records()
+            all_records.extend(records)
+
+        if all_records:
+            self.edge_cost_manager.add_traversal_records(all_records)
+
+    def _count_approaching_robots(self, edge_index: int, exclude_robot_id: int = -1) -> int:
+        """Count robots with the given edge in their planned path but not currently on it."""
+        edge = self.graph_state.edges[edge_index]
+        count = 0
+        for robot in self.robots:
+            if robot.robot_id == exclude_robot_id:
+                continue
+            path = getattr(robot, 'planned_path', None)
+            if not path or len(path) < 2:
+                continue
+            for i in range(len(path) - 1):
+                from_id = self.graph_state.nodes[path[i]].node_id
+                to_id = self.graph_state.nodes[path[i + 1]].node_id
+                if ((edge.from_node == from_id and edge.to_node == to_id) or
+                        (edge.from_node == to_id and edge.to_node == from_id)):
+                    count += 1
+                    break
+        return count

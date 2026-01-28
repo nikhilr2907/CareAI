@@ -32,7 +32,7 @@ class HospitalGraphEncoder(nn.Module):
         self,
         node_continuous_dim=15,
         num_node_types=4,
-        edge_feat_dim=12,
+        edge_feat_dim=14,
         hidden_dim=64,
         node_type_embedding_dim=8
     ):
@@ -106,7 +106,7 @@ class HospitalGraphEncoder(nn.Module):
         Args:
             node_continuous: [num_nodes, 15] - continuous node features
             node_categorical: [num_nodes, 1] - node_type_id (0-3)
-            edge_features: [num_edges, 12] - continuous edge features
+            edge_features: [num_edges, 14] - continuous edge features
             edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx) for each edge
             edge_index: [2, num_edges] - graph connectivity (for GNN message passing)
 
@@ -145,7 +145,7 @@ class HospitalGraphEncoder(nn.Module):
         to_node_embeds = node_embeddings_pass1[edge_node_indices[:, 1]]    # [num_edges, 64]
 
         augmented_edge_features = torch.cat([
-            edge_features,      # [num_edges, 12]
+            edge_features,      # [num_edges, 14]
             from_node_embeds,   # [num_edges, 64]
             to_node_embeds      # [num_edges, 64]
         ], dim=-1)  # [num_edges, 140]
@@ -299,11 +299,11 @@ class TaskEncoder(nn.Module):
     """
     Encodes task features into embedding space.
 
-    Input: Task features (12 dims)
+    Input: Task features (15 dims)
     Output: Task embedding
     """
 
-    def __init__(self, task_feat_dim=12, hidden_dim=64):
+    def __init__(self, task_feat_dim=15, hidden_dim=64):
         super().__init__()
 
         self.encoder = nn.Sequential(
@@ -333,14 +333,14 @@ def test_encoders():
     hospital_encoder = HospitalGraphEncoder(
         node_continuous_dim=15,
         num_node_types=4,
-        edge_feat_dim=12,
+        edge_feat_dim=14,
         hidden_dim=64,
         node_type_embedding_dim=8
     )
 
     node_continuous = torch.randn(10, 15)  # 10 nodes, 15 continuous features
     node_categorical = torch.randint(0, 4, (10, 1))  # 10 nodes, node_type_id (0-3)
-    edge_features = torch.randn(20, 12)  # 20 edges, 12 continuous features
+    edge_features = torch.randn(20, 14)  # 20 edges, 14 continuous features
     edge_node_indices = torch.randint(0, 10, (20, 2))  # Edge-node connectivity
     edge_index = torch.randint(0, 10, (2, 20))  # Graph connectivity
 
@@ -373,9 +373,9 @@ def test_encoders():
 
     # Test Task Encoder
     print("\n3. Task Encoder")
-    task_encoder = TaskEncoder(task_feat_dim=12, hidden_dim=64)
+    task_encoder = TaskEncoder(task_feat_dim=15, hidden_dim=64)
 
-    task_features = torch.randn(12)
+    task_features = torch.randn(15)
     task_embed = task_encoder(task_features)
 
     print(f"  Task embedding: {task_embed.shape}")

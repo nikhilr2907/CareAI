@@ -5,9 +5,14 @@ from typing import Tuple, Optional
 class HospitalEdge:
     from_node: str  # Node ID this corridor connects from
     to_node: str    # Node ID this corridor connects to
+    edge_id: Optional[str] = None
+    mode: Optional[str] = None
+    floor_delta: int = 0
+    travel_time_model: Optional[str] = None
+    constraints: str = ""
 
     # Corridor Geometry
-    distance_m: float  # Physical length of corridor (computed from entry/exit points)
+    distance_m: float = 0.0  # Physical length of corridor (computed from entry/exit points)
     corridor_width: float = 1.9  # Physical width of corridor (meters) [cite: 407]
 
     # Entry/Exit Points (optional - for detailed corridor geometry)
@@ -38,19 +43,31 @@ class HospitalEdge:
     @property
     def current_weight(self) -> float:
         """
-        Calculates dynamic cost for path planning.
-        Accounts for:
-        - Base travel time
-        - Congestion from other robots
-        - Static clutter
-        - Patient bed obstacles
+        Heuristic fallback cost for path planning.
+        Used only when LearnedEdgeCostModel has insufficient data.
+        Once the learned model is active, Dijkstra uses model predictions instead.
         """
         base_cost = self.distance_m / self.max_v_ms
         congestion_penalty = len(self.active_robot_ids) * 1.5
+        opposite_dir_penalty = self._count_opposing_robots() * 2.0
         people_penalty = self.people_count * 0.5
-        clutter_penalty = self.clutter_level * 10
-        bed_penalty = 15.0 if self.has_patient_bed else 0.0
-        return base_cost + congestion_penalty + people_penalty + clutter_penalty + bed_penalty
+        clutter_penalty = self.clutter_level * 10.0
+        return base_cost + congestion_penalty + opposite_dir_penalty + people_penalty + clutter_penalty
+
+    def _count_opposing_robots(self) -> int:
+        """Count pairs of robots traveling in opposite directions on this edge."""
+        if len(self.active_robot_progress) < 2:
+            return 0
+        directions = {}
+        for rid, (prog, fidx, tidx) in self.active_robot_progress.items():
+            key = (fidx, tidx)
+            directions.setdefault(key, 0)
+            directions[key] += 1
+        # If there are robots going both ways, count the minority direction
+        if len(directions) >= 2:
+            counts = list(directions.values())
+            return min(counts)
+        return 0
 
     def set_people_count(self, count: int):
         """Set estimated number of people in this corridor."""

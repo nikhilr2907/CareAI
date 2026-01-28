@@ -15,6 +15,7 @@ from src.environment.graph.hospital_config import HospitalConfig
 from src.deployment.robot_bridge import MockRobotBridge
 from src.environment.tasks.task_generator import generate_inventory_tasks, update_inventory_levels
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO
+from src.utils.training_utils import create_env_from_config_file
 from src.utils.deployment_utils import (
     compute_bounds,
     draw_graph,
@@ -49,42 +50,53 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     hospital_config = None
+    config_path = None
     config_name_override = os.environ.get("HOSPITAL_CONFIG_NAME")
     if config_name_override:
         config_path = Path("configs") / config_name_override
-        hospital_config = HospitalConfig.from_file(str(config_path))
     else:
         configs_dir = Path("configs")
         if configs_dir.exists():
             config_files = sorted(configs_dir.glob("*.json"))
-            if len(config_files) == 1:
-                hospital_config = HospitalConfig.from_file(str(config_files[0]))
-            elif len(config_files) > 1:
-                hospital_config = HospitalConfig.from_file(str(config_files[0]))
+            if config_files:
+                config_path = config_files[0]
 
-    num_nodes = args.num_nodes
-    if hospital_config is not None:
-        num_nodes = len(hospital_config.nodes)
-
-    env = GAPOTaskAssignmentEnv(
-        num_robots=args.num_robots,
-        num_nodes=num_nodes,
-        max_episode_time=args.max_runtime,
-        timestep_seconds=args.cycle_time,
-        hospital_config=hospital_config
-    )
-    env.reset()
+    if config_path and config_path.exists():
+        env, _ = create_env_from_config_file(
+            str(config_path),
+            num_robots=args.num_robots,
+            max_episode_time=args.max_runtime,
+            timestep_seconds=args.cycle_time
+        )
+        env.reset()
+    else:
+        num_nodes = args.num_nodes
+        if hospital_config is not None:
+            num_nodes = len(hospital_config.nodes)
+        env = GAPOTaskAssignmentEnv(
+            num_robots=args.num_robots,
+            num_nodes=num_nodes,
+            max_episode_time=args.max_runtime,
+            timestep_seconds=args.cycle_time,
+            hospital_config=hospital_config
+        )
+        env.reset()
 
     robot_bridge = MockRobotBridge(env.robot_simulators)
     ppo = None
     if args.use_trained:
+        if getattr(env.graph_state, "category_order", None):
+            node_continuous_dim = env.graph_state.get_node_features_with_category_stats()[0].shape[1]
+        else:
+            node_continuous_dim = 15
+        edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
         ppo = GAPOPPO(
-            node_continuous_dim=15,
+            node_continuous_dim=node_continuous_dim,
             num_node_types=4,
-            edge_feat_dim=12,
+            edge_feat_dim=edge_feat_dim,
             robot_feat_dim=12,
-            task_feat_dim=12,
-            queue_feat_dim=11,
+            task_feat_dim=15,
+            queue_feat_dim=14,
             device=args.device
         )
         ppo.load(args.checkpoint)
@@ -149,6 +161,7 @@ def main():
                             total_late += 1
                             total_lateness += lateness
 
+            env.graph_state.current_time = current_time
             update_inventory_levels(env.graph_state, sim_dt / 3600.0)
 
             if cycle_count % args.log_interval == 0:

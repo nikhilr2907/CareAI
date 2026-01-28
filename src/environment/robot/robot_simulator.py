@@ -3,8 +3,90 @@ Robot simulator that generates telemetry data.
 Simulates physical robot movement and can be replaced with real robot interface.
 """
 import numpy as np
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict
+
+
 from .robot_telemetry import RobotTelemetry
+
+
+@dataclass
+class EdgeTraversalRecord:
+    """Record of a single robot traversal of an edge, used to train edge cost model."""
+    edge_index: int
+    robot_id: int
+
+    # Timing
+    entry_time: float = 0.0
+    exit_time: float = 0.0
+
+    # Static edge properties (captured at entry)
+    distance_m: float = 0.0
+    corridor_width: float = 1.9
+    max_v_ms: float = 1.0
+
+    # Congestion snapshot at entry
+    num_robots_on_edge: int = 0
+    same_direction_count: int = 0
+    opposite_direction_count: int = 0
+    people_count: int = 0
+    clutter_level: float = 0.0
+    approaching_robot_count: int = 0
+    from_node_occupancy: int = 0
+    to_node_occupancy: int = 0
+
+    # Time feature
+    time_of_day: float = 0.0  # Normalized 0-1
+
+    # Accumulated during traversal
+    stop_count: int = 0  # Number of times velocity dropped to ~0
+    velocity_samples: list = field(default_factory=list)  # For variance calculation
+
+    @property
+    def actual_traversal_time(self) -> float:
+        return self.exit_time - self.entry_time
+
+    @property
+    def base_traversal_time(self) -> float:
+        if self.max_v_ms <= 0:
+            return 0.0
+        return self.distance_m / self.max_v_ms
+
+    @property
+    def delay_factor(self) -> float:
+        base = self.base_traversal_time
+        if base <= 0:
+            return 1.0
+        return self.actual_traversal_time / base
+
+    @property
+    def velocity_variance(self) -> float:
+        if len(self.velocity_samples) < 2:
+            return 0.0
+        return float(np.var(self.velocity_samples))
+
+    @property
+    def avg_velocity_ratio(self) -> float:
+        if not self.velocity_samples or self.max_v_ms <= 0:
+            return 1.0
+        return float(np.mean(self.velocity_samples)) / self.max_v_ms
+
+    def to_feature_vector(self) -> np.ndarray:
+        """Convert to feature vector for model input."""
+        return np.array([
+            self.distance_m,
+            self.corridor_width,
+            self.num_robots_on_edge,
+            self.same_direction_count,
+            self.opposite_direction_count,
+            self.people_count,
+            self.clutter_level,
+            self.approaching_robot_count,
+            self.from_node_occupancy,
+            self.to_node_occupancy,
+            self.time_of_day,
+            float(self.stop_count),
+        ], dtype=np.float32)
 
 
 class RobotSimulator:
@@ -25,6 +107,7 @@ class RobotSimulator:
         self.y = initial_node.y
         self.heading = 0.0
         self.velocity_ms = 0.0
+        self.prev_velocity_ms = 0.0  # For stop detection
         self.max_velocity_ms = 1.0  # From spec: 1 m/s
 
         # ===== GRAPH POSITION =====
@@ -44,6 +127,10 @@ class RobotSimulator:
 
         # ===== TASK TRACKING =====
         self.active_task_id = None
+
+        # ===== TRAVERSAL TRACKING (for edge cost model) =====
+        self.traversal_records: List[EdgeTraversalRecord] = []
+        self._current_traversal: Optional[EdgeTraversalRecord] = None
 
     def set_path(self, path: List[int], task_id: int, num_items: int):
         """
@@ -91,6 +178,45 @@ class RobotSimulator:
         dy = to_node.y - from_node.y
         self.heading = np.arctan2(dy, dx)
 
+        # Start tracking traversal for edge cost model
+        edge = self.graph_state.edges[self.current_edge_index]
+
+        # Count directional robots on edge
+        same_dir = 0
+        opposite_dir = 0
+        for rid, (prog, fidx, tidx) in edge.active_robot_progress.items():
+            if rid == self.robot_id:
+                continue
+            if fidx == from_node_idx and tidx == to_node_idx:
+                same_dir += 1
+            else:
+                opposite_dir += 1
+
+        # Count approaching robots (have this edge in planned path but not on it yet)
+        approaching = 0
+        # This will be set by the environment via set_traversal_context()
+
+        # Node occupancy at endpoints
+        from_node_occ = len(getattr(from_node, 'current_robot_ids', []))
+        to_node_occ = len(getattr(to_node, 'current_robot_ids', []))
+
+        self._current_traversal = EdgeTraversalRecord(
+            edge_index=self.current_edge_index,
+            robot_id=self.robot_id,
+            entry_time=0.0,  # Set by environment via set_traversal_entry_time()
+            distance_m=edge.distance_m,
+            corridor_width=edge.corridor_width,
+            max_v_ms=edge.max_v_ms,
+            num_robots_on_edge=len(edge.active_robot_ids),
+            same_direction_count=same_dir,
+            opposite_direction_count=opposite_dir,
+            people_count=edge.people_count,
+            clutter_level=edge.clutter_level,
+            approaching_robot_count=approaching,
+            from_node_occupancy=from_node_occ,
+            to_node_occupancy=to_node_occ,
+        )
+
     def update(self, time_delta: float) -> RobotTelemetry:
         """
         Simulate robot movement for time_delta seconds.
@@ -137,6 +263,14 @@ class RobotSimulator:
 
             self.edge_progress = min(max_progress, 1.0)
 
+            # Track velocity and stops for edge cost model
+            if self._current_traversal is not None:
+                self._current_traversal.velocity_samples.append(self.velocity_ms)
+                # Detect stop: was moving, now stopped
+                if self.prev_velocity_ms > 0.05 and self.velocity_ms < 0.05:
+                    self._current_traversal.stop_count += 1
+            self.prev_velocity_ms = self.velocity_ms
+
             # Update battery
             self.battery_level -= self.battery_drain_rate * distance_traveled
             self.battery_level = max(0.0, self.battery_level)
@@ -157,6 +291,12 @@ class RobotSimulator:
 
     def _arrive_at_node(self, node_idx: int):
         """Handle arrival at a node."""
+        # Finalize traversal record before clearing edge state
+        if self._current_traversal is not None:
+            # exit_time is set by environment via finalize_traversal()
+            self.traversal_records.append(self._current_traversal)
+            self._current_traversal = None
+
         # Update position to exact node coordinates
         node = self.graph_state.get_node_by_index(node_idx)
         self.x = node.x
@@ -226,6 +366,30 @@ class RobotSimulator:
             remaining_path=self.path_queue.copy(),
             eta_to_next_node=eta
         )
+
+    def set_traversal_entry_time(self, time: float):
+        """Called by environment to stamp entry time on current traversal."""
+        if self._current_traversal is not None:
+            self._current_traversal.entry_time = time
+            self._current_traversal.time_of_day = (time % 86400.0) / 86400.0
+
+    def set_traversal_approaching_count(self, count: int):
+        """Called by environment to set approaching robot count (needs global view)."""
+        if self._current_traversal is not None:
+            self._current_traversal.approaching_robot_count = count
+
+    def finalize_current_traversal(self, exit_time: float):
+        """Called by environment to stamp exit time on most recent completed traversal."""
+        if self.traversal_records:
+            latest = self.traversal_records[-1]
+            if latest.exit_time == 0.0:
+                latest.exit_time = exit_time
+
+    def get_and_clear_traversal_records(self) -> List[EdgeTraversalRecord]:
+        """Retrieve all completed traversal records and clear buffer."""
+        records = self.traversal_records
+        self.traversal_records = []
+        return records
 
     def _find_edge_index(self, from_idx: int, to_idx: int) -> Optional[int]:
         """Find edge index connecting two nodes (bidirectional)."""

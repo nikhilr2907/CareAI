@@ -327,7 +327,7 @@ def test_debiasing():
     state_sequence = [torch.randn(state_dim) for _ in range(num_steps)]
     action_sequence = [0, 1, 2, 0, 5]  # Dummy actions
     action_logits_sequence = [torch.randn(num_actions) for _ in range(num_steps)]
-    task_features_sequence = [torch.randn(12) for _ in range(num_steps)]
+    task_features_sequence = [torch.randn(15) for _ in range(num_steps)]
 
     # Test comprehensive debiasing
     debiaser = ComprehensiveDebiasing(

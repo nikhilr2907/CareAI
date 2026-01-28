@@ -27,11 +27,11 @@ class GAPOPolicyNetwork(nn.Module):
         self,
         node_continuous_dim=15,
         num_node_types=4,
-        edge_feat_dim=12,
+        edge_feat_dim=14,
         node_type_embedding_dim=8,
         robot_feat_dim=12,
-        task_feat_dim=12,
-        queue_feat_dim=11,
+        task_feat_dim=15,
+        queue_feat_dim=14,
         hidden_dim=64,
         num_attention_heads=4,
         use_debiasing=True,
@@ -108,15 +108,15 @@ class GAPOPolicyNetwork(nn.Module):
 
         Args:
             state_dict: Dictionary with:
-                - 'task_features': [12]
+                - 'task_features': [15]
                 - 'node_continuous': [num_nodes, 15] - continuous node features
                 - 'node_categorical': [num_nodes, 1] - node_type_id
-                - 'edge_features': [num_edges, 12] - continuous edge features
+                - 'edge_features': [num_edges, 14] - continuous edge features
                 - 'edge_node_indices': [num_edges, 2] - (from_node_idx, to_node_idx)
                 - 'edge_index': [2, num_edges] - graph connectivity for GNN
                 - 'robot_features': [num_robots, 12]
                 - 'robot_positions': [num_robots, 2] (optional)
-            - 'queue_features': [11]
+            - 'queue_features': [14]
             return_attention: Whether to return attention weights
             robot_availability_mask: [num_robots] - boolean mask
 
@@ -445,10 +445,10 @@ def test_gapo_policy():
     policy = GAPOPolicyNetwork(
         node_continuous_dim=15,
         num_node_types=4,
-        edge_feat_dim=12,
+        edge_feat_dim=14,
         node_type_embedding_dim=8,
         robot_feat_dim=12,
-        task_feat_dim=12,
+        task_feat_dim=15,
         hidden_dim=64,
         use_debiasing=True
     )
@@ -459,15 +459,15 @@ def test_gapo_policy():
     num_robots = 5
 
     state_dict = {
-        'task_features': torch.randn(12),
+        'task_features': torch.randn(15),
         'node_continuous': torch.randn(num_nodes, 15),  # Enhanced: 15 continuous features
         'node_categorical': torch.randint(0, 4, (num_nodes, 1)),  # node_type_id (0-3)
-        'edge_features': torch.randn(num_edges, 12),  # Enhanced: 12 continuous features
+        'edge_features': torch.randn(num_edges, 14),  # Enhanced: 14 continuous features
         'edge_node_indices': torch.randint(0, num_nodes, (num_edges, 2)),  # (from, to) indices
         'edge_index': torch.randint(0, num_nodes, (2, num_edges)),  # GNN connectivity
         'robot_features': torch.randn(num_robots, 12),
         'robot_positions': torch.randn(num_robots, 2),
-        'queue_features': torch.randn(11)
+        'queue_features': torch.randn(14)
     }
 
     # Test forward pass

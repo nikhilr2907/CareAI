@@ -55,6 +55,10 @@ def main():
     ############## Load Configs ##############
     use_curriculum = args.curriculum != 'none'
 
+    if not args.config and not args.config_list and not args.configs_dir:
+        default_config = Path("configs") / "revised_hospital_config_v3.json"
+        args.config = str(default_config)
+
     if args.config:
         # Single config mode
         if not Path(args.config).exists():
@@ -216,15 +220,20 @@ def main():
 
     # Create initial environment
     env, current_config_desc = create_env_with_config(current_config_idx)
+    if getattr(env.graph_state, "category_order", None):
+        node_continuous_dim = env.graph_state.get_node_features_with_category_stats()[0].shape[1]
+    else:
+        node_continuous_dim = 15
+    edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
 
     # Create GAPO PPO
     ppo = GAPOPPO(
-        node_continuous_dim=15,  # Enhanced with category info
+        node_continuous_dim=node_continuous_dim,
         num_node_types=4,
-        edge_feat_dim=12,  # 12 continuous edge features (distance, width, velocity, etc.)
+        edge_feat_dim=edge_feat_dim,
         robot_feat_dim=12,
-        task_feat_dim=12,
-        queue_feat_dim=11,
+        task_feat_dim=15,
+        queue_feat_dim=14,
         hidden_dim=hidden_dim,
         num_attention_heads=num_attention_heads,
         lr=lr,
@@ -363,7 +372,7 @@ def main():
 
             # Simulation time step
             prev_completed = len(env.completed_tasks)
-            state_dict, step_reward, done, info = env.step(Δt=timesteps_per_decision)
+            state_dict, step_reward, done, info = env.step(dt=timesteps_per_decision)
             if reward_clip is not None and reward_clip > 0:
                 step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
             if iteration <= warmup_iters:

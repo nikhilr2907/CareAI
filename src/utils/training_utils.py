@@ -27,7 +27,7 @@ def parse_args():
     config_group = parser.add_mutually_exclusive_group(required=False)
     config_group.add_argument('--config', type=str,
                               help='Path to single hospital config JSON file')
-    config_group.add_argument('--configs-dir', type=str, default='configs',
+    config_group.add_argument('--configs-dir', type=str, default=None,
                               help='Directory containing multiple config files for curriculum learning')
     config_group.add_argument('--config-list', type=str, nargs='+',
                               help='List of specific config files for curriculum learning')
@@ -139,7 +139,7 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
     """
     Create environment from config file.
     """
-    nodes, edge_pairs = load_config_from_file(config_path)
+    nodes, edge_pairs, meta = load_config_from_file(config_path)
     num_nodes = len(nodes)
 
     if num_robots is None:
@@ -149,24 +149,31 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
     graph_state.nodes = nodes
 
     graph_state.edges = []
+    edges_detailed = { (e.get("from"), e.get("to")): e for e in meta.get("edges_detailed", []) }
     for from_idx, to_idx in edge_pairs:
         from_node = nodes[from_idx]
         to_node = nodes[to_idx]
 
         distance = np.sqrt((from_node.center_x - to_node.center_x) ** 2 +
                           (from_node.center_y - to_node.center_y) ** 2)
+        detail = edges_detailed.get((from_idx, to_idx)) or edges_detailed.get((to_idx, from_idx))
 
         edge = HospitalEdge(
             from_node=from_node.node_id,
             to_node=to_node.node_id,
-            distance_m=distance,
+            distance_m=float(detail.get("distance_m", distance)) if detail else distance,
             corridor_width=1.9,
             entry_point=(from_node.center_x, from_node.center_y),
             exit_point=(to_node.center_x, to_node.center_y),
             max_v_ms=1.0,
             clutter_level=np.random.random() * 0.3,
             active_robot_ids=[],
-            has_patient_bed=np.random.random() < 0.1
+            has_patient_bed=np.random.random() < 0.1,
+            edge_id=detail.get("edge_id") if detail else None,
+            mode=detail.get("mode") if detail else None,
+            floor_delta=int(detail.get("floor_delta", 0)) if detail else 0,
+            travel_time_model=detail.get("travel_time_model") if detail else None,
+            constraints=detail.get("constraints", "") if detail else ""
         )
         graph_state.edges.append(edge)
 
@@ -180,6 +187,10 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
 
     env.graph_state = graph_state
     env._custom_graph_state = graph_state
+    graph_state.sku_database = meta.get("sku_database")
+    graph_state.demand_profiles = meta.get("demand_profiles")
+    graph_state.category_order = meta.get("category_order")
+    graph_state.department_order = meta.get("department_order")
 
     return env, num_nodes
 
@@ -273,6 +284,8 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
 def apply_consumption_scale(env, scale: Optional[float]):
     if scale is None:
         return
+    if hasattr(env, "graph_state") and env.graph_state is not None:
+        env.graph_state.consumption_scale = float(scale)
     for node in env.graph_state.nodes:
         if not hasattr(node, "_base_consumption_rate"):
             node._base_consumption_rate = node.consumption_rate
@@ -334,7 +347,7 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
                 if task.get_time_to_deadline(eval_env.current_time) < 0:
                     late_at_assignment += 1
 
-        state, step_reward, done, _ = eval_env.step(Δt=timesteps_per_decision)
+        state, step_reward, done, _ = eval_env.step(dt=timesteps_per_decision)
         if reward_clip is not None and reward_clip > 0:
             step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
         eval_reward += step_reward

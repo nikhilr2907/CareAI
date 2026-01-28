@@ -12,6 +12,12 @@ class GraphState:
     nodes: List[HospitalNode] = field(default_factory=list)
     edges: List[HospitalEdge] = field(default_factory=list)
     config: Optional[HospitalConfig] = None
+    sku_database: Optional[dict] = None
+    demand_profiles: Optional[dict] = None
+    category_order: Optional[List[str]] = None
+    department_order: Optional[List[str]] = None
+    current_time: float = 0.0
+    consumption_scale: float = 1.0
 
     def __post_init__(self):
         """Create hospital graph from config, or use default if none provided."""
@@ -297,16 +303,82 @@ class GraphState:
             np.array(categorical_features, dtype=np.int64)    # [num_nodes, 1]
         )
 
+    def get_node_features_with_category_stats(self) -> tuple:
+        """
+        Extract node features with category-level inventory stats.
+
+        Returns:
+            (continuous_features, categorical_features)
+        """
+        node_type_to_id = {
+            'storage': 0,
+            'corridor': 1,
+            'recovery': 2,
+            'hub': 3
+        }
+
+        category_order = self.category_order or []
+        department_order = self.department_order or []
+
+        continuous_features = []
+        categorical_features = []
+
+        for node in self.nodes:
+            dept_id = department_order.index(node.department_tag) if (node.department_tag in department_order) else -1
+            base = [
+                node.center_x,
+                node.center_y,
+                node.width,
+                node.height,
+                node.area,
+                node.clearance_m,
+                node.max_reach_height,
+                node.unit_height,
+                float(node.has_wash_basin),
+                float(node.is_cluttered),
+                node.stock_level,
+                node.consumption_rate,
+                min(node.time_to_stockout, 999.0),
+                float(node.occupancy_count),
+                float(node.urgency_level),
+                float(node.served_beds),
+                float(dept_id),
+                float(node.floor),
+                float(len(node.location_ids)),
+                float(len(node.shelf_ids)),
+                float(node.get_total_num_skus()),
+                float(len(node.category_inventory)),
+                float(1.0 if node.consumption_enabled else 0.0),
+            ]
+
+            cat_feats = []
+            for cat in category_order:
+                stock = node.get_category_stock_level(cat)
+                max_stock = node.get_category_max_stock(cat)
+                rate = node.get_category_consumption_rate(cat)
+                tts = node.get_category_time_to_stockout(cat)
+                stock_ratio = (stock / max_stock) if max_stock > 0 else 0.0
+                cat_feats.extend([stock_ratio, rate, min(tts, 999.0)])
+
+            node_type_id = node_type_to_id.get(node.node_type, 0)
+            categorical_features.append([node_type_id])
+            continuous_features.append(base + cat_feats)
+
+        return (
+            np.array(continuous_features, dtype=np.float32),
+            np.array(categorical_features, dtype=np.int64)
+        )
+
     def get_edge_features_complete(self) -> tuple:
         """
         Extract COMPLETE edge features including topology and node connectivity.
 
         Returns:
             (continuous_features, node_indices) where:
-            - continuous_features: [num_edges, 12] numpy array
+            - continuous_features: [num_edges, 14] numpy array
             - node_indices: [num_edges, 2] numpy array (from_node_idx, to_node_idx)
 
-        Continuous features per edge (12 total):
+        Continuous features per edge (14 total):
         1. distance_m: Physical corridor length
         2. corridor_width: Physical width (meters)
         3. max_v_ms: Max speed allowed (1.0 m/s)
@@ -319,6 +391,8 @@ class GraphState:
         10. has_patient_bed: Bed obstacle flag (0/1)
         11. current_weight: Dynamic cost (base + congestion)
         12. base_cost: Base travel time (distance / max_v_ms)
+        13. floor_delta: Floor change for edge (signed)
+        14. mode_id: Encoded travel mode (0=unknown, 1=walk, 2=lift, 3=stairs)
 
         Node connectivity (2 indices):
         1. from_node_idx: Source node index (0-9)
@@ -332,6 +406,15 @@ class GraphState:
 
         continuous_features = []
         node_indices = []
+
+        mode_to_id = {
+            None: 0,
+            "walk": 1,
+            "corridor": 1,
+            "lift": 2,
+            "elevator": 2,
+            "stairs": 3
+        }
 
         for edge in self.edges:
             # Continuous features (12)
@@ -354,7 +437,9 @@ class GraphState:
                 float(len(edge.active_robot_ids)),  # Number of active robots
                 float(edge.has_patient_bed),
                 edge.current_weight,  # Dynamic weight (includes congestion)
-                base_cost  # Base travel time without congestion
+                base_cost,  # Base travel time without congestion
+                float(getattr(edge, "floor_delta", 0)),
+                float(mode_to_id.get(getattr(edge, "mode", None), 0))
             ]
             continuous_features.append(edge_continuous)
 
@@ -364,7 +449,7 @@ class GraphState:
             node_indices.append([from_idx, to_idx])
 
         return (
-            np.array(continuous_features, dtype=np.float32),  # [num_edges, 12]
+            np.array(continuous_features, dtype=np.float32),  # [num_edges, 14]
             np.array(node_indices, dtype=np.int64)            # [num_edges, 2]
         )
 
@@ -552,15 +637,15 @@ class GraphState:
 
         Returns:
             (continuous_features, categorical_features, node_indices) where:
-            - continuous_features: [num_edges, 15] numpy array
+            - continuous_features: [num_edges, 17] numpy array
             - categorical_features: [num_edges, 2] numpy array (bidirectional, obstacle_type)
             - node_indices: [num_edges, 2] numpy array (from_node_idx, to_node_idx)
 
-        NEW continuous features (15 total, added 3 more):
-        [Same 12 as get_edge_features_complete, plus:]
-        13. congestion_factor: len(active_robots) / corridor_capacity
-        14. corridor_capacity: width / 0.6 (assumes 60cm per robot)
-        15. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
+        NEW continuous features (17 total, added 3 more):
+        [Same 14 as get_edge_features_complete, plus:]
+        15. congestion_factor: len(active_robots) / corridor_capacity
+        16. corridor_capacity: width / 0.6 (assumes 60cm per robot)
+        17. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
 
         Categorical features per edge (2 total):
         1. is_bidirectional: 1 (all hospital corridors are bidirectional)
@@ -571,6 +656,15 @@ class GraphState:
         continuous_features = []
         categorical_features = []
         node_indices = []
+
+        mode_to_id = {
+            None: 0,
+            "walk": 1,
+            "corridor": 1,
+            "lift": 2,
+            "elevator": 2,
+            "stairs": 3
+        }
 
         for edge in self.edges:
             # ===== Continuous features (15) =====
@@ -600,6 +694,8 @@ class GraphState:
                 float(edge.has_patient_bed),
                 edge.current_weight,
                 base_cost,
+                float(getattr(edge, "floor_delta", 0)),
+                float(mode_to_id.get(getattr(edge, "mode", None), 0)),
                 congestion_factor,  # NEW
                 corridor_capacity,  # NEW
                 is_congested        # NEW
@@ -628,7 +724,7 @@ class GraphState:
             node_indices.append([from_idx, to_idx])
 
         return (
-            np.array(continuous_features, dtype=np.float32),  # [num_edges, 15]
+            np.array(continuous_features, dtype=np.float32),  # [num_edges, 17]
             np.array(categorical_features, dtype=np.int64),   # [num_edges, 2]
             np.array(node_indices, dtype=np.int64)            # [num_edges, 2]
         )
