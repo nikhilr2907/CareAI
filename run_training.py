@@ -221,19 +221,35 @@ def main():
     # Create initial environment
     env, current_config_desc = create_env_with_config(current_config_idx)
     if getattr(env.graph_state, "category_order", None):
-        node_continuous_dim = env.graph_state.get_node_features_with_category_stats()[0].shape[1]
+        base_node_dim = env.graph_state.get_node_features_with_category_stats()[0].shape[1]
+        sku_feat_dim = env.graph_state.get_node_sku_features()[0].shape[2]
     else:
-        node_continuous_dim = 15
+        base_node_dim = 8
+        sku_feat_dim = None
     edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
+    sku_embed_dim = 16
+    node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
 
-    # Create GAPO PPO
+    # Determine number of departments (if category stats are available)
+    num_departments = len(env.graph_state.department_order) if hasattr(env.graph_state, 'department_order') and env.graph_state.department_order else 10
+
+    # Create GAPO PPO with fine-grained categorical embeddings
     ppo = GAPOPPO(
         node_continuous_dim=node_continuous_dim,
         num_node_types=4,
+        num_departments=num_departments,
+        num_shift_periods=4,
+        num_day_types=2,
         edge_feat_dim=edge_feat_dim,
-        robot_feat_dim=12,
+        node_type_embedding_dim=8,
+        department_embedding_dim=16,
+        shift_embedding_dim=4,
+        day_type_embedding_dim=4,
+        robot_feat_dim=20,
         task_feat_dim=15,
-        queue_feat_dim=14,
+        queue_feat_dim=16,
+        sku_feat_dim=sku_feat_dim,
+        sku_embed_dim=sku_embed_dim,
         hidden_dim=hidden_dim,
         num_attention_heads=num_attention_heads,
         lr=lr,

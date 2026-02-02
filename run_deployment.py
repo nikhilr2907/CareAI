@@ -86,17 +86,23 @@ def main():
     ppo = None
     if args.use_trained:
         if getattr(env.graph_state, "category_order", None):
-            node_continuous_dim = env.graph_state.get_node_features_with_category_stats()[0].shape[1]
+            base_node_dim = env.graph_state.get_node_features_with_category_stats()[0].shape[1]
+            sku_feat_dim = env.graph_state.get_node_sku_features()[0].shape[2]
         else:
-            node_continuous_dim = 15
+            base_node_dim = 8
+            sku_feat_dim = None
         edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
+        sku_embed_dim = 16
+        node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
         ppo = GAPOPPO(
             node_continuous_dim=node_continuous_dim,
             num_node_types=4,
             edge_feat_dim=edge_feat_dim,
-            robot_feat_dim=12,
+            robot_feat_dim=20,
             task_feat_dim=15,
-            queue_feat_dim=14,
+            queue_feat_dim=16,
+            sku_feat_dim=sku_feat_dim,
+            sku_embed_dim=sku_embed_dim,
             device=args.device
         )
         ppo.load(args.checkpoint)

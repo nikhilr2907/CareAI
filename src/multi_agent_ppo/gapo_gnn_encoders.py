@@ -30,38 +30,66 @@ class HospitalGraphEncoder(nn.Module):
 
     def __init__(
         self,
-        node_continuous_dim=15,
+        node_continuous_dim=8,
         num_node_types=4,
-        edge_feat_dim=14,
+        num_departments=10,
+        num_shift_periods=4,
+        num_day_types=2,
+        edge_feat_dim=21,
         hidden_dim=64,
-        node_type_embedding_dim=8
+        node_type_embedding_dim=8,
+        department_embedding_dim=16,
+        shift_embedding_dim=4,
+        day_type_embedding_dim=4
     ):
         """
-        Initialize Hospital Graph Encoder with enhanced feature extraction.
+        Initialize Hospital Graph Encoder with FINE-GRAINED categorical embeddings.
 
         Args:
-            node_continuous_dim: Continuous node features (default 15)
+            node_continuous_dim: Continuous node features (default 8)
                 [center_x, center_y, width, height, area, clearance_m, max_reach_height,
                  unit_height, has_wash_basin, is_cluttered, stock_level, consumption_rate,
                  time_to_stockout, occupancy_count, urgency_level]
             num_node_types: Number of node type categories (default 4)
                 [storage, corridor, recovery, hub]
+            num_departments: Number of hospital departments (default 10)
+                [e.g., ICU, Emergency, Surgery, etc.]
+            num_shift_periods: Number of shift periods (default 4)
+                [night, morning, afternoon, evening]
+            num_day_types: Number of day types (default 2)
+                [weekday, weekend]
             edge_feat_dim: Edge continuous features (default 12)
                 [distance_m, corridor_width, max_v_ms, entry_x, entry_y, exit_x, exit_y,
                  clutter_level, num_active_robots, has_patient_bed, current_weight, base_cost]
             hidden_dim: Hidden embedding dimension (default 64)
             node_type_embedding_dim: Dimension for node_type embeddings (default 8)
+            department_embedding_dim: Dimension for department embeddings (default 16)
+            shift_embedding_dim: Dimension for shift period embeddings (default 4)
+            day_type_embedding_dim: Dimension for day type embeddings (default 4)
         """
         super().__init__()
 
         self.hidden_dim = hidden_dim
         self.node_type_embedding_dim = node_type_embedding_dim
+        self.department_embedding_dim = department_embedding_dim
+        self.shift_embedding_dim = shift_embedding_dim
+        self.day_type_embedding_dim = day_type_embedding_dim
 
-        # Categorical embedding for node_type
+        # Categorical embeddings for each feature
         self.node_type_embedding = nn.Embedding(num_node_types, node_type_embedding_dim)
+        self.department_embedding = nn.Embedding(num_departments + 1, department_embedding_dim)  # +1 for -1 (unknown)
+        self.shift_embedding = nn.Embedding(num_shift_periods, shift_embedding_dim)
+        self.day_type_embedding = nn.Embedding(num_day_types, day_type_embedding_dim)
 
-        # Total node feature dimension after concatenating continuous + embedded categorical
-        node_input_dim = node_continuous_dim + node_type_embedding_dim  # 15 + 8 = 23
+        # Total node feature dimension after concatenating continuous + all embedded categoricals
+        total_embedding_dim = (
+            node_type_embedding_dim +      # 8
+            department_embedding_dim +      # 16
+            shift_embedding_dim +           # 4
+            day_type_embedding_dim          # 4
+        )  # = 32
+
+        node_input_dim = node_continuous_dim + total_embedding_dim  # 8 + 32 = 40 (plus SKU/category expansions if used)
 
         self.gat1 = GATConv(
             in_channels=node_input_dim,
@@ -104,9 +132,13 @@ class HospitalGraphEncoder(nn.Module):
         Two-pass GNN encoding with node-embedded edges.
 
         Args:
-            node_continuous: [num_nodes, 15] - continuous node features
-            node_categorical: [num_nodes, 1] - node_type_id (0-3)
-            edge_features: [num_edges, 14] - continuous edge features
+            node_continuous: [num_nodes, 24] - continuous node features (UPDATED with temporal)
+            node_categorical: [num_nodes, 4] - categorical IDs:
+                [:, 0] = node_type_id (0-3)
+                [:, 1] = department_id (0-9 or -1 for unknown)
+                [:, 2] = shift_period_id (0-3)
+                [:, 3] = day_type_id (0-1)
+            edge_features: [num_edges, 21] - continuous edge features
             edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx) for each edge
             edge_index: [2, num_edges] - graph connectivity (for GNN message passing)
 
@@ -115,11 +147,25 @@ class HospitalGraphEncoder(nn.Module):
             edge_embeddings: [num_edges, hidden_dim]
             graph_embedding: [hidden_dim]
         """
-        # Embed categorical features
-        node_type_embeds = self.node_type_embedding(node_categorical.squeeze(-1))  # [num_nodes, 8]
+        # Embed all categorical features
+        node_type_embeds = self.node_type_embedding(node_categorical[:, 0])  # [num_nodes, 8]
 
-        # Concatenate continuous + embedded categorical
-        node_features = torch.cat([node_continuous, node_type_embeds], dim=-1)  # [num_nodes, 23]
+        # Department embedding: map -1 (unknown) to last index
+        dept_ids = node_categorical[:, 1].clone()
+        dept_ids[dept_ids == -1] = self.department_embedding.num_embeddings - 1
+        dept_embeds = self.department_embedding(dept_ids)  # [num_nodes, 16]
+
+        shift_embeds = self.shift_embedding(node_categorical[:, 2])  # [num_nodes, 4]
+        day_type_embeds = self.day_type_embedding(node_categorical[:, 3])  # [num_nodes, 4]
+
+        # Concatenate continuous + all embedded categoricals
+        node_features = torch.cat([
+            node_continuous,      # [num_nodes, 24]
+            node_type_embeds,     # [num_nodes, 8]
+            dept_embeds,          # [num_nodes, 16]
+            shift_embeds,         # [num_nodes, 4]
+            day_type_embeds       # [num_nodes, 4]
+        ], dim=-1)  # [num_nodes, 56]
 
         # Validate edge_node_indices format
         if edge_node_indices.dim() != 2:
@@ -145,7 +191,7 @@ class HospitalGraphEncoder(nn.Module):
         to_node_embeds = node_embeddings_pass1[edge_node_indices[:, 1]]    # [num_edges, 64]
 
         augmented_edge_features = torch.cat([
-            edge_features,      # [num_edges, 14]
+            edge_features,      # [num_edges, 21]
             from_node_embeds,   # [num_edges, 64]
             to_node_embeds      # [num_edges, 64]
         ], dim=-1)  # [num_edges, 140]
@@ -174,7 +220,7 @@ class RobotFleetEncoder(nn.Module):
     Output: Robot embeddings + fleet embedding
     """
 
-    def __init__(self, robot_feat_dim=12, hidden_dim=64):
+    def __init__(self, robot_feat_dim=20, hidden_dim=64):
         super().__init__()
 
         self.hidden_dim = hidden_dim
@@ -329,18 +375,28 @@ def test_encoders():
     print("Testing GAPO GNN Encoders...")
 
     # Test Hospital Graph Encoder (with complete features)
-    print("\n1. Hospital Graph Encoder (Two-Pass with Node Embeddings)")
+    print("\n1. Hospital Graph Encoder (Two-Pass with Fine-Grained Categorical Embeddings)")
     hospital_encoder = HospitalGraphEncoder(
-        node_continuous_dim=15,
+        node_continuous_dim=24,  # UPDATED: includes temporal features
         num_node_types=4,
-        edge_feat_dim=14,
+        num_departments=10,
+        num_shift_periods=4,
+        num_day_types=2,
+        edge_feat_dim=21,
         hidden_dim=64,
-        node_type_embedding_dim=8
+        node_type_embedding_dim=8,
+        department_embedding_dim=16,
+        shift_embedding_dim=4,
+        day_type_embedding_dim=4
     )
 
-    node_continuous = torch.randn(10, 15)  # 10 nodes, 15 continuous features
-    node_categorical = torch.randint(0, 4, (10, 1))  # 10 nodes, node_type_id (0-3)
-    edge_features = torch.randn(20, 14)  # 20 edges, 14 continuous features
+    node_continuous = torch.randn(10, 24)  # 10 nodes, 24 continuous features (UPDATED)
+    node_categorical = torch.randint(0, 4, (10, 4))  # 10 nodes, 4 categorical IDs (UPDATED)
+    # node_categorical[:, 0] = node_type (0-3)
+    # node_categorical[:, 1] = dept_id (0-9, or -1)
+    # node_categorical[:, 2] = shift_period (0-3)
+    # node_categorical[:, 3] = day_type (0-1)
+    edge_features = torch.randn(20, 21)  # 20 edges, 21 continuous features
     edge_node_indices = torch.randint(0, 10, (20, 2))  # Edge-node connectivity
     edge_index = torch.randint(0, 10, (2, 20))  # Graph connectivity
 
@@ -351,13 +407,13 @@ def test_encoders():
     print(f"  Node embeddings: {node_embeds.shape}")
     print(f"  Edge embeddings: {edge_embeds.shape}")
     print(f"  Graph embedding: {graph_embed.shape}")
-    print(f"  Node input: 15 continuous + 8 embedded = 23 dims")
-    print(f"  Edge augmentation: 12 continuous + 64 from + 64 to = 140 dims")
+    print(f"  Node input: 24 continuous + 8 node_type + 16 dept + 4 shift + 4 day_type = 56 dims")
+    print(f"  Edge augmentation: 21 continuous + 64 from + 64 to = 149 dims")
 
     # Test Robot Fleet Encoder
     print("\n2. Robot Fleet Encoder")
     robot_encoder = RobotFleetEncoder(
-        robot_feat_dim=12,
+        robot_feat_dim=20,
         hidden_dim=64
     )
 

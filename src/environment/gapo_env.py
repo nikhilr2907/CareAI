@@ -490,25 +490,24 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         """
         reward = 0.0
 
-        # 1. Task completion rewards
-        for task in completed_tasks:
-            reward += 25.0  # Heavy completion bonus
+        # Reward shaping constants (tuned for stability)
+        completion_bonus = 10.0
+        replenishment_bonus = 6.0
+        backlog_penalty = 0.1
+        urgent_age_penalty = 0.01
+        normal_age_penalty = 0.001
+        sku_stockout_penalty = 4.0
+        sku_low_stock_penalty = 1.5
+        low_stock_ratio = 0.2
 
-            completion_time = self.current_time
-            if task.deadline:
-                time_to_depletion = task.deadline - completion_time
-                if time_to_depletion > 0:
-                    reward += 10.0 * (time_to_depletion / 3600.0)
-                else:
-                    # Late completion penalty (inventory depleted)
-                    reward -= 400.0 * (abs(time_to_depletion) / 60.0)
+        # 1. Task completion rewards (no deadline-based spikes)
+        for task in completed_tasks:
+            reward += completion_bonus
 
             if task.task_type == 'replenishment' and task.leg_type == "dropoff":
                 to_node = self.graph_state.nodes[task.to_location_index]
                 capacity_ratio = task.num_items / max(to_node.max_stock, 1.0)
-                reward += 30.0 * min(1.0, capacity_ratio)
-                if to_node.is_stockout:
-                    reward -= 500.0
+                reward += replenishment_bonus * min(1.0, capacity_ratio)
 
         # 2. Pending task penalties (age accumulation)
         for task in self.pending_tasks:
@@ -516,21 +515,36 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
             # Higher penalty for urgent tasks
             if task.manual_priority >= 4:
-                reward -= 0.02 * age
+                reward -= urgent_age_penalty * age
             else:
-                reward -= 0.002 * age
+                reward -= normal_age_penalty * age
 
         # 2b. Backlog penalty (discourage large queues)
         backlog_size = len(self.pending_tasks)
         if backlog_size > 0:
-            reward -= 0.2 * backlog_size
+            reward -= backlog_penalty * backlog_size
 
-        # 3. Stockout penalties
+        # 3. Per-SKU stockout/low-stock penalties (inventory-based)
         stockout_count = 0
         for node in self.graph_state.nodes:
-            if node.is_stockout and node.node_type == 'recovery':
-                reward -= 5.0  # Per timestep stockout penalty
-                stockout_count += 1
+            if not node.sku_inventory or not node.consumption_enabled:
+                continue
+            node_stockout = 0
+            low_stock_acc = 0.0
+            num_skus = max(len(node.sku_inventory), 1)
+            for sku_id, sku_data in node.sku_inventory.items():
+                stock = float(sku_data.get("stock", 0.0))
+                max_level = float(sku_data.get("max", 0.0))
+                if max_level <= 0:
+                    continue
+                ratio = stock / max_level
+                if stock <= 0:
+                    node_stockout += 1
+                elif ratio < low_stock_ratio:
+                    low_stock_acc += (low_stock_ratio - ratio) / max(low_stock_ratio, 1e-6)
+            if node_stockout > 0 or low_stock_acc > 0:
+                reward -= (sku_stockout_penalty * node_stockout + sku_low_stock_penalty * low_stock_acc) / num_skus
+                stockout_count += node_stockout
 
         self.episode_stockouts = stockout_count
 
@@ -598,12 +612,12 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         - task_features: [15]
         - node_continuous: [num_nodes, N] - continuous node features
         - node_categorical: [num_nodes, 1] - node_type_id
-        - edge_features: [num_edges, 14] - continuous edge features
+        - edge_features: [num_edges, 21] - continuous edge features
         - edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx)
         - edge_index: [2, num_edges] - graph connectivity for GNN
-        - robot_features: [num_robots, 12]
+        - robot_features: [num_robots, 20]
         - robot_positions: [num_robots, 2]
-        - queue_features: [14]
+        - queue_features: [16]
         """
         # Task features (get most urgent pending task, or zeros if none)
         if self.pending_tasks:
@@ -615,17 +629,19 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         # Node features (v3 uses category stats when available)
         if getattr(self.graph_state, "category_order", None):
             node_continuous, node_categorical = self.graph_state.get_node_features_with_category_stats()
+            node_sku_features, node_sku_mask = self.graph_state.get_node_sku_features()
         else:
             node_continuous, node_categorical = self.graph_state.get_node_features_complete()
+            node_sku_features, node_sku_mask = (None, None)
 
         # Edge features (COMPLETE extraction)
         edge_features_orig, edge_node_indices_orig = self.graph_state.get_edge_features_complete()
-        # edge_features_orig: [num_orig_edges, 14]
+        # edge_features_orig: [num_orig_edges, 21]
         # edge_node_indices_orig: [num_orig_edges, 2]
 
         # Make edges bidirectional to match edge_index
         # Edge index is bidirectional, so edge features must be too
-        edge_features = np.vstack([edge_features_orig, edge_features_orig])  # [num_edges * 2, 14]
+        edge_features = np.vstack([edge_features_orig, edge_features_orig])  # [num_edges * 2, 21]
         edge_node_indices = np.vstack([
             edge_node_indices_orig,                          # Original: from -> to
             edge_node_indices_orig[:, [1, 0]]                # Reverse: to -> from
@@ -640,6 +656,14 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         for robot in self.robots:
             if robot.telemetry:
+                heading_sin = float(np.sin(robot.telemetry.heading))
+                heading_cos = float(np.cos(robot.telemetry.heading))
+                max_v = 1.0
+                velocity_ratio = float(robot.telemetry.velocity_ms / max_v) if max_v > 0 else 0.0
+                remaining_path = robot.telemetry.remaining_path or []
+                has_path = 1.0 if (robot.telemetry.current_edge_index is not None or remaining_path) else 0.0
+                target_node = remaining_path[0] if remaining_path else -1
+                is_blocked = 1.0 if (has_path and robot.telemetry.velocity_ms < 0.05) else 0.0
                 feat = [
                     float(robot.robot_id),
                     robot.telemetry.x,
@@ -653,11 +677,19 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                     robot.telemetry.eta_to_next_node,
                     float(robot.num_queued_tasks),
                     float(robot.telemetry.current_capacity),
+                    heading_sin,
+                    heading_cos,
+                    velocity_ratio,
+                    float(robot.telemetry.is_available),
+                    float(has_path),
+                    float(len(remaining_path)),
+                    float(target_node),
+                    float(is_blocked),
                 ]
                 robot_features.append(feat)
                 robot_positions.append([robot.telemetry.x, robot.telemetry.y])
             else:
-                robot_features.append(np.zeros(12))
+                robot_features.append(np.zeros(20))
                 robot_positions.append([0.0, 0.0])
 
         robot_features = np.array(robot_features, dtype=np.float32)
@@ -708,6 +740,9 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         day_of_week = int(self.current_time // 86400.0) % 7
         day_norm = day_of_week / 6.0 if 6.0 > 0 else 0.0
 
+        moving_count = sum(1 for r in self.robots if r.telemetry and r.telemetry.is_moving)
+        fleet_busy_ratio = moving_count / max(len(self.robots), 1)
+
         queue_features = np.array([
             float(num_pending),
             avg_priority,
@@ -722,13 +757,17 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             float(avg_overflow),
             time_sin,
             time_cos,
-            day_norm
+            day_norm,
+            float(fleet_busy_ratio),
+            float(len(self.robots))
         ], dtype=np.float32)
 
         return {
             'task_features': task_features,
             'node_continuous': node_continuous,
             'node_categorical': node_categorical,
+            'node_sku_features': node_sku_features,
+            'node_sku_mask': node_sku_mask,
             'edge_features': edge_features,
             'edge_node_indices': edge_node_indices,
             'edge_index': edge_index,
@@ -854,6 +893,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         for edge in self.graph_state.edges:
             edge.active_robot_ids.clear()
             edge.active_robot_progress.clear()
+            edge.approaching_robot_count = 0
 
         for robot, simulator in zip(self.robots, self.robot_simulators):
             if robot.telemetry and robot.telemetry.is_on_edge:
@@ -866,6 +906,9 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                         simulator.current_node_index,
                         simulator.current_target_node
                     )
+
+        for edge_idx, edge in enumerate(self.graph_state.edges):
+            edge.approaching_robot_count = self._count_approaching_robots(edge_idx)
 
     def _check_stockouts(self):
         """Check stockouts and return penalty."""

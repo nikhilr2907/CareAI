@@ -25,13 +25,21 @@ class GAPOPolicyNetwork(nn.Module):
 
     def __init__(
         self,
-        node_continuous_dim=15,
+        node_continuous_dim=8,
         num_node_types=4,
-        edge_feat_dim=14,
+        num_departments=10,
+        num_shift_periods=4,
+        num_day_types=2,
+        edge_feat_dim=21,
         node_type_embedding_dim=8,
-        robot_feat_dim=12,
+        department_embedding_dim=16,
+        shift_embedding_dim=4,
+        day_type_embedding_dim=4,
+        robot_feat_dim=20,
         task_feat_dim=15,
-        queue_feat_dim=14,
+        queue_feat_dim=16,
+        sku_feat_dim=None,
+        sku_embed_dim=16,
         hidden_dim=64,
         num_attention_heads=4,
         use_debiasing=True,
@@ -42,14 +50,22 @@ class GAPOPolicyNetwork(nn.Module):
 
         self.hidden_dim = hidden_dim
         self.use_debiasing = use_debiasing
+        self.sku_embed_dim = sku_embed_dim
+        self.sku_feat_dim = sku_feat_dim
 
         # ===== ENCODERS =====
         self.hospital_encoder = HospitalGraphEncoder(
             node_continuous_dim=node_continuous_dim,
             num_node_types=num_node_types,
+            num_departments=num_departments,
+            num_shift_periods=num_shift_periods,
+            num_day_types=num_day_types,
             edge_feat_dim=edge_feat_dim,
             hidden_dim=hidden_dim,
-            node_type_embedding_dim=node_type_embedding_dim
+            node_type_embedding_dim=node_type_embedding_dim,
+            department_embedding_dim=department_embedding_dim,
+            shift_embedding_dim=shift_embedding_dim,
+            day_type_embedding_dim=day_type_embedding_dim
         )
 
         self.robot_encoder = RobotFleetEncoder(
@@ -59,6 +75,14 @@ class GAPOPolicyNetwork(nn.Module):
         self.task_encoder = TaskEncoder(
             task_feat_dim, hidden_dim
         )
+
+        self.sku_encoder = None
+        if sku_feat_dim is not None:
+            self.sku_encoder = nn.Sequential(
+                nn.Linear(sku_feat_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, sku_embed_dim)
+            )
 
         self.task_scorer = nn.Sequential(
             nn.Linear(task_feat_dim, hidden_dim),
@@ -72,9 +96,8 @@ class GAPOPolicyNetwork(nn.Module):
         )
 
         # ===== CRITIC (Value Network) =====
-        # Takes global context to estimate state value
         self.critic = nn.Sequential(
-            nn.Linear(hidden_dim * 3 + queue_feat_dim, 256),  # Graph + Fleet + Task + Queue
+            nn.Linear(hidden_dim * 3 + queue_feat_dim, 256),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(256, 128),
@@ -97,6 +120,29 @@ class GAPOPolicyNetwork(nn.Module):
         self.episode_logits = []
         self.episode_task_features = []
 
+    def _pool_sku_embeddings(self, node_sku_features, node_sku_mask):
+        if self.sku_encoder is None or node_sku_features is None:
+            return None
+        num_nodes, num_skus, _ = node_sku_features.shape
+        feats = node_sku_features.view(num_nodes * num_skus, -1)
+        embeds = self.sku_encoder(feats).view(num_nodes, num_skus, self.sku_embed_dim)
+
+        if node_sku_mask is None:
+            weights = torch.ones((num_nodes, num_skus), device=embeds.device)
+        else:
+            weights = node_sku_mask.float()
+
+        if self.sku_feat_dim is not None and self.sku_feat_dim > 0:
+            cat_len = max(self.sku_feat_dim - 10, 0)
+            if cat_len < self.sku_feat_dim:
+                stock_ratio = node_sku_features[:, :, cat_len]
+                weights = weights * (1.0 - stock_ratio).clamp(min=0.0)
+
+        weights_sum = weights.sum(dim=1, keepdim=True).clamp(min=1e-6)
+        weights = weights / weights_sum
+        pooled = (embeds * weights.unsqueeze(-1)).sum(dim=1)
+        return pooled
+
     def forward(
         self,
         state_dict: Dict[str, torch.Tensor],
@@ -109,14 +155,14 @@ class GAPOPolicyNetwork(nn.Module):
         Args:
             state_dict: Dictionary with:
                 - 'task_features': [15]
-                - 'node_continuous': [num_nodes, 15] - continuous node features
-                - 'node_categorical': [num_nodes, 1] - node_type_id
-                - 'edge_features': [num_edges, 14] - continuous edge features
+                - 'node_continuous': [num_nodes, N] - continuous node features
+                - 'node_categorical': [num_nodes, 4] - categorical IDs: [node_type, dept_id, shift_period, day_type]
+                - 'edge_features': [num_edges, 21] - continuous edge features
                 - 'edge_node_indices': [num_edges, 2] - (from_node_idx, to_node_idx)
                 - 'edge_index': [2, num_edges] - graph connectivity for GNN
-                - 'robot_features': [num_robots, 12]
+                - 'robot_features': [num_robots, 20]
                 - 'robot_positions': [num_robots, 2] (optional)
-            - 'queue_features': [14]
+            - 'queue_features': [16]
             return_attention: Whether to return attention weights
             robot_availability_mask: [num_robots] - boolean mask
 
@@ -126,6 +172,14 @@ class GAPOPolicyNetwork(nn.Module):
             attention_info: Optional dict with attention weights
         """
         # ===== ENCODE COMPONENTS =====
+
+        # Optional SKU pooling into node features
+        if 'node_sku_features' in state_dict and state_dict['node_sku_features'] is not None:
+            sku_mask = state_dict.get('node_sku_mask', None)
+            pooled = self._pool_sku_embeddings(state_dict['node_sku_features'], sku_mask)
+            if pooled is not None:
+                state_dict = dict(state_dict)
+                state_dict['node_continuous'] = torch.cat([state_dict['node_continuous'], pooled], dim=-1)
 
         # 1. Hospital graph (two-pass encoding with node embeddings)
         node_embeddings, edge_embeddings, graph_embedding = self.hospital_encoder(
@@ -340,6 +394,20 @@ class GAPOPolicyNetwork(nn.Module):
             [sd['queue_features'] for sd in state_dicts], dim=0
         ).to(device)
 
+        # Optional SKU pooling into node features
+        if 'node_sku_features' in state_dicts[0] and state_dicts[0]['node_sku_features'] is not None:
+            sku_feats = torch.stack([sd['node_sku_features'] for sd in state_dicts], dim=0).to(device)
+            sku_mask = None
+            if state_dicts[0].get('node_sku_mask') is not None:
+                sku_mask = torch.stack([sd['node_sku_mask'] for sd in state_dicts], dim=0).to(device)
+            # Pool per sample then concatenate
+            pooled_list = []
+            for i in range(batch_size):
+                pooled = self._pool_sku_embeddings(sku_feats[i], sku_mask[i] if sku_mask is not None else None)
+                pooled_list.append(pooled)
+            pooled = torch.stack(pooled_list, dim=0)  # [batch, num_nodes, sku_embed_dim]
+            node_continuous = torch.cat([node_continuous, pooled], dim=-1)
+
         # Build batched graph inputs via disjoint union
         node_offsets = (torch.arange(batch_size, device=device) * num_nodes).view(-1, 1, 1)
         edge_node_indices = (edge_node_indices + node_offsets).view(-1, 2)
@@ -431,6 +499,7 @@ class GAPOPolicyNetwork(nn.Module):
         self.episode_logits = []
         self.episode_task_features = []
 
+    
     def record_action(self, action: int):
         """Record action for de-biasing."""
         if self.training and self.use_debiasing:
@@ -443,11 +512,11 @@ def test_gapo_policy():
 
     # Create policy with enhanced features
     policy = GAPOPolicyNetwork(
-        node_continuous_dim=15,
+        node_continuous_dim=8,
         num_node_types=4,
-        edge_feat_dim=14,
+        edge_feat_dim=21,
         node_type_embedding_dim=8,
-        robot_feat_dim=12,
+        robot_feat_dim=20,
         task_feat_dim=15,
         hidden_dim=64,
         use_debiasing=True
@@ -460,14 +529,14 @@ def test_gapo_policy():
 
     state_dict = {
         'task_features': torch.randn(15),
-        'node_continuous': torch.randn(num_nodes, 15),  # Enhanced: 15 continuous features
+        'node_continuous': torch.randn(num_nodes, 8),  # Enhanced: 8 continuous features
         'node_categorical': torch.randint(0, 4, (num_nodes, 1)),  # node_type_id (0-3)
-        'edge_features': torch.randn(num_edges, 14),  # Enhanced: 14 continuous features
+        'edge_features': torch.randn(num_edges, 21),  # Enhanced: 21 continuous features
         'edge_node_indices': torch.randint(0, num_nodes, (num_edges, 2)),  # (from, to) indices
         'edge_index': torch.randint(0, num_nodes, (2, num_edges)),  # GNN connectivity
-        'robot_features': torch.randn(num_robots, 12),
+        'robot_features': torch.randn(num_robots, 20),
         'robot_positions': torch.randn(num_robots, 2),
-        'queue_features': torch.randn(14)
+        'queue_features': torch.randn(16)
     }
 
     # Test forward pass
