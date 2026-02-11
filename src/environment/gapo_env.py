@@ -627,12 +627,34 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             task_features = np.zeros(15, dtype=np.float32)
 
         # Node features (v3 uses category stats when available)
-        if getattr(self.graph_state, "category_order", None):
-            node_continuous, node_categorical = self.graph_state.get_node_features_with_category_stats()
-            node_sku_features, node_sku_mask = self.graph_state.get_node_sku_features()
-        else:
-            node_continuous, node_categorical = self.graph_state.get_node_features_complete()
-            node_sku_features, node_sku_mask = (None, None)
+        try:
+            if getattr(self.graph_state, "category_order", None):
+          
+                node_continuous, node_categorical = self.graph_state.get_node_features_with_category_stats()
+
+                node_sku_features, node_sku_mask = self.graph_state.get_node_sku_features()
+            else:
+
+                node_continuous, node_categorical = self.graph_state.get_node_features_complete()
+
+                node_sku_features, node_sku_mask = (None, None)
+        except Exception as e:
+
+            import traceback
+            traceback.print_exc()
+            raise
+
+        # Ensure node_categorical has 4 columns: [node_type, department, shift, day_type]
+        
+
+        if node_categorical.shape[1] != 4:
+            num_nodes = node_continuous.shape[0]
+            padded = np.zeros((num_nodes, 4), dtype=np.int64)
+            # Default department to -1 (unknown), shift/day to 0
+            padded[:, 1] = -1
+            cols = min(node_categorical.shape[1], 4)
+            padded[:, :cols] = node_categorical[:, :cols].astype(np.int64)
+            node_categorical = padded
 
         # Edge features (COMPLETE extraction)
         edge_features_orig, edge_node_indices_orig = self.graph_state.get_edge_features_complete()
@@ -761,6 +783,12 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             float(fleet_busy_ratio),
             float(len(self.robots))
         ], dtype=np.float32)
+
+        # FINAL VALIDATION: Ensure node_categorical is 2D [num_nodes, 4]
+        assert node_categorical.ndim == 2, \
+            f"node_categorical must be 2D, got shape {node_categorical.shape}"
+        assert node_categorical.shape[1] == 4, \
+            f"node_categorical must have 4 columns, got shape {node_categorical.shape}"
 
         return {
             'task_features': task_features,

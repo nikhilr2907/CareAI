@@ -410,7 +410,28 @@ class GAPOPolicyNetwork(nn.Module):
 
         # Build batched graph inputs via disjoint union
         node_offsets = (torch.arange(batch_size, device=device) * num_nodes).view(-1, 1, 1)
+
+        # Validate edge_node_indices before offsetting
+        if edge_node_indices.numel() > 0:
+            max_before = edge_node_indices.max().item()
+            min_before = edge_node_indices.min().item()
+            if max_before >= num_nodes or min_before < 0:
+                raise ValueError(
+                    f"Invalid edge_node_indices BEFORE batching: range [{min_before}, {max_before}] "
+                    f"but should be in [0, {num_nodes}). Check state_dict construction."
+                )
+
         edge_node_indices = (edge_node_indices + node_offsets).view(-1, 2)
+
+        # Validate after offsetting
+        if edge_node_indices.numel() > 0:
+            max_after = edge_node_indices.max().item()
+            expected_max = batch_size * num_nodes - 1
+            if max_after > expected_max:
+                raise ValueError(
+                    f"Invalid edge_node_indices AFTER batching: max={max_after} "
+                    f"but should be <= {expected_max} (batch_size={batch_size}, num_nodes={num_nodes})"
+                )
 
         edge_index = edge_index + node_offsets.view(-1, 1, 1)
         edge_index = edge_index.permute(1, 0, 2).reshape(2, -1)

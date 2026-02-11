@@ -182,11 +182,27 @@ class HospitalGraphEncoder(nn.Module):
             raise ValueError(f"edge_index must be [2, num_edges], got {edge_index.shape}")
 
         # PASS 1: Initial node encoding
+        import sys
+        print(f"      [HospitalGraphEncoder] Starting GAT1 (first pass - CUDA kernel compile may take 5-10 min)...", flush=True, file=sys.stderr)
         x = self.gat1(node_features, edge_index, edge_attr=edge_features)
+        print(f"      [HospitalGraphEncoder] GAT1 complete", flush=True, file=sys.stderr)
         x = F.elu(x)
         node_embeddings_pass1 = x  # [num_nodes, 64]
 
         # Augment edges with from/to node embeddings
+        # Validate edge_node_indices are in valid range
+        num_nodes_total = node_embeddings_pass1.shape[0]
+        if edge_node_indices.numel() > 0:
+            max_idx = edge_node_indices.max().item()
+            min_idx = edge_node_indices.min().item()
+            if max_idx >= num_nodes_total or min_idx < 0:
+                raise IndexError(
+                    f"edge_node_indices out of bounds: range [{min_idx}, {max_idx}] "
+                    f"but node_embeddings has only {num_nodes_total} nodes. "
+                    f"edge_node_indices shape: {edge_node_indices.shape}, "
+                    f"node_embeddings shape: {node_embeddings_pass1.shape}"
+                )
+
         from_node_embeds = node_embeddings_pass1[edge_node_indices[:, 0]]  # [num_edges, 64]
         to_node_embeds = node_embeddings_pass1[edge_node_indices[:, 1]]    # [num_edges, 64]
 
@@ -197,11 +213,14 @@ class HospitalGraphEncoder(nn.Module):
         ], dim=-1)  # [num_edges, 140]
 
         # PASS 2: Refine nodes with augmented edges
+        import sys
+        print(f"      [HospitalGraphEncoder] Starting GAT2 (second pass)...", flush=True, file=sys.stderr)
         node_embeddings = self.gat2(
             node_embeddings_pass1,
             edge_index,
             edge_attr=augmented_edge_features
         )  # [num_nodes, 64]
+        print(f"      [HospitalGraphEncoder] GAT2 complete", flush=True, file=sys.stderr)
 
         # Final edge embeddings
         edge_embeddings = self.edge_encoder(augmented_edge_features)  # [num_edges, 64]
@@ -295,9 +314,14 @@ class RobotFleetEncoder(nn.Module):
             edge_index = torch.stack([edge_index, edge_index], dim=0)
 
         # GNN encoding
+        import sys
+        print(f"      [RobotFleetEncoder] Starting SAGE1 (robot encoding)...", flush=True, file=sys.stderr)
         x = self.sage1(robot_features, edge_index)
+        print(f"      [RobotFleetEncoder] SAGE1 complete", flush=True, file=sys.stderr)
         x = F.relu(x)
+        print(f"      [RobotFleetEncoder] Starting SAGE2...", flush=True, file=sys.stderr)
         robot_embeddings = self.sage2(x, edge_index)
+        print(f"      [RobotFleetEncoder] SAGE2 complete", flush=True, file=sys.stderr)
 
         # Global fleet embedding (mean pooling)
         fleet_embedding = torch.mean(robot_embeddings, dim=0)
