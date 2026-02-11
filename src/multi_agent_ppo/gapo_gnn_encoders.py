@@ -439,5 +439,3 @@ def test_encoders():
     print("\nAll encoders working!")
 
 
-if __name__ == '__main__':
-    test_encoders()

@@ -436,6 +436,8 @@ class GAPOPolicyNetwork(nn.Module):
             robot_positions
         )
         task_embedding = self.task_encoder(task_features)
+        task_score = self.task_scorer(task_features).squeeze(-1)
+        task_embedding = task_embedding * (1.0 + torch.tanh(task_score)).unsqueeze(-1)
 
         # Build mask tensor for attention
         mask_tensor = None

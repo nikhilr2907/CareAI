@@ -267,9 +267,18 @@ def main():
         device=device,
         logger=logger
     )
-    total_params = sum(p.numel() for p in ppo.policy.parameters())
+    policy_params = sum(p.numel() for p in ppo.policy.parameters())
+    policy_old_params = sum(p.numel() for p in ppo.policy_old.parameters())
+    edge_cost_params = 0
+    if hasattr(env, "edge_cost_manager") and getattr(env.edge_cost_manager, "model", None) is not None:
+        edge_cost_params = sum(p.numel() for p in env.edge_cost_manager.model.parameters())
+    total_params = policy_params + policy_old_params + edge_cost_params
     trainable_params = sum(p.numel() for p in ppo.policy.parameters() if p.requires_grad)
-    logger.info(f"Model parameters: total={total_params:,} trainable={trainable_params:,}")
+    logger.info(
+        f"Model parameters: policy={policy_params:,} "
+        f"policy_old={policy_old_params:,} edge_cost={edge_cost_params:,} "
+        f"total={total_params:,} trainable(policy)={trainable_params:,}"
+    )
 
     # Training metrics
     memory = Memory()
@@ -294,8 +303,9 @@ def main():
 
     # Initialize environment
     state_dict = env.reset()
-
+    
     for iteration in range(1, max_training_iterations + 1):
+        print(iteration)
         if iteration <= warmup_iters:
             apply_consumption_scale(env, warmup_consumption_scale)
             ppo.entropy_coef = entropy_coef * warmup_entropy_mult
@@ -312,7 +322,7 @@ def main():
         # Collect rollout_steps timesteps of experience
         for step in range(rollout_steps):
             total_timesteps += 1
-
+            
             # Re-rank pending tasks using learned scorer (manual priority as secondary)
             if env.pending_tasks:
                 task_features = np.stack([t.get_features(env.current_time) for t in env.pending_tasks])
