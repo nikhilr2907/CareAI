@@ -160,12 +160,12 @@ class HospitalGraphEncoder(nn.Module):
 
         # Concatenate continuous + all embedded categoricals
         node_features = torch.cat([
-            node_continuous,      # [num_nodes, 24]
+            node_continuous,      # [num_nodes, ?]
             node_type_embeds,     # [num_nodes, 8]
             dept_embeds,          # [num_nodes, 16]
             shift_embeds,         # [num_nodes, 4]
             day_type_embeds       # [num_nodes, 4]
-        ], dim=-1)  # [num_nodes, 56]
+        ], dim=-1)
 
         # Validate edge_node_indices format
         if edge_node_indices.dim() != 2:
@@ -182,10 +182,7 @@ class HospitalGraphEncoder(nn.Module):
             raise ValueError(f"edge_index must be [2, num_edges], got {edge_index.shape}")
 
         # PASS 1: Initial node encoding
-        import sys
-        print(f"      [HospitalGraphEncoder] Starting GAT1 (first pass - CUDA kernel compile may take 5-10 min)...", flush=True, file=sys.stderr)
         x = self.gat1(node_features, edge_index, edge_attr=edge_features)
-        print(f"      [HospitalGraphEncoder] GAT1 complete", flush=True, file=sys.stderr)
         x = F.elu(x)
         node_embeddings_pass1 = x  # [num_nodes, 64]
 
@@ -213,14 +210,11 @@ class HospitalGraphEncoder(nn.Module):
         ], dim=-1)  # [num_edges, 140]
 
         # PASS 2: Refine nodes with augmented edges
-        import sys
-        print(f"      [HospitalGraphEncoder] Starting GAT2 (second pass)...", flush=True, file=sys.stderr)
         node_embeddings = self.gat2(
             node_embeddings_pass1,
             edge_index,
             edge_attr=augmented_edge_features
         )  # [num_nodes, 64]
-        print(f"      [HospitalGraphEncoder] GAT2 complete", flush=True, file=sys.stderr)
 
         # Final edge embeddings
         edge_embeddings = self.edge_encoder(augmented_edge_features)  # [num_edges, 64]
@@ -314,14 +308,10 @@ class RobotFleetEncoder(nn.Module):
             edge_index = torch.stack([edge_index, edge_index], dim=0)
 
         # GNN encoding
-        import sys
-        print(f"      [RobotFleetEncoder] Starting SAGE1 (robot encoding)...", flush=True, file=sys.stderr)
+
         x = self.sage1(robot_features, edge_index)
-        print(f"      [RobotFleetEncoder] SAGE1 complete", flush=True, file=sys.stderr)
         x = F.relu(x)
-        print(f"      [RobotFleetEncoder] Starting SAGE2...", flush=True, file=sys.stderr)
         robot_embeddings = self.sage2(x, edge_index)
-        print(f"      [RobotFleetEncoder] SAGE2 complete", flush=True, file=sys.stderr)
 
         # Global fleet embedding (mean pooling)
         fleet_embedding = torch.mean(robot_embeddings, dim=0)

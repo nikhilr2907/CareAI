@@ -332,17 +332,15 @@ def main():
         # Collect rollout_steps timesteps of experience
         for step in range(rollout_steps):
             total_timesteps += 1
-            print(f">>> Step {step}/{rollout_steps}: Starting rollout step", flush=True)
+            if step % 10 == 0:  # Print every 10 steps
+                print(f"  Step {step}/{rollout_steps}", flush=True)
 
             # Re-rank pending tasks using learned scorer (manual priority as secondary)
             if env.pending_tasks:
-                print(f">>> Re-ranking {len(env.pending_tasks)} pending tasks...", flush=True)
                 task_features = np.stack([t.get_features(env.current_time) for t in env.pending_tasks])
                 task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
-                print(f">>> Calling score_tasks (lightweight MLP forward pass)...", flush=True)
                 with torch.no_grad():
                     scores = ppo.policy_old.score_tasks(task_features_tensor).cpu().numpy()
-                print(f">>> score_tasks completed", flush=True)
                 scored = list(zip(env.pending_tasks, scores))
                 scored.sort(key=lambda x: (-x[1], -x[0].manual_priority))
                 env.pending_tasks = [t for t, _ in scored]
@@ -351,7 +349,6 @@ def main():
                     t.learned_score = float(score)
 
             # Re-score and re-sort each robot's queued tasks (keep current task fixed)
-            print(f">>> Re-scoring robot queues...", flush=True)
             for robot in env.robots:
                 all_tasks = robot.task_queue[1:] + robot.overflow_queue
                 if all_tasks:
@@ -368,7 +365,6 @@ def main():
                 robot.promote_from_overflow()
 
             # Autoregressive task assignment phase
-            print(f">>> Starting autoregressive assignment phase (max {max_assignments_per_step} assignments)...", flush=True)
             assignments_this_step = 0
             while len(env.pending_tasks) > 0 and assignments_this_step < max_assignments_per_step:
                 task = env.pending_tasks[0]
@@ -378,29 +374,23 @@ def main():
 
                 # Select action
                 try:
-                    print(f">>> Assignment {assignments_this_step+1}: Selecting action for task {task.task_id}...", flush=True)
                     if iteration <= warmup_iters and np.random.random() < warmup_mix:
-                        print(f">>> Using warmup heuristic (nearest robot)...", flush=True)
                         action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
                         state_tensor = ppo._state_dict_to_tensor(state_dict)
                         mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
-                        print(f">>> Evaluating heuristic action with policy (GNN forward pass)...", flush=True)
                         with torch.no_grad():
                             logprob, _, _ = ppo.policy_old.evaluate_actions(
                                 [state_tensor],
                                 torch.tensor([action], dtype=torch.long).to(ppo.device),
                                 [mask_tensor]
                             )
-                        print(f">>> Warmup action evaluated: robot {action}", flush=True)
                         memory.state_dicts.append(state_dict)
                         memory.actions.append(action)
                         memory.logprobs.append(logprob.item())
                         memory.robot_masks.append(robot_mask)
                         ppo.policy.record_action(action)
                     else:
-                        print(f">>> Using policy (FULL GNN FORWARD PASS - first time may take 5-10 min for CUDA kernel compilation)...", flush=True)
                         action = ppo.select_action(state_dict, memory, robot_mask)
-                        print(f">>> Action selected: robot {action}", flush=True)
                 except Exception as e:
                     print(f"!!! ACTION SELECTION ERROR at iter {iteration}, step {step}: {type(e).__name__}: {e}", flush=True)
                     import traceback
@@ -428,10 +418,8 @@ def main():
                 memory.is_terminals.append(False)
 
             # Simulation time step
-            print(f">>> Running environment simulation step (dt={timesteps_per_decision}s)...", flush=True)
             prev_completed = len(env.completed_tasks)
             state_dict, step_reward, done, info = env.step(dt=timesteps_per_decision)
-            print(f">>> Simulation step complete. Reward: {step_reward:.2f}", flush=True)
             if reward_clip is not None and reward_clip > 0:
                 step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
             if iteration <= warmup_iters:
@@ -457,12 +445,10 @@ def main():
         buffer_size = len(memory.actions)
 
         # Update policy
-        print(f"\n>>> Rollout complete. Collected {buffer_size} experiences", flush=True)
         next_state_dict = state_dict
-        print(f">>> Starting PPO update with buffer_size={len(memory.actions)}", flush=True)
+        print(f">>> PPO update (buffer={buffer_size})...", flush=True)
         try:
             ppo.update(memory, next_state_dict)
-            print(f">>> PPO update completed successfully", flush=True)
         except Exception as e:
             print(f"!!! PPO UPDATE ERROR at iteration {iteration}: {type(e).__name__}: {e}", flush=True)
             import traceback
