@@ -72,20 +72,24 @@ class EdgeTraversalRecord:
         return float(np.mean(self.velocity_samples)) / self.max_v_ms
 
     def to_feature_vector(self) -> np.ndarray:
-        """Convert to feature vector for model input."""
+        """Convert to feature vector for model input.
+
+        Note: same_direction_count, opposite_direction_count, and stop_count
+        are excluded — they are not available at inference time (direction is
+        unknown when predicting before traversal; stop_count accumulates during
+        traversal). Using them at training but not inference causes a mismatch.
+        num_robots_on_edge captures the total congestion signal instead.
+        """
         return np.array([
             self.distance_m,
             self.corridor_width,
             self.num_robots_on_edge,
-            self.same_direction_count,
-            self.opposite_direction_count,
             self.people_count,
             self.clutter_level,
             self.approaching_robot_count,
             self.from_node_occupancy,
             self.to_node_occupancy,
             self.time_of_day,
-            float(self.stop_count),
         ], dtype=np.float32)
 
 

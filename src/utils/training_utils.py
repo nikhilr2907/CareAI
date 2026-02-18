@@ -83,8 +83,8 @@ def parse_args():
                         help='Logging interval in iterations (default: 10)')
     parser.add_argument('--save-interval', type=int, default=100,
                         help='Model save interval in iterations (default: 100)')
-    parser.add_argument('--max-assignments-per-step', type=int, default=50,
-                        help='Max task assignments per simulation step (default: 50)')
+    parser.add_argument('--max-assignments-per-step', type=int, default=10,
+                        help='Max task assignments per simulation step (default: 10)')
     parser.add_argument('--reward-clip', type=float, default=200.0,
                         help='Clip per-step rewards to [-reward_clip, reward_clip] (default: 200)')
     parser.add_argument('--reward-scale', type=float, default=1.0,
@@ -101,6 +101,30 @@ def parse_args():
                         help='Scale consumption rates during warmup (default: 0.6)')
     parser.add_argument('--warmup-entropy-mult', type=float, default=2.0,
                         help='Entropy coefficient multiplier during warmup (default: 2.0)')
+
+    # Task-creation actor (optional; default keeps existing behavior)
+    parser.add_argument('--enable-task-creation-actor', action='store_true',
+                        help='Enable Bayesian shortlist + task-creation scorer during task ranking')
+    parser.add_argument('--task-creation-shortlist-size', type=int, default=50,
+                        help='Shortlist size produced by task-creation actor (default: 50)')
+    parser.add_argument('--task-creation-temperature', type=float, default=1.0,
+                        help='Sampling temperature for Bayesian shortlist (default: 1.0)')
+    parser.add_argument('--task-creation-urgent-priority', type=int, default=4,
+                        help='Priority threshold for deterministic urgent inclusion (default: 4)')
+    parser.add_argument('--task-creation-near-deadline', type=float, default=300.0,
+                        help='Near-deadline threshold in seconds for urgent inclusion (default: 300)')
+    parser.add_argument('--task-creation-stockout-hours', type=float, default=1.0,
+                        help='Stockout threshold in hours for urgent inclusion (default: 1.0)')
+    parser.add_argument('--task-creation-prior-sigma', type=float, default=1.0,
+                        help='Prior sigma for Bayesian factorizer (default: 1.0)')
+    parser.add_argument('--task-creation-loss-coef', type=float, default=0.05,
+                        help='Auxiliary loss coefficient for task-creation scorer (default: 0.05)')
+    parser.add_argument('--task-creation-kl-coef', type=float, default=1e-4,
+                        help='KL coefficient for Bayesian factorizer regularization (default: 1e-4)')
+    parser.add_argument('--ranking-max-pairs-per-group', type=int, default=64,
+                        help='Max sampled assignment pairs per env-step group for ranking losses (default: 64)')
+    parser.add_argument('--ranking-min-adv-gap', type=float, default=1e-4,
+                        help='Skip ranking pairs with |adv_i-adv_j| below this threshold (default: 1e-4)')
 
     parser.add_argument('--eval-interval', type=int, default=200,
                         help='Evaluation interval in iterations (default: 200)')
@@ -306,16 +330,12 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
     completed_late = 0
     for _ in range(eval_steps):
         if eval_env.pending_tasks:
-            task_features = np.stack([t.get_features(eval_env.current_time) for t in eval_env.pending_tasks])
-            task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(policy.device)
-            with torch.no_grad():
-                scores = policy.policy_old.score_tasks(task_features_tensor).cpu().numpy()
-            scored = list(zip(eval_env.pending_tasks, scores))
-            scored.sort(key=lambda x: (-x[1], -x[0].manual_priority))
-            eval_env.pending_tasks = [t for t, _ in scored]
-            for i, (t, score) in enumerate(scored):
-                t.queue_position = i
-                t.learned_score = float(score)
+            eval_env.pending_tasks = policy.score_and_rank_tasks(
+                eval_env.pending_tasks,
+                state,
+                eval_env.current_time,
+                temperature=0.0,
+            )
 
         for robot in eval_env.robots:
             all_tasks = robot.task_queue[1:] + robot.overflow_queue
@@ -323,7 +343,9 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
                 task_features = np.stack([t.get_features(eval_env.current_time) for t in all_tasks])
                 task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(policy.device)
                 with torch.no_grad():
-                    scores = policy.policy_old.score_tasks(task_features_tensor).cpu().numpy()
+                    state_tensor = policy._state_dict_to_tensor(state)
+                    graph_emb, fleet_emb = policy.policy_old.encode_context(state_tensor)
+                    scores = policy.policy_old.score_tasks(task_features_tensor, graph_emb, fleet_emb).cpu().numpy()
                 for task, score in zip(all_tasks, scores):
                     task.learned_score = float(score)
                 robot.resort_queue()

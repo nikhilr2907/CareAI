@@ -23,17 +23,17 @@ from typing import List, Optional, Tuple
 # [0] distance_m
 # [1] corridor_width
 # [2] num_robots_on_edge
-# [3] same_direction_count
-# [4] opposite_direction_count
-# [5] people_count
-# [6] clutter_level
-# [7] approaching_robot_count
-# [8] from_node_occupancy
-# [9] to_node_occupancy
-# [10] time_of_day
-# [11] stop_count
+# [3] people_count
+# [4] clutter_level
+# [5] approaching_robot_count
+# [6] from_node_occupancy
+# [7] to_node_occupancy
+# [8] time_of_day
+#
+# Removed from original: same_direction_count, opposite_direction_count, stop_count.
+# Direction is unknown at inference time; stop_count only exists post-traversal.
 
-EDGE_COST_FEATURE_DIM = 12
+EDGE_COST_FEATURE_DIM = 9
 
 
 class LearnedEdgeCostModel(nn.Module):
@@ -85,36 +85,30 @@ class LearnedEdgeCostModel(nn.Module):
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Predict traversal time distribution.
+        Predict delay factor distribution.
 
         Args:
             features: [batch, input_dim] edge congestion features
 
         Returns:
-            mean_time: [batch] predicted mean traversal time in seconds
-            log_var: [batch] log-variance of traversal time
+            delay_factor: [batch] predicted mean delay factor (>= 1.0, dimensionless)
+            log_var: [batch] log-variance of delay factor
+
+        The delay factor is scale-invariant: delay_factor = actual_time / base_time.
+        To get traversal time in seconds: time = delay_factor * (distance_m / max_v_ms).
+        Training on delay_factor rather than absolute seconds prevents long corridors
+        from dominating the gradient signal.
         """
-        # Extract distance (first feature) for base time calculation
-        distance = features[:, 0]  # distance_m
-
-        # Use max_v_ms=1.0 as default (can't extract from features since it's not included)
-        # Base traversal time = distance / max_speed
-        base_time = distance  # distance_m / 1.0 m/s
-
-        # Encode features
         h = self.encoder(features)
 
-        # Predict delay factor >= 1.0
+        # Predict delay factor >= 1.0 (corridor can only be slower than free-flow)
         raw_delay = self.mean_head(h).squeeze(-1)
-        delay_factor = 1.0 + F.softplus(raw_delay)  # Minimum delay = 1.0x
+        delay_factor = 1.0 + F.softplus(raw_delay)
 
-        # Predicted mean traversal time
-        mean_time = base_time * delay_factor
-
-        # Predicted log-variance
+        # Predicted log-variance of delay factor
         log_var = self.log_var_head(h).squeeze(-1)
 
-        return mean_time, log_var
+        return delay_factor, log_var
 
     def predict_cost(
         self,
@@ -122,7 +116,7 @@ class LearnedEdgeCostModel(nn.Module):
         risk_sensitivity: float = 0.0
     ) -> torch.Tensor:
         """
-        Predict path cost for Dijkstra, optionally risk-adjusted.
+        Predict path cost in seconds for Dijkstra, optionally risk-adjusted.
 
         Args:
             features: [batch, input_dim] or [num_edges, input_dim]
@@ -131,16 +125,21 @@ class LearnedEdgeCostModel(nn.Module):
                              Typical: 0.5 - 1.0
 
         Returns:
-            costs: [batch] or [num_edges] predicted traversal cost
+            costs: [batch] or [num_edges] predicted traversal time in seconds
         """
-        mean_time, log_var = self.forward(features)
+        delay_factor, log_var = self.forward(features)
+
+        # Convert delay factor back to seconds: time = delay_factor * (distance / max_v)
+        # max_v_ms = 1.0 m/s throughout the simulation, so base_time = distance_m
+        distance = features[:, 0]
+        base_time = distance  # distance_m / 1.0 m/s
 
         if risk_sensitivity > 0.0:
-            # Risk-adjusted cost: mean + λ * std_dev
+            # Risk-adjusted: penalise edges with high variance in delay
             std_dev = torch.exp(0.5 * log_var)
-            return mean_time + risk_sensitivity * std_dev
+            return (delay_factor + risk_sensitivity * std_dev) * base_time
         else:
-            return mean_time
+            return delay_factor * base_time
 
     def predict_numpy(
         self,
@@ -240,13 +239,16 @@ class EdgeCostTrainer:
 
         Args:
             record: EdgeTraversalRecord with valid entry_time and exit_time
+
+        The target stored is delay_factor (actual_time / base_time), not raw seconds.
+        This makes the loss scale-invariant across corridors of different lengths.
         """
-        actual_time = record.actual_traversal_time
-        if actual_time <= 0:
+        if record.actual_traversal_time <= 0 or record.base_traversal_time <= 0:
             return  # Invalid record
 
+        delay_factor = record.delay_factor  # actual_time / base_time, >= 1.0
         features = record.to_feature_vector()
-        self.buffer.append((features, actual_time))
+        self.buffer.append((features, delay_factor))
         self.total_records_added += 1
 
         # Evict oldest if buffer full
@@ -281,13 +283,13 @@ class EdgeCostTrainer:
         features = torch.tensor(np.array(features_list), dtype=torch.float32)
         targets = torch.tensor(targets_list, dtype=torch.float32)
 
-        # Forward pass
-        mean_time, log_var = self.model(features)
+        # Forward pass — model outputs delay_factor, log_var
+        delay_factor, log_var = self.model(features)
 
-        # Gaussian NLL loss
-        # NLL = 0.5 * (log_var + (target - mean)^2 / exp(log_var))
+        # Gaussian NLL loss on delay_factor (dimensionless, scale-invariant)
+        # NLL = 0.5 * (log_var + (target - predicted)^2 / exp(log_var))
         variance = torch.exp(log_var)
-        nll = 0.5 * (log_var + (targets - mean_time) ** 2 / variance)
+        nll = 0.5 * (log_var + (targets - delay_factor) ** 2 / variance)
         loss = nll.mean()
 
         # Backward pass
@@ -427,20 +429,11 @@ class EdgeCostManager:
         """
         features = []
         for edge_idx, edge in enumerate(graph_state.edges):
-            # Count directional robots
-            same_dir = 0
-            opposite_dir = 0
-            for rid, (prog, fidx, tidx) in edge.active_robot_progress.items():
-                # We don't know the "query direction" here, so count total
-                # The caller should handle direction if needed
-                same_dir += 1  # Conservative: count all as same direction
-
-            # Count approaching robots
+            # Count approaching robots (have this edge in their planned path but not on it)
             approaching = 0
             if all_robots:
                 for robot in all_robots:
                     if hasattr(robot, 'planned_path') and robot.planned_path:
-                        # Check if this edge is in the robot's future path
                         path = robot.planned_path
                         for i in range(len(path) - 1):
                             from_node = graph_state.nodes[path[i]].node_id
@@ -459,23 +452,22 @@ class EdgeCostManager:
                 elif node.node_id == edge.to_node:
                     to_node_occ = len(getattr(node, 'current_robot_ids', []))
 
-            # Time of day
             current_time = getattr(graph_state, 'current_time', 0.0)
             time_of_day = (current_time % 86400.0) / 86400.0
 
+            # 9 features matching EdgeTraversalRecord.to_feature_vector()
+            # same_direction_count, opposite_direction_count, stop_count excluded:
+            # direction is unknown at prediction time; stop_count is post-traversal only.
             features.append([
                 edge.distance_m,
                 edge.corridor_width,
                 float(len(edge.active_robot_ids)),
-                float(same_dir),
-                float(opposite_dir),
                 float(edge.people_count),
                 edge.clutter_level,
                 float(approaching),
                 float(from_node_occ),
                 float(to_node_occ),
                 time_of_day,
-                0.0,  # stop_count (real-time, not available at prediction time)
             ])
 
         return np.array(features, dtype=np.float32)

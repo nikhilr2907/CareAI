@@ -84,11 +84,22 @@ class GAPOPolicyNetwork(nn.Module):
                 nn.Linear(hidden_dim, sku_embed_dim)
             )
 
+        # ===== CONTEXT-AWARE TASK SCORER =====
+        # Scores tasks for queue prioritization using task + graph + fleet context
+        # Input: task_features [task_feat_dim] + graph_embedding [hidden_dim] + fleet_embedding [hidden_dim]
+        scorer_input_dim = task_feat_dim + hidden_dim * 2
         self.task_scorer = nn.Sequential(
-            nn.Linear(task_feat_dim, hidden_dim),
+            nn.LayerNorm(scorer_input_dim),
+            nn.Linear(scorer_input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1)
         )
+
+        # ===== INPUT NORMALIZATION =====
+        self.task_input_norm = nn.LayerNorm(task_feat_dim)
+        self.queue_input_norm = nn.LayerNorm(queue_feat_dim)
 
         # ===== ATTENTION =====
         self.attention_module = GAPOAttentionModule(
@@ -196,10 +207,9 @@ class GAPOPolicyNetwork(nn.Module):
             state_dict.get('robot_positions', None)
         )
 
-        # 3. Task
-        task_embedding = self.task_encoder(state_dict['task_features'])
-        task_score = self.task_scorer(state_dict['task_features']).squeeze(-1)
-        task_embedding = task_embedding * (1.0 + torch.tanh(task_score)).unsqueeze(-1)
+        # 3. Task (normalize before encoding)
+        task_features_normed = self.task_input_norm(state_dict['task_features'])
+        task_embedding = self.task_encoder(task_features_normed)
 
         # ===== ATTENTION =====
         action_logits, attention_info = self.attention_module(
@@ -211,11 +221,12 @@ class GAPOPolicyNetwork(nn.Module):
 
         # ===== VALUE ESTIMATION =====
         # Global state representation
+        queue_features_normed = self.queue_input_norm(state_dict['queue_features'])
         global_state = torch.cat([
             graph_embedding,
             fleet_embedding,
             task_embedding,
-            state_dict['queue_features']
+            queue_features_normed
         ], dim=-1)
 
         state_value = self.critic(global_state)
@@ -233,17 +244,71 @@ class GAPOPolicyNetwork(nn.Module):
         else:
             return action_logits, state_value, None
 
-    def score_tasks(self, task_features: torch.Tensor) -> torch.Tensor:
+    def encode_context(
+        self,
+        state_dict: Dict[str, torch.Tensor]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Score tasks for prioritization.
+        Encode graph and fleet context for task scoring.
+        Runs the hospital and robot encoders to produce context embeddings.
+
+        Args:
+            state_dict: State dictionary with graph and robot features
+
+        Returns:
+            graph_embedding: [hidden_dim]
+            fleet_embedding: [hidden_dim]
+        """
+        # Optional SKU pooling
+        if 'node_sku_features' in state_dict and state_dict['node_sku_features'] is not None:
+            sku_mask = state_dict.get('node_sku_mask', None)
+            pooled = self._pool_sku_embeddings(state_dict['node_sku_features'], sku_mask)
+            if pooled is not None:
+                state_dict = dict(state_dict)
+                state_dict['node_continuous'] = torch.cat([state_dict['node_continuous'], pooled], dim=-1)
+
+        node_embeddings, _, graph_embedding = self.hospital_encoder(
+            state_dict['node_continuous'],
+            state_dict['node_categorical'],
+            state_dict['edge_features'],
+            state_dict['edge_node_indices'],
+            state_dict.get('edge_index', None)
+        )
+
+        _, fleet_embedding = self.robot_encoder(
+            state_dict['robot_features'],
+            state_dict.get('robot_positions', None)
+        )
+
+        return graph_embedding, fleet_embedding
+
+    def score_tasks(
+        self,
+        task_features: torch.Tensor,
+        graph_embedding: torch.Tensor,
+        fleet_embedding: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Score tasks for prioritization using task features + global context.
 
         Args:
             task_features: [num_tasks, task_feat_dim]
+            graph_embedding: [hidden_dim] - hospital graph context
+            fleet_embedding: [hidden_dim] - robot fleet context
 
         Returns:
             scores: [num_tasks]
         """
-        scores = self.task_scorer(task_features).squeeze(-1)
+        num_tasks = task_features.shape[0]
+        task_features_normed = self.task_input_norm(task_features)
+
+        # Expand context to match num_tasks
+        graph_expanded = graph_embedding.unsqueeze(0).expand(num_tasks, -1)
+        fleet_expanded = fleet_embedding.unsqueeze(0).expand(num_tasks, -1)
+
+        # Concatenate task features with context
+        scorer_input = torch.cat([task_features_normed, graph_expanded, fleet_expanded], dim=-1)
+        scores = self.task_scorer(scorer_input).squeeze(-1)
         return scores
 
     def select_action(
@@ -451,14 +516,13 @@ class GAPOPolicyNetwork(nn.Module):
         node_embeddings = node_embeddings.view(batch_size, num_nodes, self.hidden_dim)
         graph_embedding = torch.mean(node_embeddings, dim=1)
 
-        # Encode robots and tasks
+        # Encode robots and tasks (normalization applied inside encoders)
         robot_embeddings, fleet_embedding = self.robot_encoder(
             robot_features,
             robot_positions
         )
-        task_embedding = self.task_encoder(task_features)
-        task_score = self.task_scorer(task_features).squeeze(-1)
-        task_embedding = task_embedding * (1.0 + torch.tanh(task_score)).unsqueeze(-1)
+        task_features_normed = self.task_input_norm(task_features)
+        task_embedding = self.task_encoder(task_features_normed)
 
         # Build mask tensor for attention
         mask_tensor = None
@@ -480,11 +544,12 @@ class GAPOPolicyNetwork(nn.Module):
         )
 
         # Value estimation
+        queue_features_normed = self.queue_input_norm(queue_features)
         global_state = torch.cat([
             graph_embedding,
             fleet_embedding,
             task_embedding,
-            queue_features
+            queue_features_normed
         ], dim=-1)
 
         state_value = self.critic(global_state)

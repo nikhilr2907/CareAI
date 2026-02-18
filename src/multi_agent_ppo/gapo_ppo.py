@@ -8,12 +8,14 @@ Implements PPO training for GAPO policy network with:
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 import logging
 
 from .gapo_policy import GAPOPolicyNetwork
+from .task_creation_actor import TaskCreationActor
 
 
 class Memory:
@@ -26,6 +28,9 @@ class Memory:
         self.rewards = []
         self.is_terminals = []
         self.robot_masks = []
+        # Track which memory indices belong to the same assignment step
+        # Each entry is a list of memory indices for assignments made in that step
+        self.step_assignment_groups = []
 
     def clear_memory(self):
         del self.state_dicts[:]
@@ -34,6 +39,7 @@ class Memory:
         del self.rewards[:]
         del self.is_terminals[:]
         del self.robot_masks[:]
+        del self.step_assignment_groups[:]
 
 
 class GAPOPPO:
@@ -73,6 +79,17 @@ class GAPOPPO:
         entropy_coef: float = 0.01,
         min_adv_std: float = 1e-3,
         normalize_returns=True,
+        enable_task_creation_actor: bool = False,
+        task_creation_shortlist_size: int = 50,
+        task_creation_temperature: float = 1.0,
+        task_creation_urgent_priority_threshold: int = 4,
+        task_creation_near_deadline_seconds: float = 300.0,
+        task_creation_stockout_hours: float = 1.0,
+        task_creation_prior_sigma: float = 1.0,
+        task_creation_loss_coef: float = 0.05,
+        task_creation_kl_coef: float = 1e-4,
+        ranking_max_pairs_per_group: int = 64,
+        ranking_min_adv_gap: float = 1e-4,
         device='cpu',
         logger: Optional[logging.Logger] = None
     ):
@@ -87,6 +104,16 @@ class GAPOPPO:
         self.critic_coef = critic_coef
         self.entropy_coef = entropy_coef
         self.min_adv_std = min_adv_std
+        self.enable_task_creation_actor = enable_task_creation_actor
+        self.task_creation_shortlist_size = max(1, int(task_creation_shortlist_size))
+        self.task_creation_temperature = max(float(task_creation_temperature), 1e-6)
+        self.task_creation_urgent_priority_threshold = int(task_creation_urgent_priority_threshold)
+        self.task_creation_near_deadline_seconds = float(task_creation_near_deadline_seconds)
+        self.task_creation_stockout_hours = float(task_creation_stockout_hours)
+        self.task_creation_loss_coef = float(task_creation_loss_coef)
+        self.task_creation_kl_coef = float(task_creation_kl_coef)
+        self.ranking_max_pairs_per_group = int(max(1, ranking_max_pairs_per_group))
+        self.ranking_min_adv_gap = float(max(0.0, ranking_min_adv_gap))
 
         # GAPO policy network
         self.policy = GAPOPolicyNetwork(
@@ -110,23 +137,6 @@ class GAPOPPO:
             use_debiasing=use_debiasing,
             lambda_state_delta=lambda_debias
         ).to(self.device)
-
-        # Optimizer (actor/critic param groups)
-        actor_lr = actor_lr if actor_lr is not None else lr
-        critic_lr = critic_lr if critic_lr is not None else lr
-        actor_params = []
-        critic_params = []
-        for name, param in self.policy.named_parameters():
-            if "critic" in name:
-                critic_params.append(param)
-            else:
-                actor_params.append(param)
-        self.optimizer = optim.Adam(
-            [
-                {"params": actor_params, "lr": actor_lr},
-                {"params": critic_params, "lr": critic_lr},
-            ]
-        )
 
         # Old policy for PPO ratio
         self.policy_old = GAPOPolicyNetwork(
@@ -152,7 +162,35 @@ class GAPOPPO:
 
         self.policy_old.load_state_dict(self.policy.state_dict())
 
+        self.task_creation_actor: Optional[TaskCreationActor] = None
+        if self.enable_task_creation_actor:
+            self.task_creation_actor = TaskCreationActor(
+                hidden_dim=hidden_dim,
+                queue_feat_dim=queue_feat_dim,
+                task_feat_dim=task_feat_dim,
+                prior_sigma=task_creation_prior_sigma,
+            ).to(self.device)
+
         self.MseLoss = nn.MSELoss()
+
+        # Optimizer (actor/critic param groups)
+        actor_lr = actor_lr if actor_lr is not None else lr
+        critic_lr = critic_lr if critic_lr is not None else lr
+        actor_params = []
+        critic_params = []
+        for name, param in self.policy.named_parameters():
+            if "critic" in name:
+                critic_params.append(param)
+            else:
+                actor_params.append(param)
+        if self.task_creation_actor is not None:
+            actor_params.extend(list(self.task_creation_actor.parameters()))
+        self.optimizer = optim.Adam(
+            [
+                {"params": actor_params, "lr": actor_lr},
+                {"params": critic_params, "lr": critic_lr},
+            ]
+        )
 
     def select_action(
         self,
@@ -231,6 +269,293 @@ class GAPOPPO:
             )
 
         return action
+
+    def score_and_rank_tasks(
+        self,
+        pending_tasks,
+        state_dict: Dict[str, np.ndarray],
+        current_time: float,
+        temperature: float = 1.0
+    ) -> List:
+        """
+        Score and rank pending tasks using context-aware scorer with stochastic sampling.
+
+        Args:
+            pending_tasks: List of Task objects
+            state_dict: Current environment state (numpy)
+            current_time: Current simulation time
+            temperature: Sampling temperature (higher = more random, 0 = deterministic)
+
+        Returns:
+            ranked_tasks: Reordered task list
+        """
+        if not pending_tasks or len(pending_tasks) <= 1:
+            return pending_tasks
+
+        # Build candidate feature tensor.
+        task_features = np.stack([t.get_features(current_time) for t in pending_tasks])
+        task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(self.device)
+        state_tensor = self._state_dict_to_tensor(state_dict)
+
+        # Legacy contextual scores are always computed (fallback + metadata).
+        with torch.no_grad():
+            graph_embedding, fleet_embedding = self.policy.encode_context(state_tensor)
+            base_scores = self.policy.score_tasks(
+                task_features_tensor, graph_embedding, fleet_embedding
+            )
+            rank_scores = base_scores
+            factor_scores = None
+            urgent_mask_np = None
+
+            if self.task_creation_actor is not None:
+                urgent_mask = torch.tensor(
+                    self._build_urgent_task_mask(pending_tasks, current_time),
+                    dtype=torch.bool,
+                    device=self.device,
+                )
+                creation_ranking = self.task_creation_actor.rank_candidates(
+                    task_features=task_features_tensor,
+                    graph_embedding=graph_embedding,
+                    fleet_embedding=fleet_embedding,
+                    queue_features=state_tensor["queue_features"],
+                    shortlist_size=min(self.task_creation_shortlist_size, len(pending_tasks)),
+                    temperature=max(float(temperature), self.task_creation_temperature),
+                    urgent_mask=urgent_mask,
+                    deterministic=(temperature <= 0.0),
+                )
+                indices = creation_ranking.ranked_indices
+                rank_scores = creation_ranking.scorer_scores
+                factor_scores = creation_ranking.factor_logits
+                urgent_mask_np = urgent_mask.detach().cpu().numpy()
+            else:
+                if temperature > 0:
+                    gumbel_noise = -torch.log(-torch.log(torch.rand_like(base_scores).clamp(min=1e-8)))
+                    noisy_scores = base_scores + temperature * gumbel_noise
+                    _, indices = noisy_scores.sort(descending=True)
+                else:
+                    _, indices = base_scores.sort(descending=True)
+
+        indices_np = indices.detach().cpu().numpy()
+        ranked = [pending_tasks[i] for i in indices_np]
+
+        rank_scores_np = rank_scores.detach().cpu().numpy()
+        base_scores_np = base_scores.detach().cpu().numpy()
+        factor_scores_np = factor_scores.detach().cpu().numpy() if factor_scores is not None else None
+
+        for rank, task_idx in enumerate(indices_np):
+            task = pending_tasks[task_idx]
+            task.queue_position = rank
+            task.learned_score = float(rank_scores_np[task_idx])
+            task.base_score = float(base_scores_np[task_idx])
+            if factor_scores_np is not None:
+                task.factor_score = float(factor_scores_np[task_idx])
+            if urgent_mask_np is not None:
+                task.is_urgent_candidate = bool(urgent_mask_np[task_idx])
+
+        return ranked
+
+    def _build_urgent_task_mask(
+        self,
+        pending_tasks,
+        current_time: float
+    ) -> np.ndarray:
+        urgent_mask = np.zeros(len(pending_tasks), dtype=bool)
+        for i, task in enumerate(pending_tasks):
+            priority = int(getattr(task, "manual_priority", 0))
+            is_priority_urgent = priority >= self.task_creation_urgent_priority_threshold
+
+            if hasattr(task, "get_time_to_deadline"):
+                time_to_deadline = task.get_time_to_deadline(current_time)
+            else:
+                time_to_deadline = float("inf")
+            is_deadline_urgent = np.isfinite(time_to_deadline) and time_to_deadline <= self.task_creation_near_deadline_seconds
+
+            time_to_stockout = getattr(task, "time_to_stockout", float("inf"))
+            is_stockout_urgent = (
+                time_to_stockout is not None
+                and np.isfinite(time_to_stockout)
+                and float(time_to_stockout) <= self.task_creation_stockout_hours
+            )
+
+            urgent_mask[i] = is_priority_urgent or is_deadline_urgent or is_stockout_urgent
+
+        return urgent_mask
+
+    def compute_ranking_loss(
+        self,
+        memory: 'Memory',
+        state_dict_tensors: List[Dict[str, torch.Tensor]],
+        advantages: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute ranking loss: tasks that led to higher advantages should have higher scores.
+
+        Uses a margin ranking loss on pairs of tasks within the same assignment step.
+
+        Args:
+            memory: Memory buffer with step_assignment_groups
+            state_dict_tensors: Tensorized state dicts
+            advantages: GAE advantages for each decision
+
+        Returns:
+            ranking_loss: Scalar loss
+        """
+        if not memory.step_assignment_groups:
+            return torch.tensor(0.0, device=self.device)
+
+        total_loss = torch.tensor(0.0, device=self.device)
+        num_pairs = 0
+
+        for group_indices in memory.step_assignment_groups:
+            valid = [idx for idx in group_indices if 0 <= idx < len(advantages) and idx < len(state_dict_tensors)]
+            if len(valid) < 2:
+                continue
+
+            # Compute each score ONCE per assignment in this group.
+            group_scores = []
+            group_advs = []
+            for idx in valid:
+                sd = state_dict_tensors[idx]
+                graph_emb, fleet_emb = self.policy.encode_context(sd)
+                score = self.policy.score_tasks(
+                    sd["task_features"].unsqueeze(0),
+                    graph_emb,
+                    fleet_emb
+                ).squeeze(0)
+                group_scores.append(score)
+                group_advs.append(advantages[idx])
+
+            scores = torch.stack(group_scores, dim=0)
+            advs = torch.stack(group_advs, dim=0)
+
+            pair_indices = self._sample_group_pairs(
+                group_size=len(valid),
+                max_pairs=self.ranking_max_pairs_per_group
+            )
+            for i, j in pair_indices:
+                adv_delta = advs[i] - advs[j]
+                if torch.abs(adv_delta).item() <= self.ranking_min_adv_gap:
+                    continue
+                target = torch.sign(adv_delta).view(1)
+                margin_loss = F.margin_ranking_loss(
+                    scores[i].view(1),
+                    scores[j].view(1),
+                    target,
+                    margin=0.1
+                )
+                total_loss = total_loss + margin_loss
+                num_pairs += 1
+
+        if num_pairs == 0:
+            return torch.tensor(0.0, device=self.device)
+        return total_loss / num_pairs
+
+    def compute_task_creation_ranking_loss(
+        self,
+        memory: 'Memory',
+        state_dict_tensors: List[Dict[str, torch.Tensor]],
+        advantages: torch.Tensor
+    ) -> torch.Tensor:
+        """Pairwise ranking loss for task-creation scorer + Bayesian factorizer."""
+        if self.task_creation_actor is None or not memory.step_assignment_groups:
+            return torch.tensor(0.0, device=self.device)
+
+        total_pair_loss = torch.tensor(0.0, device=self.device)
+        total_kl = torch.tensor(0.0, device=self.device)
+        num_pairs = 0
+        num_group_samples = 0
+
+        for group_indices in memory.step_assignment_groups:
+            valid = [idx for idx in group_indices if 0 <= idx < len(advantages) and idx < len(state_dict_tensors)]
+            if len(valid) < 2:
+                continue
+
+            scorer_scores = []
+            factor_scores = []
+            kls = []
+            advs = []
+
+            # Compute each score ONCE per assignment in this group.
+            for idx in valid:
+                sd = state_dict_tensors[idx]
+                graph_emb, fleet_emb = self.policy.encode_context(sd)
+
+                scorer_score = self.task_creation_actor.score_candidates(
+                    task_features=sd["task_features"].unsqueeze(0),
+                    graph_embedding=graph_emb,
+                    fleet_embedding=fleet_emb,
+                    queue_features=sd["queue_features"],
+                ).squeeze(0)
+
+                state_ctx = self.task_creation_actor.build_state_context(
+                    graph_embedding=graph_emb,
+                    fleet_embedding=fleet_emb,
+                    queue_features=sd["queue_features"],
+                )
+                factor_out = self.task_creation_actor.factorizer(
+                    state_context=state_ctx,
+                    candidate_features=sd["task_features"].unsqueeze(0),
+                    deterministic=False,
+                )
+
+                scorer_scores.append(scorer_score)
+                factor_scores.append(factor_out["logits"].squeeze(0))
+                kls.append(factor_out["kl"])
+                advs.append(advantages[idx])
+
+            scorer_scores = torch.stack(scorer_scores, dim=0)
+            factor_scores = torch.stack(factor_scores, dim=0)
+            advs = torch.stack(advs, dim=0)
+            total_kl = total_kl + torch.stack(kls, dim=0).mean()
+            num_group_samples += 1
+
+            pair_indices = self._sample_group_pairs(
+                group_size=len(valid),
+                max_pairs=self.ranking_max_pairs_per_group
+            )
+            for i, j in pair_indices:
+                adv_delta = advs[i] - advs[j]
+                if torch.abs(adv_delta).item() <= self.ranking_min_adv_gap:
+                    continue
+                target = torch.sign(adv_delta).view(1)
+                scorer_margin_loss = F.margin_ranking_loss(
+                    scorer_scores[i].view(1),
+                    scorer_scores[j].view(1),
+                    target,
+                    margin=0.1
+                )
+                factor_margin_loss = F.margin_ranking_loss(
+                    factor_scores[i].view(1),
+                    factor_scores[j].view(1),
+                    target,
+                    margin=0.1
+                )
+                total_pair_loss = total_pair_loss + 0.5 * (scorer_margin_loss + factor_margin_loss)
+                num_pairs += 1
+
+        if num_pairs > 0:
+            total_pair_loss = total_pair_loss / num_pairs
+        else:
+            total_pair_loss = torch.tensor(0.0, device=self.device)
+
+        if num_group_samples > 0:
+            total_kl = total_kl / num_group_samples
+        else:
+            total_kl = torch.tensor(0.0, device=self.device)
+
+        return total_pair_loss + (self.task_creation_kl_coef * total_kl)
+
+    def _sample_group_pairs(self, group_size: int, max_pairs: int) -> List[Tuple[int, int]]:
+        """Enumerate or subsample pair indices for one assignment group."""
+        if group_size < 2:
+            return []
+
+        all_pairs = [(i, j) for i in range(group_size) for j in range(i + 1, group_size)]
+        if len(all_pairs) <= max_pairs:
+            return all_pairs
+
+        perm = torch.randperm(len(all_pairs), device=self.device)[:max_pairs].tolist()
+        return [all_pairs[k] for k in perm]
 
     def update(self, memory: Memory, next_state_dict: Dict[str, np.ndarray] = None):
         """
@@ -339,13 +664,32 @@ class GAPOPPO:
                 debias_loss = torch.tensor(0.0)
                 debias_breakdown = {}
 
+            # Ranking loss for task scorer
+            ranking_loss = self.compute_ranking_loss(
+                memory, state_dict_tensors, advantages
+            )
+            lambda_ranking = 0.05
+            task_creation_loss = self.compute_task_creation_ranking_loss(
+                memory, state_dict_tensors, advantages
+            )
+
             # Total loss
-            loss = actor_loss + (self.critic_coef * critic_loss) + entropy_loss + debias_loss
+            loss = (
+                actor_loss
+                + (self.critic_coef * critic_loss)
+                + entropy_loss
+                + debias_loss
+                + (lambda_ranking * ranking_loss)
+                + (self.task_creation_loss_coef * task_creation_loss)
+            )
 
             # Take gradient step
             self.optimizer.zero_grad()
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
+            params_to_clip = list(self.policy.parameters())
+            if self.task_creation_actor is not None:
+                params_to_clip += list(self.task_creation_actor.parameters())
+            grad_norm = torch.nn.utils.clip_grad_norm_(params_to_clip, 0.5)
             self.optimizer.step()
 
             # Log losses for each epoch
@@ -354,7 +698,9 @@ class GAPOPPO:
                 f"Loss={loss.item():.4f} | "
                 f"Actor={actor_loss.item():.4f} | "
                 f"Critic={critic_loss.item():.4f} | "
-                f"Entropy={entropy_loss.item():.4f}" +
+                f"Entropy={entropy_loss.item():.4f} | "
+                f"Ranking={ranking_loss.item():.4f} | "
+                f"TaskCreate={task_creation_loss.item():.4f}" +
                 (f" | Debias={debias_loss.item():.4f}" if self.use_debiasing else "")
             )
 
@@ -365,6 +711,8 @@ class GAPOPPO:
                     'actor_loss': actor_loss.item(),
                     'critic_loss': critic_loss.item(),
                     'entropy_loss': entropy_loss.item(),
+                    'ranking_loss': ranking_loss.item(),
+                    'task_creation_loss': task_creation_loss.item(),
                     'debias_loss': debias_loss.item() if self.use_debiasing else 0.0,
                     'clip_fraction': clip_fraction.item(),
                     'grad_norm': float(grad_norm),
@@ -426,7 +774,7 @@ class GAPOPPO:
         return advantages
 
     def _state_dict_to_tensor(self, state_dict: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
-        """Convert numpy state dict to tensor dict."""
+        """Convert numpy state dict to tensor dict, clamping extreme values."""
         tensor_dict = {}
         int64_keys = {"node_categorical", "edge_index", "edge_node_indices"}
 
@@ -435,6 +783,8 @@ class GAPOPPO:
                 if key in int64_keys:
                     tensor_dict[key] = torch.tensor(value, dtype=torch.int64).to(self.device)
                 else:
+                    # Replace NaN/Inf before converting to tensor
+                    value = np.nan_to_num(value, nan=0.0, posinf=1e6, neginf=-1e6)
                     tensor_dict[key] = torch.tensor(value, dtype=torch.float32).to(self.device)
             else:
                 tensor_dict[key] = value
@@ -443,16 +793,22 @@ class GAPOPPO:
 
     def save(self, filepath: str):
         """Save policy network."""
-        torch.save({
+        payload = {
             'policy_state_dict': self.policy.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-        }, filepath)
+            'enable_task_creation_actor': self.task_creation_actor is not None,
+        }
+        if self.task_creation_actor is not None:
+            payload['task_creation_actor_state_dict'] = self.task_creation_actor.state_dict()
+        torch.save(payload, filepath)
 
     def load(self, filepath: str):
         """Load policy network."""
         checkpoint = torch.load(filepath, map_location=self.device)
         self.policy.load_state_dict(checkpoint['policy_state_dict'])
         self.policy_old.load_state_dict(checkpoint['policy_state_dict'])
+        if self.task_creation_actor is not None and 'task_creation_actor_state_dict' in checkpoint:
+            self.task_creation_actor.load_state_dict(checkpoint['task_creation_actor_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
     def get_last_loss_info(self) -> Dict:

@@ -132,6 +132,17 @@ def main():
     warmup_penalty_scale = args.warmup_penalty_scale
     warmup_consumption_scale = args.warmup_consumption_scale
     warmup_entropy_mult = args.warmup_entropy_mult
+    enable_task_creation_actor = args.enable_task_creation_actor
+    task_creation_shortlist_size = args.task_creation_shortlist_size
+    task_creation_temperature = args.task_creation_temperature
+    task_creation_urgent_priority = args.task_creation_urgent_priority
+    task_creation_near_deadline = args.task_creation_near_deadline
+    task_creation_stockout_hours = args.task_creation_stockout_hours
+    task_creation_prior_sigma = args.task_creation_prior_sigma
+    task_creation_loss_coef = args.task_creation_loss_coef
+    task_creation_kl_coef = args.task_creation_kl_coef
+    ranking_max_pairs_per_group = args.ranking_max_pairs_per_group
+    ranking_min_adv_gap = args.ranking_min_adv_gap
 
     # Device
     if args.device == 'auto':
@@ -161,6 +172,19 @@ def main():
     logger.info(f"Entropy Coef: {entropy_coef}")
     logger.info(f"Min Advantage Std: {min_adv_std}")
     logger.info(f"Warmup: iters={warmup_iters} mix={warmup_mix} reward_offset={warmup_reward_offset} penalty_scale={warmup_penalty_scale} consumption_scale={warmup_consumption_scale} entropy_mult={warmup_entropy_mult}")
+    logger.info(f"Max Assignments Per Step: {max_assignments_per_step}")
+    logger.info(
+        "Task Creation Actor: "
+        f"enabled={enable_task_creation_actor} shortlist={task_creation_shortlist_size} "
+        f"temp={task_creation_temperature} urgent_prio>={task_creation_urgent_priority} "
+        f"near_deadline_s={task_creation_near_deadline} stockout_h={task_creation_stockout_hours} "
+        f"prior_sigma={task_creation_prior_sigma} loss_coef={task_creation_loss_coef} "
+        f"kl_coef={task_creation_kl_coef}"
+    )
+    logger.info(
+        f"Ranking Aux: max_pairs_per_group={ranking_max_pairs_per_group} "
+        f"min_adv_gap={ranking_min_adv_gap}"
+    )
     logger.info(f"Eval Interval: {args.eval_interval}")
     logger.info(f"Eval Steps: {args.eval_steps}")
     logger.info(f"Eval Seeds: {args.eval_seeds}")
@@ -264,20 +288,37 @@ def main():
         critic_coef=critic_coef,
         entropy_coef=entropy_coef,
         min_adv_std=min_adv_std,
+        enable_task_creation_actor=enable_task_creation_actor,
+        task_creation_shortlist_size=task_creation_shortlist_size,
+        task_creation_temperature=task_creation_temperature,
+        task_creation_urgent_priority_threshold=task_creation_urgent_priority,
+        task_creation_near_deadline_seconds=task_creation_near_deadline,
+        task_creation_stockout_hours=task_creation_stockout_hours,
+        task_creation_prior_sigma=task_creation_prior_sigma,
+        task_creation_loss_coef=task_creation_loss_coef,
+        task_creation_kl_coef=task_creation_kl_coef,
+        ranking_max_pairs_per_group=ranking_max_pairs_per_group,
+        ranking_min_adv_gap=ranking_min_adv_gap,
         device=device,
         logger=logger
     )
     policy_params = sum(p.numel() for p in ppo.policy.parameters())
     policy_old_params = sum(p.numel() for p in ppo.policy_old.parameters())
+    task_creation_params = 0
+    if getattr(ppo, "task_creation_actor", None) is not None:
+        task_creation_params = sum(p.numel() for p in ppo.task_creation_actor.parameters())
     edge_cost_params = 0
     if hasattr(env, "edge_cost_manager") and getattr(env.edge_cost_manager, "model", None) is not None:
         edge_cost_params = sum(p.numel() for p in env.edge_cost_manager.model.parameters())
-    total_params = policy_params + policy_old_params + edge_cost_params
+    total_params = policy_params + policy_old_params + task_creation_params + edge_cost_params
     trainable_params = sum(p.numel() for p in ppo.policy.parameters() if p.requires_grad)
+    if getattr(ppo, "task_creation_actor", None) is not None:
+        trainable_params += sum(p.numel() for p in ppo.task_creation_actor.parameters() if p.requires_grad)
     logger.info(
         f"Model parameters: policy={policy_params:,} "
-        f"policy_old={policy_old_params:,} edge_cost={edge_cost_params:,} "
-        f"total={total_params:,} trainable(policy)={trainable_params:,}"
+        f"policy_old={policy_old_params:,} task_creation={task_creation_params:,} "
+        f"edge_cost={edge_cost_params:,} total={total_params:,} "
+        f"trainable(policy+task_creation)={trainable_params:,}"
     )
 
     # Training metrics
@@ -335,18 +376,13 @@ def main():
             if step % 10 == 0:  # Print every 10 steps
                 print(f"  Step {step}/{rollout_steps}", flush=True)
 
-            # Re-rank pending tasks using learned scorer (manual priority as secondary)
+            # Re-rank pending tasks using context-aware scorer with stochastic ranking
             if env.pending_tasks:
-                task_features = np.stack([t.get_features(env.current_time) for t in env.pending_tasks])
-                task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
-                with torch.no_grad():
-                    scores = ppo.policy_old.score_tasks(task_features_tensor).cpu().numpy()
-                scored = list(zip(env.pending_tasks, scores))
-                scored.sort(key=lambda x: (-x[1], -x[0].manual_priority))
-                env.pending_tasks = [t for t, _ in scored]
-                for i, (t, score) in enumerate(scored):
-                    t.queue_position = i
-                    t.learned_score = float(score)
+                scorer_temp = max(0.5, 1.0 - iteration / max(max_training_iterations, 1))
+                env.pending_tasks = ppo.score_and_rank_tasks(
+                    env.pending_tasks, state_dict, env.current_time,
+                    temperature=scorer_temp
+                )
 
             # Re-score and re-sort each robot's queued tasks (keep current task fixed)
             for robot in env.robots:
@@ -354,8 +390,12 @@ def main():
                 if all_tasks:
                     task_features = np.stack([t.get_features(env.current_time) for t in all_tasks])
                     task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
+                    state_tensor = ppo._state_dict_to_tensor(state_dict)
                     with torch.no_grad():
-                        scores = ppo.policy_old.score_tasks(task_features_tensor).cpu().numpy()
+                        graph_emb, fleet_emb = ppo.policy_old.encode_context(state_tensor)
+                        scores = ppo.policy_old.score_tasks(
+                            task_features_tensor, graph_emb, fleet_emb
+                        ).cpu().numpy()
                     for task, score in zip(all_tasks, scores):
                         task.learned_score = float(score)
                     robot.resort_queue()
@@ -366,11 +406,15 @@ def main():
 
             # Autoregressive task assignment phase
             assignments_this_step = 0
+            step_memory_indices = []  # Track memory indices for this step's assignments
             while len(env.pending_tasks) > 0 and assignments_this_step < max_assignments_per_step:
                 task = env.pending_tasks[0]
 
                 # Build robot availability mask
                 robot_mask = np.ones(env.num_robots, dtype=bool)
+
+                # Record memory index before action selection
+                mem_idx_before = len(memory.actions)
 
                 # Select action
                 try:
@@ -400,6 +444,9 @@ def main():
                           f"edges={state_dict.get('edge_features', torch.tensor([])).shape}", flush=True)
                     raise
 
+                # Track this assignment's memory index
+                step_memory_indices.append(mem_idx_before)
+
                 # Assign task to robot
                 success = env.assign_task_to_robot(action, task)
                 if success:
@@ -417,6 +464,10 @@ def main():
                 memory.rewards.append(reward)
                 memory.is_terminals.append(False)
 
+            # Record step assignment group for ranking loss
+            if len(step_memory_indices) > 1:
+                memory.step_assignment_groups.append(step_memory_indices)
+
             # Simulation time step
             prev_completed = len(env.completed_tasks)
             state_dict, step_reward, done, info = env.step(dt=timesteps_per_decision)
@@ -432,10 +483,13 @@ def main():
                     if task.arrival_time is not None:
                         iteration_completion_times.append(env.current_time - task.arrival_time)
 
-            if step_reward != 0:
+            # Distribute step reward across ALL assignments in this step (not just the last)
+            if step_reward != 0 and step_memory_indices:
                 iteration_reward += step_reward
-                if len(memory.rewards) > 0:
-                    memory.rewards[-1] += step_reward
+                share = step_reward / len(step_memory_indices)
+                for idx in step_memory_indices:
+                    if idx < len(memory.rewards):
+                        memory.rewards[idx] += share
 
             if done:
                 state_dict = env.reset()
@@ -551,7 +605,7 @@ def main():
                     logger.info(f"    {line}")
 
             if loss_info:
-                logger.info(f"  Loss - Total: {loss_info.get('total_loss', 0):.4f} | Actor: {loss_info.get('actor_loss', 0):.4f} | Critic: {loss_info.get('critic_loss', 0):.4f}")
+                logger.info(f"  Loss - Total: {loss_info.get('total_loss', 0):.4f} | Actor: {loss_info.get('actor_loss', 0):.4f} | Critic: {loss_info.get('critic_loss', 0):.4f} | Ranking: {loss_info.get('ranking_loss', 0):.4f}")
                 if use_debiasing:
                     logger.info(f"  De-bias: {loss_info.get('debias_loss', 0):.4f} (delta: {loss_info.get('state_delta', 0):.4f}, cons: {loss_info.get('consistency', 0):.4f})")
                 if 'clip_fraction' in loss_info:
@@ -592,6 +646,20 @@ def main():
                     ent_mean = float(np.mean(entropy_history))
                     if ent_mean > -0.001:
                         logger.warning(f"  Warning: entropy loss near zero ({ent_mean:.4f}) - policy may be over-confident.")
+
+            if hasattr(env, 'edge_cost_manager'):
+                ec = env.edge_cost_manager.get_stats()
+                model_status = 'learned' if ec['using_learned_model'] else 'heuristic'
+                logger.info(
+                    f"  EdgeCost [{model_status}]: "
+                    f"buffer={ec['buffer_size']} "
+                    f"records={ec['total_records']} "
+                    f"train_steps={ec['total_train_steps']} "
+                    f"nll_loss={ec['avg_recent_loss']:.4f}"
+                )
+                if not ec['using_learned_model'] and ec['buffer_size'] > 0:
+                    pct = 100.0 * ec['buffer_size'] / max(1, ec.get('min_train_samples', 100))
+                    logger.info(f"  EdgeCost warmup: {ec['buffer_size']}/100 records ({pct:.0f}%)")
 
             if args.eval_interval > 0 and iteration % args.eval_interval == 0:
                 eval_metrics = []

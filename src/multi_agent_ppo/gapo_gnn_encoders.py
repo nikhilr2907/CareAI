@@ -75,6 +75,10 @@ class HospitalGraphEncoder(nn.Module):
         self.shift_embedding_dim = shift_embedding_dim
         self.day_type_embedding_dim = day_type_embedding_dim
 
+        # Input normalization for continuous features
+        self.node_input_norm = nn.LayerNorm(node_continuous_dim)
+        self.edge_input_norm = nn.LayerNorm(edge_feat_dim)
+
         # Categorical embeddings for each feature
         self.node_type_embedding = nn.Embedding(num_node_types, node_type_embedding_dim)
         self.department_embedding = nn.Embedding(num_departments + 1, department_embedding_dim)  # +1 for -1 (unknown)
@@ -147,6 +151,10 @@ class HospitalGraphEncoder(nn.Module):
             edge_embeddings: [num_edges, hidden_dim]
             graph_embedding: [hidden_dim]
         """
+        # Normalize continuous inputs to stabilize GNN attention
+        node_continuous = self.node_input_norm(node_continuous)
+        edge_features = self.edge_input_norm(edge_features)
+
         # Embed all categorical features
         node_type_embeds = self.node_type_embedding(node_categorical[:, 0])  # [num_nodes, 8]
 
@@ -238,6 +246,9 @@ class RobotFleetEncoder(nn.Module):
 
         self.hidden_dim = hidden_dim
 
+        # Input normalization for robot features
+        self.robot_input_norm = nn.LayerNorm(robot_feat_dim)
+
         # GraphSAGE for variable number of robots
         self.sage1 = SAGEConv(
             in_channels=robot_feat_dim,
@@ -267,6 +278,9 @@ class RobotFleetEncoder(nn.Module):
             robot_embeddings: [num_robots, hidden_dim]
             fleet_embedding: [hidden_dim]
         """
+        # Normalize robot features
+        robot_features = self.robot_input_norm(robot_features)
+
         if robot_features.dim() == 3:
             batch_size, num_robots, feat_dim = robot_features.shape
             flat_features = robot_features.view(batch_size * num_robots, feat_dim)

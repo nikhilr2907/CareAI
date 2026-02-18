@@ -90,21 +90,19 @@ def rank_pending_tasks(env, ppo):
             t.queue_position = i
             t.learned_score = 0.0
         return
-    task_features = np.stack([t.get_features(env.current_time) for t in env.pending_tasks])
-    task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
-    with torch.no_grad():
-        scores = ppo.policy.score_tasks(task_features_tensor).cpu().numpy()
-    scored = list(zip(env.pending_tasks, scores))
-    scored.sort(key=lambda x: (-x[1], -x[0].manual_priority))
-    env.pending_tasks = [t for t, _ in scored]
-    for i, (t, score) in enumerate(scored):
-        t.queue_position = i
-        t.learned_score = float(score)
+    state_dict = env._get_state_dict()
+    env.pending_tasks = ppo.score_and_rank_tasks(
+        env.pending_tasks, state_dict, env.current_time, temperature=0.0
+    )
 
 
 def rescore_robot_queues(env, ppo):
     if ppo is None:
         return
+    state_dict = env._get_state_dict()
+    state_tensor = ppo._state_dict_to_tensor(state_dict)
+    with torch.no_grad():
+        graph_emb, fleet_emb = ppo.policy.encode_context(state_tensor)
     for robot in env.robots:
         all_tasks = robot.task_queue[1:] + robot.overflow_queue
         if not all_tasks:
@@ -112,7 +110,7 @@ def rescore_robot_queues(env, ppo):
         task_features = np.stack([t.get_features(env.current_time) for t in all_tasks])
         task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
         with torch.no_grad():
-            scores = ppo.policy.score_tasks(task_features_tensor).cpu().numpy()
+            scores = ppo.policy.score_tasks(task_features_tensor, graph_emb, fleet_emb).cpu().numpy()
         for task, score in zip(all_tasks, scores):
             task.learned_score = float(score)
         robot.resort_queue()
