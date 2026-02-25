@@ -622,8 +622,6 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         completion_bonus = 10.0
         replenishment_bonus = 6.0
         backlog_penalty = 0.1
-        urgent_age_penalty = 0.01
-        normal_age_penalty = 0.001
         sku_stockout_penalty = 4.0
         sku_low_stock_penalty = 1.5
         low_stock_ratio = 0.2
@@ -637,17 +635,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 capacity_ratio = task.num_items / max(to_node.max_stock, 1.0)
                 reward += replenishment_bonus * min(1.0, capacity_ratio)
 
-        # 2. Pending task penalties (age accumulation)
-        for task in self.pending_tasks:
-            age = task.get_age(self.current_time)
-
-            # Higher penalty for urgent tasks
-            if task.manual_priority >= 4:
-                reward -= urgent_age_penalty * age
-            else:
-                reward -= normal_age_penalty * age
-
-        # 2b. Backlog penalty (discourage large queues)
+        # 2. Backlog penalty (discourages large queues without depending on raw age values)
         backlog_size = len(self.pending_tasks)
         if backlog_size > 0:
             reward -= backlog_penalty * backlog_size
@@ -691,7 +679,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 if num_active > corridor_capacity:
                     excess = num_active - corridor_capacity
                     congestion_penalty += (excess ** 2) + excess
-        reward -= 20.0 * congestion_penalty
+        reward -= 2.0 * congestion_penalty
 
         # 6. Collision penalty (robots too close)
         collision_distance_m = 0.5

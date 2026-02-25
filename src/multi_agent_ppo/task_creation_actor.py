@@ -27,9 +27,10 @@ Quantity safeguard at instantiation time:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
-from typing import List, Optional, Tuple
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
 
 
 # Candidate feature dimension: matches Task.get_features() output (15 dims)
@@ -52,6 +53,21 @@ class CandidateSpec:
     rate: float                # Consumption rate (items / hour)
     time_to_stockout: float    # Hours until stockout at current rate
     features: np.ndarray       # [CANDIDATE_FEAT_DIM] matches Task.get_features()
+
+
+@dataclass
+class CreationRecord:
+    """
+    Snapshot stored at task-creation time, used later to compute training loss.
+
+    state_summary and candidate_features are stored as numpy arrays.
+    Fresh forward passes are run at loss-computation time to get gradients.
+    """
+    task_id: int
+    state_summary: np.ndarray       # [STATE_SUMMARY_DIM]
+    candidate_features: np.ndarray  # [num_candidates, CANDIDATE_FEAT_DIM] subsampled pool
+    shortlist_indices: List[int]    # [k] indices into candidate_features used at creation
+    chosen_in_shortlist: int        # index within shortlist that scorer selected
 
 
 class BayesianCandidateFactorizer(nn.Module):
@@ -424,6 +440,15 @@ class TaskCreationActor(nn.Module):
             hidden_dim=hidden_dim,
         )
 
+        # Training buffers: keyed by task_id
+        # _pending_records holds creations waiting for completion outcome.
+        # _completed_records accumulates (record, reward) pairs ready for the next loss step.
+        self._pending_records: Dict[int, CreationRecord] = {}
+        self._completed_records: List[Tuple[CreationRecord, float]] = []
+        # Exponential moving average baseline for REINFORCE variance reduction
+        self._reward_baseline: float = 0.0
+        self._baseline_alpha: float = 0.05
+
     def create_task(
         self,
         graph_state,
@@ -512,4 +537,107 @@ class TaskCreationActor(nn.Module):
             sku_max_level=max_stock,
             reorder_point=reorder,
         )
+
+        # Store creation context so the completion reward can be routed back for training
+        self._pending_records[next_task_id] = CreationRecord(
+            task_id=next_task_id,
+            state_summary=state_np.copy(),
+            candidate_features=feat_np.copy(),
+            shortlist_indices=shortlist_idx.tolist(),
+            chosen_in_shortlist=chosen,
+        )
+
         return task, next_task_id + 1
+
+    # ------------------------------------------------------------------
+    # Training interface
+    # ------------------------------------------------------------------
+
+    def record_completion(self, task_id: int, reward: float) -> None:
+        """
+        Route a completion reward back to the creation record for task_id.
+
+        Called from the training loop when a task completes. If task_id is not in
+        the pending buffer (e.g. created by the random fallback, or from a previous
+        run), the call is silently ignored.
+        """
+        record = self._pending_records.pop(task_id, None)
+        if record is not None:
+            self._completed_records.append((record, reward))
+
+    def compute_creation_loss(
+        self,
+        scorer_loss_coef: float = 1.0,
+        factorizer_loss_coef: float = 0.1,
+        kl_coef: float = 0.01,
+    ) -> torch.Tensor:
+        """
+        Compute REINFORCE training loss from completed creation records.
+
+        For each completed record:
+          - Re-runs factorizer forward (with gradients via reparameterisation) to get
+            fresh logits and KL term.
+          - Factorizer loss: -log_softmax(logits)[stored_shortlist_indices].mean() * (R - b)
+          - Scorer loss:     -log_softmax(scores)[stored_chosen_idx]           * (R - b)
+          - KL term:          KL(q(w|s) || N(0, I)) as regularisation
+          where R is the completion reward and b is an EMA baseline.
+
+        Clears the completed buffer after computing. Pending records are preserved.
+
+        Returns:
+            Scalar loss tensor (0.0 if no completed records).
+        """
+        if not self._completed_records:
+            return torch.tensor(0.0, device=self.device)
+
+        rewards = [r for _, r in self._completed_records]
+        mean_r = float(np.mean(rewards))
+        self._reward_baseline = (
+            (1.0 - self._baseline_alpha) * self._reward_baseline
+            + self._baseline_alpha * mean_r
+        )
+
+        scorer_losses: List[torch.Tensor] = []
+        factorizer_losses: List[torch.Tensor] = []
+        kl_losses: List[torch.Tensor] = []
+
+        for record, reward in self._completed_records:
+            R = reward - self._reward_baseline  # baseline-subtracted return
+
+            state_t = torch.from_numpy(record.state_summary).float().to(self.device)
+            feat_t = torch.from_numpy(record.candidate_features).float().to(self.device)
+
+            # Re-run factorizer with gradients (reparameterisation through w)
+            _shortlist_t, logits, kl_loss = self.factorizer(state_t, feat_t, training=True)
+
+            # Factorizer REINFORCE: encourage high logits for the stored shortlist
+            stored_idx = torch.tensor(
+                record.shortlist_indices, dtype=torch.long, device=self.device
+            )
+            log_probs_all = F.log_softmax(logits, dim=0)        # [num_candidates]
+            factorizer_log_prob = log_probs_all[stored_idx].mean()
+            factorizer_losses.append(-factorizer_log_prob * R)
+            kl_losses.append(kl_loss)
+
+            # Re-run scorer on the stored shortlist features
+            shortlist_feat = feat_t[stored_idx]                 # [k, feat_dim]
+            scores, _ = self.scorer(state_t, shortlist_feat)
+            log_probs_scorer = F.log_softmax(scores, dim=0)     # [k]
+            chosen = min(record.chosen_in_shortlist, scores.shape[0] - 1)
+            scorer_losses.append(-log_probs_scorer[chosen] * R)
+
+        total = torch.tensor(0.0, device=self.device)
+        if scorer_losses:
+            total = total + scorer_loss_coef * torch.stack(scorer_losses).mean()
+        if factorizer_losses:
+            total = total + factorizer_loss_coef * torch.stack(factorizer_losses).mean()
+        if kl_losses:
+            total = total + kl_coef * torch.stack(kl_losses).mean()
+
+        self._completed_records.clear()
+        return total
+
+    def clear_creation_buffer(self) -> None:
+        """Clear both pending and completed buffers (e.g. at episode reset)."""
+        self._pending_records.clear()
+        self._completed_records.clear()

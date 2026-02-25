@@ -287,6 +287,7 @@ def main():
         min_adv_std=min_adv_std,
         ranking_max_pairs_per_group=ranking_max_pairs_per_group,
         ranking_min_adv_gap=ranking_min_adv_gap,
+        task_creation_actor=getattr(env, 'task_creation_actor', None),
         device=device,
         logger=logger
     )
@@ -436,22 +437,20 @@ def main():
 
                 # Assign task to robot
                 success = env.assign_task_to_robot(action, task)
-                if success:
-                    num_assignments += 1
-                    assignments_this_step += 1
-                    reward = 0.0
-                    # Record which memory slot this task was assigned from, so
-                    # its completion bonus can be routed back here later.
-                    task_to_memory_idx[task.task_id] = mem_idx_before
-                    state_dict = env._get_state_dict()
-                else:
-                    reward = -1.0
-                    if iteration <= warmup_iters:
-                        reward *= warmup_penalty_scale
-                        reward += warmup_reward_offset
+                if not success:
+                    # Shouldn't occur for valid robot actions, but guard against it:
+                    # break rather than retrying the same task (would cause infinite loop).
+                    memory.rewards.append(0.0)
+                    memory.is_terminals.append(False)
+                    break
 
-                iteration_reward += reward
-                memory.rewards.append(reward)
+                num_assignments += 1
+                assignments_this_step += 1
+                # Record which memory slot this task was assigned from, so
+                # its completion bonus can be routed back here later.
+                task_to_memory_idx[task.task_id] = mem_idx_before
+                state_dict = env._get_state_dict()
+                memory.rewards.append(0.0)
                 memory.is_terminals.append(False)
 
             # Record step assignment group for ranking loss
@@ -507,6 +506,9 @@ def main():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_bonus = float(np.clip(scaled_bonus, 0.0, reward_clip))
+                # Route completion signal to task creation actor buffer (#7/#8 training)
+                if env.task_creation_actor is not None:
+                    env.task_creation_actor.record_completion(parent_id, scaled_bonus)
                 iteration_reward += scaled_bonus
                 orig_idx = task_to_memory_idx.get(parent_id)
                 if orig_idx is not None and orig_idx < len(memory.rewards):

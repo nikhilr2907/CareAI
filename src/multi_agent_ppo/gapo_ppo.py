@@ -15,6 +15,7 @@ import numpy as np
 import logging
 
 from .gapo_policy import GAPOPolicyNetwork
+from .task_creation_actor import TaskCreationActor
 
 
 class Memory:
@@ -80,6 +81,11 @@ class GAPOPPO:
         normalize_returns=True,
         ranking_max_pairs_per_group: int = 64,
         ranking_min_adv_gap: float = 1e-4,
+        task_creation_actor: Optional[TaskCreationActor] = None,
+        lr_creation: float = 3e-4,
+        lambda_creation_scorer: float = 1.0,
+        lambda_creation_factorizer: float = 0.1,
+        lambda_creation_kl: float = 0.01,
         device='cpu',
         logger: Optional[logging.Logger] = None
     ):
@@ -143,6 +149,9 @@ class GAPOPPO:
         ).to(self.device)
 
         self.policy_old.load_state_dict(self.policy.state_dict())
+        # policy_old is used exclusively for rollout inference — keep it in eval mode
+        # so any remaining dropout (e.g. critic head) is disabled during rollout.
+        self.policy_old.eval()
 
         self.MseLoss = nn.MSELoss()
 
@@ -162,6 +171,18 @@ class GAPOPPO:
                 {"params": critic_params, "lr": critic_lr},
             ]
         )
+
+        # Task creation actor (#7/#8) — separate optimizer, separate loss signal
+        self.task_creation_actor = task_creation_actor
+        self.lambda_creation_scorer = lambda_creation_scorer
+        self.lambda_creation_factorizer = lambda_creation_factorizer
+        self.lambda_creation_kl = lambda_creation_kl
+        if task_creation_actor is not None:
+            self.creation_optimizer = optim.Adam(
+                task_creation_actor.parameters(), lr=lr_creation
+            )
+        else:
+            self.creation_optimizer = None
 
     def select_action(
         self,
@@ -372,6 +393,33 @@ class GAPOPPO:
         perm = torch.randperm(len(all_pairs), device=self.device)[:max_pairs].tolist()
         return [all_pairs[k] for k in perm]
 
+    def update_task_creation_actor(self) -> torch.Tensor:
+        """
+        Train the task creation actor (#7 factorizer + #8 scorer) using completion
+        credits accumulated in its buffer since the last call.
+
+        Uses a separate optimizer from the main PPO policy.
+        Returns the scalar creation loss (0.0 if no completed records or actor is None).
+        """
+        if self.task_creation_actor is None or self.creation_optimizer is None:
+            return torch.tensor(0.0, device=self.device)
+
+        loss = self.task_creation_actor.compute_creation_loss(
+            scorer_loss_coef=self.lambda_creation_scorer,
+            factorizer_loss_coef=self.lambda_creation_factorizer,
+            kl_coef=self.lambda_creation_kl,
+        )
+
+        if loss.requires_grad:
+            self.creation_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(self.task_creation_actor.parameters()), 0.5
+            )
+            self.creation_optimizer.step()
+
+        return loss
+
     def update(self, memory: Memory, next_state_dict: Dict[str, np.ndarray] = None):
         """
         Update policy using PPO with GAE advantages.
@@ -380,6 +428,9 @@ class GAPOPPO:
             memory: Memory buffer with experiences
             next_state_dict: Next state for bootstrapping (continuous tasks)
         """
+        # Ensure policy is in train mode for gradient updates; policy_old stays in eval.
+        self.policy.train()
+
         # Convert to tensors
         old_actions = torch.tensor(memory.actions, dtype=torch.long).to(self.device)
         old_logprobs = torch.tensor(memory.logprobs, dtype=torch.float32).to(self.device)
@@ -543,8 +594,15 @@ class GAPOPPO:
 
         self.logger.info(f"  PPO update completed.")
 
-        # Copy new weights to old policy
+        # Update task creation actor (#7/#8) from completion credits
+        creation_loss = self.update_task_creation_actor()
+        if creation_loss.item() != 0.0:
+            self.logger.info(f"  Creation actor loss: {creation_loss.item():.4f}")
+        self.last_loss_info['creation_loss'] = creation_loss.item()
+
+        # Copy new weights to old policy and restore eval mode for next rollout
         self.policy_old.load_state_dict(self.policy.state_dict())
+        self.policy_old.eval()
 
         # Reset episode tracking
         self.policy.reset_episode_tracking()
@@ -618,10 +676,7 @@ class GAPOPPO:
         payload = {
             'policy_state_dict': self.policy.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'enable_task_creation_actor': self.task_creation_actor is not None,
         }
-        if self.task_creation_actor is not None:
-            payload['task_creation_actor_state_dict'] = self.task_creation_actor.state_dict()
         torch.save(payload, filepath)
 
     def load(self, filepath: str):
@@ -629,66 +684,8 @@ class GAPOPPO:
         checkpoint = torch.load(filepath, map_location=self.device)
         self.policy.load_state_dict(checkpoint['policy_state_dict'])
         self.policy_old.load_state_dict(checkpoint['policy_state_dict'])
-        if self.task_creation_actor is not None and 'task_creation_actor_state_dict' in checkpoint:
-            self.task_creation_actor.load_state_dict(checkpoint['task_creation_actor_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
     def get_last_loss_info(self) -> Dict:
         """Get last training loss breakdown."""
         return getattr(self, 'last_loss_info', {})
-
-
-def test_gapo_ppo():
-    """Test GAPO PPO trainer."""
-    print("Testing GAPO PPO Trainer...")
-
-    from src.environment.gapo_env import GAPOTaskAssignmentEnv
-
-    # Create environment
-    env = GAPOTaskAssignmentEnv(num_robots=5, num_nodes=10)
-
-    # Create PPO
-    ppo = GAPOPPO(
-        node_feat_dim=5,
-        edge_feat_dim=21,
-        robot_feat_dim=19,
-        task_feat_dim=15,
-        hidden_dim=64,
-        lr=0.0003,
-        use_debiasing=True
-    )
-
-    # Create memory
-    memory = Memory()
-
-    # Run one episode
-    state_dict = env.reset()
-
-    for step in range(10):
-        mask = np.ones(env.num_robots, dtype=bool)
-        action = ppo.select_action(state_dict, memory, mask)
-
-        next_state_dict, reward, done, info = env.step(action)
-
-        memory.rewards.append(reward)
-        memory.is_terminals.append(done)
-
-        state_dict = next_state_dict
-
-        if done:
-            break
-
-    # Update policy
-    print("\nUpdating policy...")
-    ppo.update(memory)
-
-    loss_info = ppo.get_last_loss_info()
-    print("\nLoss breakdown:")
-    for key, value in loss_info.items():
-        print(f"  {key}: {value:.4f}")
-
-    print("\n✓ GAPO PPO working!")
-
-
-if __name__ == '__main__':
-    test_gapo_ppo()

@@ -11,7 +11,6 @@ from pathlib import Path
 import os
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
-from src.deployment.robot_bridge import MockRobotBridge
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO
 from src.utils.training_utils import create_env_from_config_file
 from src.utils.deployment_utils import (
@@ -77,7 +76,6 @@ def main():
         )
         env.reset()
 
-    robot_bridge = MockRobotBridge(env.robot_simulators)
     ppo = None
     if args.use_trained:
         if getattr(env.graph_state, "category_order", None):

@@ -117,24 +117,31 @@ def rank_pending_tasks(env, ppo):
 
 
 def rescore_robot_queues(env, ppo):
-    if ppo is None:
-        return
-    state_dict = env._get_state_dict()
-    state_tensor = ppo._state_dict_to_tensor(state_dict)
-    with torch.no_grad():
-        graph_emb, fleet_emb = ppo.policy.encode_context(state_tensor)
+    graph_emb = None
+    fleet_emb = None
+    if ppo is not None:
+        state_dict = env._get_state_dict()
+        state_tensor = ppo._state_dict_to_tensor(state_dict)
+        with torch.no_grad():
+            graph_emb, fleet_emb = ppo.policy.encode_context(state_tensor)
+
     for robot in env.robots:
         all_tasks = robot.task_queue[1:] + robot.overflow_queue
-        if not all_tasks:
-            continue
-        task_features = np.stack([t.get_features(env.current_time) for t in all_tasks])
-        task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
-        with torch.no_grad():
-            scores = ppo.policy.score_tasks(task_features_tensor, graph_emb, fleet_emb).cpu().numpy()
-        for task, score in zip(all_tasks, scores):
-            task.learned_score = float(score)
-        robot.resort_queue()
-        robot.resort_overflow()
+        if ppo is not None and all_tasks:
+            task_features = np.stack([t.get_features(env.current_time) for t in all_tasks])
+            task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
+            with torch.no_grad():
+                scores = ppo.policy.score_tasks(task_features_tensor, graph_emb, fleet_emb).cpu().numpy()
+            for task, score in zip(all_tasks, scores):
+                task.learned_score = float(score)
+            robot.resort_queue()
+            robot.resort_overflow()
+        elif ppo is None:
+            # Keep queue ordering deterministic in heuristic simulation mode.
+            robot.resort_queue()
+            robot.resort_overflow()
+
+        # Capacity/overflow behavior must hold regardless of PPO usage.
         robot.enforce_capacity_limits()
         robot.promote_from_overflow()
 
@@ -172,6 +179,15 @@ def assign_tasks(env, ppo, max_assignments):
             action = ppo.select_action_greedy(state_dict, robot_mask)
         else:
             action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
-        env.assign_task_to_robot(action, task)
+        success = env.assign_task_to_robot(action, task)
+        if not success:
+            break
         assignments += 1
+
+        # Apply capacity overflow rules immediately after insertion so a full robot
+        # does not accumulate pickup legs in the main queue.
+        if 0 <= action < len(env.robots):
+            robot = env.robots[action]
+            robot.enforce_capacity_limits()
+            robot.promote_from_overflow()
     return assignments

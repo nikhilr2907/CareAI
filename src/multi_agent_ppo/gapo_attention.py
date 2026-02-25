@@ -17,7 +17,7 @@ class TaskRobotAttention(nn.Module):
     Learns which robots are most suitable for a given task.
     """
 
-    def __init__(self, embed_dim=64, num_heads=4, dropout=0.1):
+    def __init__(self, embed_dim=64, num_heads=4, dropout=0.0):
         super().__init__()
 
         self.multihead_attn = nn.MultiheadAttention(
@@ -98,7 +98,7 @@ class TaskNodeAttention(nn.Module):
     Learns which locations are relevant for a given task.
     """
 
-    def __init__(self, embed_dim=64, num_heads=4, dropout=0.1):
+    def __init__(self, embed_dim=64, num_heads=4, dropout=0.0):
         super().__init__()
 
         self.multihead_attn = nn.MultiheadAttention(
@@ -174,7 +174,6 @@ class RobotScorer(nn.Module):
         self.scorer = nn.Sequential(
             nn.Linear(embed_dim * 4, hidden_dim),  # Robot + Task + RobotContext + NodeContext
             nn.ReLU(),
-            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Linear(hidden_dim // 2, 1)
