@@ -360,7 +360,7 @@ class GAPOPolicyNetwork(nn.Module):
         state_dicts: List[Dict[str, torch.Tensor]],
         actions: torch.Tensor,
         robot_masks: Optional[List[torch.Tensor]] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Evaluate actions for PPO update.
 
@@ -373,17 +373,18 @@ class GAPOPolicyNetwork(nn.Module):
             log_probs: [batch_size] - log probabilities of actions
             state_values: [batch_size] - estimated state values
             entropy: [batch_size] - policy entropy
+            raw_logits: [batch_size, num_robots] - pre-mask logits (for de-biasing)
+            graph_emb: [batch_size, hidden_dim] - per-state hospital graph embeddings
+            fleet_emb: [batch_size, hidden_dim] - per-state fleet embeddings
         """
         batch_size = len(state_dicts)
+        device = actions.device
         if batch_size == 0:
-            return (
-                torch.tensor([], device=actions.device),
-                torch.tensor([], device=actions.device),
-                torch.tensor([], device=actions.device),
-                torch.tensor([], device=actions.device),
-            )
+            empty = torch.tensor([], device=device)
+            empty2d = torch.zeros(0, self.hidden_dim, device=device)
+            return empty, empty, empty, empty, empty2d, empty2d
 
-        raw_action_logits, state_values, _ = self._forward_batched(state_dicts, robot_masks)
+        raw_action_logits, state_values, _, graph_emb_batch, fleet_emb_batch = self._forward_batched(state_dicts, robot_masks)
 
         # Apply mask
         mask_list = []
@@ -409,8 +410,9 @@ class GAPOPolicyNetwork(nn.Module):
         # Compute entropy
         entropies = -(action_probs * torch.log(action_probs + 1e-8)).sum(dim=-1)
 
-        # Return raw (pre-mask) logits for de-biasing so gradient flows cleanly
-        return log_probs, state_values.squeeze(-1), entropies, raw_action_logits
+        # Return raw (pre-mask) logits for de-biasing so gradient flows cleanly,
+        # plus per-state context embeddings for reuse in compute_ranking_loss.
+        return log_probs, state_values.squeeze(-1), entropies, raw_action_logits, graph_emb_batch, fleet_emb_batch
 
     def _forward_batched(
         self,
@@ -556,7 +558,7 @@ class GAPOPolicyNetwork(nn.Module):
 
         state_value = self.critic(global_state)
 
-        return action_logits, state_value, attention_info
+        return action_logits, state_value, attention_info, graph_embedding, fleet_embedding
 
     def compute_debias_loss(
         self,

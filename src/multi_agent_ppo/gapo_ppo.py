@@ -316,7 +316,8 @@ class GAPOPPO:
         self,
         memory: 'Memory',
         state_dict_tensors: List[Dict[str, torch.Tensor]],
-        advantages: torch.Tensor
+        advantages: torch.Tensor,
+        context_cache: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None
     ) -> torch.Tensor:
         """
         Compute ranking loss: tasks that led to higher advantages should have higher scores.
@@ -327,6 +328,8 @@ class GAPOPPO:
             memory: Memory buffer with step_assignment_groups
             state_dict_tensors: Tensorized state dicts
             advantages: GAE advantages for each decision
+            context_cache: Optional dict mapping memory index → (graph_emb, fleet_emb)
+                           pre-computed by evaluate_actions to avoid redundant GNN passes.
 
         Returns:
             ranking_loss: Scalar loss
@@ -343,11 +346,15 @@ class GAPOPPO:
                 continue
 
             # Compute each score ONCE per assignment in this group.
+            # Use cached (graph_emb, fleet_emb) when available to skip encode_context.
             group_scores = []
             group_advs = []
             for idx in valid:
                 sd = state_dict_tensors[idx]
-                graph_emb, fleet_emb = self.policy.encode_context(sd)
+                if context_cache is not None and idx in context_cache:
+                    graph_emb, fleet_emb = context_cache[idx]
+                else:
+                    graph_emb, fleet_emb = self.policy.encode_context(sd)
                 score = self.policy.score_tasks(
                     sd["task_features"].unsqueeze(0),
                     graph_emb,
@@ -469,7 +476,7 @@ class GAPOPPO:
 
         # Compute state values for all states
         with torch.no_grad():
-            _, values, _, _ = self.policy.evaluate_actions(
+            _, values, _, _, _, _ = self.policy.evaluate_actions(
                 state_dict_tensors,
                 old_actions,
                 robot_mask_tensors
@@ -479,7 +486,7 @@ class GAPOPPO:
             # Get value of next state for bootstrapping
             if next_state_dict is not None:
                 next_state_tensor = self._state_dict_to_tensor(next_state_dict)
-                _, next_value, _, _ = self.policy.evaluate_actions(
+                _, next_value, _, _, _, _ = self.policy.evaluate_actions(
                     [next_state_tensor],
                     torch.zeros(1, dtype=torch.long).to(self.device),
                     [robot_mask_tensors[-1] if robot_mask_tensors else None]
@@ -510,14 +517,23 @@ class GAPOPPO:
 
         # Optimize policy for K epochs
         for epoch in range(self.K_epochs):
-            # Evaluate actions — raw_logits are live (gradient-connected) for de-biasing
-            logprobs, state_values, dist_entropy, raw_logits = self.policy.evaluate_actions(
+            # Evaluate actions — raw_logits are live (gradient-connected) for de-biasing.
+            # graph_emb_batch / fleet_emb_batch are reused by compute_ranking_loss to avoid
+            # redundant GNN forward passes (one encode_context call per group member saved).
+            logprobs, state_values, dist_entropy, raw_logits, graph_emb_batch, fleet_emb_batch = self.policy.evaluate_actions(
                 state_dict_tensors,
                 old_actions,
                 robot_mask_tensors
             )
 
             state_values = state_values.squeeze()
+
+            # Build per-memory-index context cache for ranking loss.
+            # graph_emb_batch[i] / fleet_emb_batch[i] correspond to state_dict_tensors[i].
+            context_cache = {
+                i: (graph_emb_batch[i], fleet_emb_batch[i])
+                for i in range(graph_emb_batch.shape[0])
+            }
 
             # PPO ratio
             ratios = torch.exp(logprobs - old_logprobs.detach())
@@ -546,9 +562,9 @@ class GAPOPPO:
                 debias_loss = torch.tensor(0.0)
                 debias_breakdown = {}
 
-            # Ranking loss for task scorer (#6)
+            # Ranking loss for task scorer (#6) — uses cached embeddings
             ranking_loss = self.compute_ranking_loss(
-                memory, state_dict_tensors, advantages
+                memory, state_dict_tensors, advantages, context_cache=context_cache
             )
             lambda_ranking = 0.05
 

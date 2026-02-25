@@ -197,6 +197,8 @@ def _load_v3_config(raw_data: Dict) -> Tuple[List[HospitalNode], List[Tuple[int,
             served_beds=served_beds,
             consumption_enabled=consumption_enabled
         )
+        # Preserve human-readable names from config for visualization/debug UI.
+        node.display_name = node_data.get("name", node.node_id)
 
         # Build sku inventory from shelves
         sku_inventory = {}
@@ -316,6 +318,7 @@ def _load_mock_config(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[
             shelf_ids=shelf_ids,
             floor=mock_node.floor
         )
+        node.display_name = mock_node.name
         nodes.append(node)
 
     # Edge pairs
@@ -367,6 +370,7 @@ def _load_extended_config(config_path: str) -> Tuple[List[HospitalNode], List[Tu
             category_inventory=category_inventory,
             floor=0  # Extended format doesn't have floor info
         )
+        node.display_name = ext_node.name
         nodes.append(node)
 
     edge_pairs = parser.edges
@@ -417,6 +421,7 @@ def _load_simple_config(config_path: str) -> Tuple[List[HospitalNode], List[Tupl
             consumption_rate=consumption_rate,
             buffer_time=2.0
         )
+        node.display_name = node_data.get('name', node.node_id)
         nodes.append(node)
 
     edge_pairs = data.get('edges', [])

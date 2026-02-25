@@ -14,6 +14,7 @@ from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO
 from src.utils.training_utils import create_env_from_config_file
 from src.utils.deployment_utils import (
+    apply_floorplan_layout,
     compute_bounds,
     draw_graph,
     draw_nodes,
@@ -66,6 +67,7 @@ def main():
             timestep_seconds=args.cycle_time
         )
         env.reset()
+        apply_floorplan_layout(env.graph_state)
     else:
         print(f"Config not found at '{config_path}', falling back to procedural {args.num_nodes}-node layout")
         env = GAPOTaskAssignmentEnv(
@@ -75,6 +77,7 @@ def main():
             timestep_seconds=args.cycle_time,
         )
         env.reset()
+        apply_floorplan_layout(env.graph_state)
 
     ppo = None
     if args.use_trained:
@@ -236,11 +239,13 @@ def main():
                     )
 
             if not args.headless:
-                screen.fill((18, 18, 22))
-                draw_graph(screen, env.graph_state, bounds, args.width, args.height)
-                draw_nodes(screen, env.graph_state, bounds, args.width, args.height, font)
-                draw_tasks(screen, env, bounds, args.width, args.height)
-                draw_robots(screen, env, bounds, args.width, args.height, font)
+                screen.fill((243, 246, 249))
+                hud_panel_width = 430
+                viz_width = max(640, args.width - hud_panel_width)
+                draw_graph(screen, env.graph_state, bounds, viz_width, args.height)
+                draw_nodes(screen, env.graph_state, bounds, viz_width, args.height, font)
+                draw_tasks(screen, env, bounds, viz_width, args.height)
+                draw_robots(screen, env, bounds, viz_width, args.height, font)
                 pending = len(env.pending_tasks)
                 assigned = 0
                 pickup_items = 0
@@ -310,9 +315,15 @@ def main():
                     if len(hud_lines) >= 12:
                         break
 
+                panel_x = viz_width
+                panel_rect = pygame.Rect(panel_x, 0, args.width - panel_x, args.height)
+                pygame.draw.rect(screen, (233, 238, 244), panel_rect)
+                pygame.draw.line(screen, (172, 182, 194), (panel_x, 0), (panel_x, args.height), 2)
+
                 y = 10
-                for line in hud_lines:
-                    screen.blit(font.render(line, True, (240, 240, 240)), (10, y))
+                max_lines = max(1, (args.height - 20) // 16)
+                for line in hud_lines[:max_lines]:
+                    screen.blit(font.render(line, True, (36, 48, 60)), (panel_x + 10, y))
                     y += 16
 
                 pygame.display.flip()
