@@ -12,7 +12,6 @@ import os
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.deployment.robot_bridge import MockRobotBridge
-from src.environment.tasks.task_generator import generate_inventory_tasks, update_inventory_levels
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO
 from src.utils.training_utils import create_env_from_config_file
 from src.utils.deployment_utils import (
@@ -91,10 +90,6 @@ def main():
         sku_embed_dim = 16
         node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
 
-        # Peek at checkpoint metadata to reconstruct the exact architecture used at training time
-        checkpoint_meta = torch.load(args.checkpoint, map_location="cpu")
-        enable_task_creation_actor = checkpoint_meta.get("enable_task_creation_actor", False)
-
         ppo = GAPOPPO(
             node_continuous_dim=node_continuous_dim,
             num_node_types=4,
@@ -111,7 +106,9 @@ def main():
             queue_feat_dim=16,
             sku_feat_dim=sku_feat_dim,
             sku_embed_dim=sku_embed_dim,
-            enable_task_creation_actor=enable_task_creation_actor,
+            # Deployment path intentionally disables task-creation actor wiring for now.
+            # This keeps inference aligned with the legacy allocation-only policy path.
+            enable_task_creation_actor=False,
             device=args.device
         )
         ppo.load(args.checkpoint)
@@ -129,7 +126,7 @@ def main():
         bounds = None
         clock = None
 
-    current_time = 0.0
+    current_time = env.current_time
     cycle_count = 0
     total_tasks_assigned = 0
     total_tasks_completed = 0
@@ -148,23 +145,24 @@ def main():
                         return
 
             sim_dt = args.cycle_time * max(args.time_scale, 0.0)
-            env.current_time = current_time
-            if current_time - env.last_inventory_check >= env.inventory_check_interval:
-                new_tasks, env.next_task_id = generate_inventory_tasks(
-                    env.graph_state, current_time, env.next_task_id
-                )
-                if new_tasks:
-                    env.pending_tasks.extend(new_tasks)
-                    total_tasks_created += len(new_tasks)
-                    rank_pending_tasks(env, ppo)
-                env.last_inventory_check = current_time
+            pending_before = len(env.pending_tasks)
+            if env.pending_tasks:
+                rank_pending_tasks(env, ppo)
             rescore_robot_queues(env, ppo)
-            total_tasks_assigned += assign_tasks(env, ppo, args.max_assignments_per_step)
+            assigned_this_cycle = assign_tasks(env, ppo, args.max_assignments_per_step)
+            total_tasks_assigned += assigned_this_cycle
 
-            env._update_edge_congestion()
-            env._update_robot_positions(sim_dt)
+            prev_completed = len(env.completed_tasks)
+            _, _, done, _ = env.step(dt=sim_dt)
+            current_time = env.current_time
 
-            completed_tasks = env._check_task_completions()
+            # Approximate tasks created this cycle from queue accounting:
+            # pending_after = pending_before - assigned + created
+            pending_after = len(env.pending_tasks)
+            created_this_cycle = max(0, pending_after - pending_before + assigned_this_cycle)
+            total_tasks_created += created_this_cycle
+
+            completed_tasks = env.completed_tasks[prev_completed:]
             if completed_tasks:
                 total_tasks_completed += len(completed_tasks)
                 for task in completed_tasks:
@@ -175,9 +173,6 @@ def main():
                         else:
                             total_late += 1
                             total_lateness += lateness
-
-            env.graph_state.current_time = current_time
-            update_inventory_levels(env.graph_state, sim_dt / 3600.0)
 
             if cycle_count % args.log_interval == 0:
                 pending = len(env.pending_tasks)
@@ -325,8 +320,10 @@ def main():
                 pygame.display.flip()
                 clock.tick(args.fps)
 
-            current_time += sim_dt
             cycle_count += 1
+
+            if done:
+                break
 
             elapsed = time.time() - cycle_start_time
             sleep_time = max(0, args.cycle_time - elapsed)

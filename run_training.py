@@ -111,7 +111,10 @@ def main():
     lr = args.lr
     actor_lr = args.actor_lr if args.actor_lr is not None else lr * 1.2
     critic_lr = args.critic_lr if args.critic_lr is not None else lr * 0.5
-    gamma = 0.99
+    gamma = 1.0  # No intrinsic time preference; deadline/age penalties encode urgency.
+    # Also eliminates the per-assignment vs per-sim-second discount mismatch (gamma^10
+    # per 10-assignment step was 0.90 instead of 0.99). lambda_gae=0.95 still limits
+    # the effective advantage horizon to ~50 steps regardless.
     K_epochs = 4
     eps_clip = 0.2
     lambda_debias = 0.1
@@ -135,15 +138,6 @@ def main():
     warmup_penalty_scale = args.warmup_penalty_scale
     warmup_consumption_scale = args.warmup_consumption_scale
     warmup_entropy_mult = args.warmup_entropy_mult
-    enable_task_creation_actor = args.enable_task_creation_actor
-    task_creation_shortlist_size = args.task_creation_shortlist_size
-    task_creation_temperature = args.task_creation_temperature
-    task_creation_urgent_priority = args.task_creation_urgent_priority
-    task_creation_near_deadline = args.task_creation_near_deadline
-    task_creation_stockout_hours = args.task_creation_stockout_hours
-    task_creation_prior_sigma = args.task_creation_prior_sigma
-    task_creation_loss_coef = args.task_creation_loss_coef
-    task_creation_kl_coef = args.task_creation_kl_coef
     ranking_max_pairs_per_group = args.ranking_max_pairs_per_group
     ranking_min_adv_gap = args.ranking_min_adv_gap
 
@@ -180,14 +174,6 @@ def main():
         f"Stochastic Tasks: rate_per_hour={stochastic_tasks_per_hour} "
         f"cap_per_hour={stochastic_task_cap_per_hour} "
         f"initial={initial_stochastic_tasks}"
-    )
-    logger.info(
-        "Task Creation Actor: "
-        f"enabled={enable_task_creation_actor} shortlist={task_creation_shortlist_size} "
-        f"temp={task_creation_temperature} urgent_prio>={task_creation_urgent_priority} "
-        f"near_deadline_s={task_creation_near_deadline} stockout_h={task_creation_stockout_hours} "
-        f"prior_sigma={task_creation_prior_sigma} loss_coef={task_creation_loss_coef} "
-        f"kl_coef={task_creation_kl_coef}"
     )
     logger.info(
         f"Ranking Aux: max_pairs_per_group={ranking_max_pairs_per_group} "
@@ -299,15 +285,6 @@ def main():
         critic_coef=critic_coef,
         entropy_coef=entropy_coef,
         min_adv_std=min_adv_std,
-        enable_task_creation_actor=enable_task_creation_actor,
-        task_creation_shortlist_size=task_creation_shortlist_size,
-        task_creation_temperature=task_creation_temperature,
-        task_creation_urgent_priority_threshold=task_creation_urgent_priority,
-        task_creation_near_deadline_seconds=task_creation_near_deadline,
-        task_creation_stockout_hours=task_creation_stockout_hours,
-        task_creation_prior_sigma=task_creation_prior_sigma,
-        task_creation_loss_coef=task_creation_loss_coef,
-        task_creation_kl_coef=task_creation_kl_coef,
         ranking_max_pairs_per_group=ranking_max_pairs_per_group,
         ranking_min_adv_gap=ranking_min_adv_gap,
         device=device,
@@ -315,21 +292,16 @@ def main():
     )
     policy_params = sum(p.numel() for p in ppo.policy.parameters())
     policy_old_params = sum(p.numel() for p in ppo.policy_old.parameters())
-    task_creation_params = 0
-    if getattr(ppo, "task_creation_actor", None) is not None:
-        task_creation_params = sum(p.numel() for p in ppo.task_creation_actor.parameters())
     edge_cost_params = 0
     if hasattr(env, "edge_cost_manager") and getattr(env.edge_cost_manager, "model", None) is not None:
         edge_cost_params = sum(p.numel() for p in env.edge_cost_manager.model.parameters())
-    total_params = policy_params + policy_old_params + task_creation_params + edge_cost_params
+    total_params = policy_params + policy_old_params + edge_cost_params
     trainable_params = sum(p.numel() for p in ppo.policy.parameters() if p.requires_grad)
-    if getattr(ppo, "task_creation_actor", None) is not None:
-        trainable_params += sum(p.numel() for p in ppo.task_creation_actor.parameters() if p.requires_grad)
     logger.info(
         f"Model parameters: policy={policy_params:,} "
-        f"policy_old={policy_old_params:,} task_creation={task_creation_params:,} "
+        f"policy_old={policy_old_params:,} "
         f"edge_cost={edge_cost_params:,} total={total_params:,} "
-        f"trainable(policy+task_creation)={trainable_params:,}"
+        f"trainable={trainable_params:,}"
     )
 
     # Training metrics
@@ -555,9 +527,14 @@ def main():
                     if idx < len(memory.rewards):
                         memory.rewards[idx] += share
             elif systemic_reward != 0 and len(memory.rewards) > 0:
-                # No assignments this step — attribute ambient penalties to the last entry
+                # No assignments this step — spread ambient signal across the most recent
+                # window of entries (at most max_assignments_per_step entries back) rather
+                # than concentrating it all on a single arbitrary memory slot.
                 iteration_reward += systemic_reward
-                memory.rewards[-1] += systemic_reward
+                window = min(max_assignments_per_step, len(memory.rewards))
+                share = systemic_reward / window
+                for idx in range(len(memory.rewards) - window, len(memory.rewards)):
+                    memory.rewards[idx] += share
 
             if done:
                 state_dict = env.reset()

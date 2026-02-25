@@ -579,11 +579,25 @@ class GAPOPolicyNetwork(nn.Module):
         if not self.use_debiasing or len(logits_to_use) < 2:
             return torch.tensor(0.0), {}
 
+        # Cap sequence length to avoid T² OOM: _compute_task_similarity builds a [T,T]
+        # similarity matrix and TemporalConsistencyDebiasing iterates O(T²) pairs.
+        # With rollout_steps=1000 and max_assignments_per_step=10, uncapped T≈10000
+        # would require ~400MB and ~50M Python iterations per K_epoch.
+        _MAX_DEBIAS_SEQ = 256
+        task_features = self.episode_task_features
+        if len(logits_to_use) > _MAX_DEBIAS_SEQ:
+            # Take a uniform stride subsample so the full rollout is represented
+            step = len(logits_to_use) // _MAX_DEBIAS_SEQ
+            indices = list(range(0, len(logits_to_use), step))[:_MAX_DEBIAS_SEQ]
+            logits_to_use = [logits_to_use[i] for i in indices]
+            if task_features and len(task_features) > _MAX_DEBIAS_SEQ:
+                task_features = [task_features[i] for i in indices]
+
         debias_loss, breakdown = self.debiaser.compute_total_debias_loss(
-            state_sequence=self.episode_task_features,  # task features as state proxy
+            state_sequence=task_features,  # task features as state proxy
             action_sequence=self.episode_actions,
             action_logits_sequence=logits_to_use,
-            task_features_sequence=self.episode_task_features
+            task_features_sequence=task_features
         )
 
         return debias_loss, breakdown

@@ -1,135 +1,166 @@
 """
 Task-creation actor components.
 
-This module is intentionally decoupled from GAPO allocation policy code:
-- Bayesian factorizer: state-conditional stochastic shortlist proposal
-- Deterministic scorer: context-aware scoring of candidate tasks
-"""
-from __future__ import annotations
+Bayesian factorizer and scorer for proactive SKU task creation.
 
-from dataclasses import dataclass
-from typing import Dict, Optional
+Two-stage pipeline:
+  Stage 1 - BayesianCandidateFactorizer (#7):
+      Given lightweight state summary s, samples weight vector w ~ N(mu(s), sigma(s)).
+      Scores each eligible SKU candidate: logit_i = phi_i @ w  (Thompson sampling).
+      Uses Gumbel top-k for temperature-controlled stochastic shortlisting.
+
+  Stage 2 - TaskCreationScorer (#8):
+      Scores the shortlisted k candidates deterministically given state context.
+      Picks exactly 1 to instantiate as a Task and add to pending_tasks.
+
+Candidate eligibility rules (enforced before any network sees the pool):
+  - stock > reorder_point  (urgently low stock handled by deterministic replenishment)
+  - stock < max            (room to receive delivery)
+  - consumption rate > 0   (node actually consumes this SKU)
+  - not already covered by a pending task for the same (to_node, sku_id) pair
+
+Quantity safeguard at instantiation time:
+  - Re-fetch live stock immediately before creating Task
+  - num_items = min(max - live_stock, room)
+  - Skip if room <= 0
+"""
 
 import torch
 import torch.nn as nn
+import numpy as np
+from typing import List, Optional, Tuple
+from dataclasses import dataclass
+
+
+# Candidate feature dimension: matches Task.get_features() output (15 dims)
+CANDIDATE_FEAT_DIM = 15
+
+# Lightweight state summary dimension fed to both networks
+STATE_SUMMARY_DIM = 8
 
 
 @dataclass
-class TaskCreationRanking:
-    """Outputs from task-creation ranking."""
-
-    ranked_indices: torch.Tensor
-    shortlist_indices: torch.Tensor
-    scorer_scores: torch.Tensor
-    factor_logits: torch.Tensor
-    factor_kl: torch.Tensor
+class CandidateSpec:
+    """Describes one SKU-at-node candidate without creating a Task object."""
+    from_node_idx: int
+    to_node_idx: int
+    sku_id: Optional[str]      # None for node-level (no per-SKU inventory)
+    category_id: float
+    stock: float
+    reorder: float
+    max_stock: float
+    rate: float                # Consumption rate (items / hour)
+    time_to_stockout: float    # Hours until stockout at current rate
+    features: np.ndarray       # [CANDIDATE_FEAT_DIM] matches Task.get_features()
 
 
 class BayesianCandidateFactorizer(nn.Module):
     """
-    State-conditional Bayesian linear factorizer over candidate embeddings.
+    Thompson sampling over SKU candidate pool (#7).
 
-    Given state context s and candidate features x_i:
-      - Encode x_i -> phi_i
-      - Infer posterior q(w|s) = N(mu(s), diag(sigma^2(s)))
-      - Sample w ~ q(w|s)
-      - Logit_i = <w, phi_i>
+    A posterior network maps the state summary s to (mu(s), log_sigma(s)) in the
+    same space as the candidate feature vectors.  At each call:
+
+        w ~ N(mu(s), sigma(s))          (Thompson sample; mu during eval)
+        logit_i = phi_i @ w             (dot-product score per candidate)
+        shortlist = Gumbel top-k(logits / temperature + gumbel_noise)
+
+    KL(q(w|s) || N(0, prior_sigma^2 I)) is returned as a regularization term
+    to be added to the training loss when backpropagating.
     """
 
     def __init__(
         self,
-        state_context_dim: int,
-        candidate_feat_dim: int,
-        embed_dim: int = 48,
-        hidden_dim: int = 128,
+        state_dim: int = STATE_SUMMARY_DIM,
+        candidate_feat_dim: int = CANDIDATE_FEAT_DIM,
+        hidden_dim: int = 64,
+        shortlist_k: int = 5,
         prior_sigma: float = 1.0,
+        temperature: float = 1.0,
     ):
         super().__init__()
-        self.prior_sigma = float(max(prior_sigma, 1e-6))
-        self.log_prior_var = float(2.0 * torch.log(torch.tensor(self.prior_sigma)).item())
+        self.candidate_feat_dim = candidate_feat_dim
+        self.shortlist_k = shortlist_k
+        self.prior_sigma = prior_sigma
+        self.temperature = temperature
 
-        self.candidate_encoder = nn.Sequential(
-            nn.LayerNorm(candidate_feat_dim),
-            nn.Linear(candidate_feat_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, embed_dim),
-        )
+        # State -> posterior (mu, log_sigma) in candidate_feat_dim space
         self.posterior_net = nn.Sequential(
-            nn.LayerNorm(state_context_dim),
-            nn.Linear(state_context_dim, hidden_dim),
+            nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, embed_dim * 2),
         )
-
-    def _sample_weight(
-        self,
-        mean: torch.Tensor,
-        log_var: torch.Tensor,
-        deterministic: bool,
-    ) -> torch.Tensor:
-        if deterministic:
-            return mean
-        noise = torch.randn_like(mean)
-        return mean + torch.exp(0.5 * log_var) * noise
-
-    def _kl_to_prior(self, mean: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
-        # KL[q || p] for diagonal Gaussian q against zero-mean isotropic Gaussian prior.
-        prior_var = self.prior_sigma ** 2
-        kl_per_dim = 0.5 * (
-            (torch.exp(log_var) + mean.pow(2)) / prior_var - 1.0 - log_var + self.log_prior_var
-        )
-        return kl_per_dim.sum()
+        self.mu_head = nn.Linear(hidden_dim, candidate_feat_dim)
+        self.log_sigma_head = nn.Linear(hidden_dim, candidate_feat_dim)
 
     def forward(
         self,
-        state_context: torch.Tensor,
-        candidate_features: torch.Tensor,
-        candidate_mask: Optional[torch.Tensor] = None,
-        deterministic: bool = False,
-    ) -> Dict[str, torch.Tensor]:
+        state_summary: torch.Tensor,       # [state_dim]
+        candidate_features: torch.Tensor,  # [num_candidates, candidate_feat_dim]
+        training: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Args:
-            state_context: [state_context_dim]
-            candidate_features: [num_candidates, candidate_feat_dim]
-            candidate_mask: [num_candidates] bool, True = feasible
-            deterministic: use posterior mean (no sampling)
+        Returns:
+            shortlist_indices: [k] long tensor - indices into candidate_features
+            logits: [num_candidates] - raw candidate scores before Gumbel noise
+            kl_loss: scalar tensor - KL divergence term for regularization
         """
-        encoded_candidates = self.candidate_encoder(candidate_features)  # [N, E]
+        h = self.posterior_net(state_summary)
+        mu = self.mu_head(h)                              # [candidate_feat_dim]
+        log_sigma = self.log_sigma_head(h).clamp(-4, 2)  # [candidate_feat_dim]
+        sigma = torch.exp(log_sigma)
 
-        posterior_params = self.posterior_net(state_context)  # [2E]
-        mean, log_var = torch.chunk(posterior_params, 2, dim=-1)
-        log_var = torch.clamp(log_var, min=-8.0, max=4.0)
+        # Thompson sampling: sample or use posterior mean
+        if training:
+            w = mu + sigma * torch.randn_like(mu)
+        else:
+            w = mu
 
-        sampled_weight = self._sample_weight(mean, log_var, deterministic=deterministic)  # [E]
-        logits = torch.matmul(encoded_candidates, sampled_weight)  # [N]
+        # KL(N(mu, sigma^2) || N(0, prior_sigma^2)) summed over dimensions
+        prior_var = self.prior_sigma ** 2
+        kl_loss = 0.5 * torch.sum(
+            (mu ** 2 + sigma ** 2) / prior_var
+            - 1.0
+            - 2.0 * log_sigma
+            + float(np.log(prior_var))
+        )
 
-        if candidate_mask is not None:
-            logits = logits.masked_fill(~candidate_mask, float("-inf"))
+        # Score all candidates: logit_i = phi_i @ w
+        logits = candidate_features @ w  # [num_candidates]
 
-        return {
-            "logits": logits,
-            "kl": self._kl_to_prior(mean, log_var),
-            "posterior_mean": mean,
-            "posterior_log_var": log_var,
-        }
+        # Gumbel top-k for stochastic shortlisting
+        k = min(self.shortlist_k, candidate_features.shape[0])
+        if training:
+            gumbel = -torch.log(
+                -torch.log(torch.clamp(torch.rand_like(logits), min=1e-10))
+            )
+            perturbed = logits / self.temperature + gumbel
+        else:
+            perturbed = logits
+
+        _, shortlist_indices = torch.topk(perturbed, k)
+        return shortlist_indices, logits, kl_loss
 
 
 class TaskCreationScorer(nn.Module):
-    """Deterministic context-aware task scorer for shortlisted candidates."""
+    """
+    Deterministic scorer over factorizer shortlist (#8).
+
+    Concatenates state summary with each shortlisted candidate feature vector,
+    runs an MLP to produce per-candidate scores, and selects the argmax.
+    Exactly 1 candidate is picked per call and instantiated as a Task.
+    """
 
     def __init__(
         self,
-        state_context_dim: int,
-        candidate_feat_dim: int,
-        hidden_dim: int = 128,
+        state_dim: int = STATE_SUMMARY_DIM,
+        candidate_feat_dim: int = CANDIDATE_FEAT_DIM,
+        hidden_dim: int = 64,
     ):
         super().__init__()
-        input_dim = state_context_dim + candidate_feat_dim
-        self.net = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, hidden_dim),
+        self.scorer = nn.Sequential(
+            nn.Linear(state_dim + candidate_feat_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -138,206 +169,347 @@ class TaskCreationScorer(nn.Module):
 
     def forward(
         self,
-        state_context: torch.Tensor,
-        candidate_features: torch.Tensor,
-    ) -> torch.Tensor:
-        if candidate_features.dim() == 1:
-            candidate_features = candidate_features.unsqueeze(0)
-        context = state_context.unsqueeze(0).expand(candidate_features.shape[0], -1)
-        scorer_input = torch.cat([candidate_features, context], dim=-1)
-        return self.net(scorer_input).squeeze(-1)
+        state_summary: torch.Tensor,       # [state_dim]
+        shortlist_features: torch.Tensor,  # [k, candidate_feat_dim]
+    ) -> Tuple[torch.Tensor, int]:
+        """
+        Returns:
+            scores: [k] per-candidate scalar scores
+            selected_idx: int - argmax index into shortlist
+        """
+        k = shortlist_features.shape[0]
+        state_exp = state_summary.unsqueeze(0).expand(k, -1)   # [k, state_dim]
+        combined = torch.cat([state_exp, shortlist_features], dim=-1)
+        scores = self.scorer(combined).squeeze(-1)              # [k]
+        selected_idx = int(scores.argmax().item())
+        return scores, selected_idx
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _find_source_node(graph_state) -> Optional[int]:
+    """Return index of the first storage node, or None if none exist."""
+    for idx, node in enumerate(graph_state.nodes):
+        if node.node_type == 'storage':
+            return idx
+    return None
+
+
+def build_candidate_universe(
+    graph_state,
+    pending_tasks: list,
+    current_time: float,
+    source_node_idx: int,
+    max_subsample: int = 30,
+) -> List[CandidateSpec]:
+    """
+    Build the eligible SKU candidate universe from graph_state inventory.
+
+    Eligibility (all conditions must hold):
+        stock > reorder_point  — not urgently low (urgent = deterministic replenishment)
+        stock < max            — has room to receive delivery
+        rate > 0               — node actually consumes this SKU
+        not already covered    — no pending task already targets (to_node, sku_id)
+
+    Supports both per-SKU inventory (node.sku_inventory dict) and node-level
+    fallback (node.stock_level / node.max_stock).
+
+    Returns up to max_subsample candidates (uniform random subsampled if larger).
+    """
+    covered = {(t.to_location_index, t.sku_id) for t in pending_tasks}
+
+    candidates: List[CandidateSpec] = []
+    for node_idx, node in enumerate(graph_state.nodes):
+        if node_idx == source_node_idx:
+            continue
+        if not getattr(node, 'consumption_enabled', True):
+            continue
+
+        if node.sku_inventory:
+            for sku_id, data in node.sku_inventory.items():
+                stock = float(data.get('stock', 0.0))
+                reorder = float(data.get('reorder', 0.0))
+                max_stock = float(data.get('max', 0.0))
+                rate = float(data.get('rate', 0.0))
+                category = data.get('category', '')
+
+                if stock <= reorder or rate <= 0 or max_stock <= 0 or stock >= max_stock:
+                    continue
+                if (node_idx, sku_id) in covered:
+                    continue
+
+                tts = stock / rate  # hours
+                room = max_stock - stock
+                num_items = max(1, int(room))
+                cat_id = float(abs(hash(category)) % 100) if category else -1.0
+                stock_ratio = stock / max_stock
+                reorder_ratio = reorder / max_stock if max_stock > 0 else 0.0
+
+                feat = np.array([
+                    float(source_node_idx), float(node_idx),
+                    120.0,           # estimated_duration (seconds)
+                    0.0,             # age (not in queue yet)
+                    tts * 3600,      # time_to_deadline (proxy from tts)
+                    0.0,             # queue_position (not in queue yet)
+                    float(num_items),
+                    tts,             # time_to_stockout (hours)
+                    1.0, 0.0, 0.0, 0.0,  # replenishment, returns, ad_hoc, emergency
+                    cat_id, stock_ratio, reorder_ratio,
+                ], dtype=np.float32)
+
+                candidates.append(CandidateSpec(
+                    from_node_idx=source_node_idx,
+                    to_node_idx=node_idx,
+                    sku_id=sku_id,
+                    category_id=cat_id,
+                    stock=stock,
+                    reorder=reorder,
+                    max_stock=max_stock,
+                    rate=rate,
+                    time_to_stockout=tts,
+                    features=feat,
+                ))
+
+        else:
+            # Node-level fallback
+            stock = node.stock_level
+            max_stock = node.max_stock
+            rate = node.consumption_rate
+            reorder = rate * getattr(node, 'buffer_time', 2.0)
+
+            if stock <= reorder or rate <= 0 or max_stock <= 0 or stock >= max_stock:
+                continue
+            if (node_idx, None) in covered:
+                continue
+
+            tts = stock / rate
+            room = max_stock - stock
+            num_items = max(1, int(room))
+            stock_ratio = stock / max_stock
+            reorder_ratio = reorder / max_stock if max_stock > 0 else 0.0
+
+            feat = np.array([
+                float(source_node_idx), float(node_idx),
+                120.0, 0.0, tts * 3600, 0.0, float(num_items), tts,
+                1.0, 0.0, 0.0, 0.0,
+                -1.0, stock_ratio, reorder_ratio,
+            ], dtype=np.float32)
+
+            candidates.append(CandidateSpec(
+                from_node_idx=source_node_idx,
+                to_node_idx=node_idx,
+                sku_id=None,
+                category_id=-1.0,
+                stock=stock,
+                reorder=reorder,
+                max_stock=max_stock,
+                rate=rate,
+                time_to_stockout=tts,
+                features=feat,
+            ))
+
+    if not candidates:
+        return []
+
+    if len(candidates) > max_subsample:
+        indices = np.random.choice(len(candidates), max_subsample, replace=False)
+        candidates = [candidates[i] for i in indices]
+
+    return candidates
+
+
+def build_state_summary(
+    pending_tasks: list,
+    robots: list,
+    graph_state,
+    current_time: float,
+    max_queue: int = 20,
+) -> np.ndarray:
+    """
+    Build lightweight 8-dim state summary for factorizer and scorer input.
+
+    Dims:
+        0: queue fill ratio (num_pending / max_queue)
+        1: fraction of robots with empty task queues (idle)
+        2: fraction of current simulated hour elapsed
+        3: mean pending task age, normalised by 5 minutes
+        4: fraction of pending tasks with manual_priority >= 4
+        5: mean (stock_level / max_stock) across all nodes
+        6: fraction of robots currently moving (from telemetry)
+        7: queue fill ratio (duplicate of dim 0 for feature symmetry)
+    """
+    num_pending = len(pending_tasks)
+    num_robots = max(len(robots), 1)
+
+    queue_fill = num_pending / max(1, max_queue)
+
+    robot_idle = sum(1 for r in robots if len(r.task_queue) == 0) / num_robots
+
+    hour_frac = (current_time % 3600.0) / 3600.0
+
+    if pending_tasks:
+        avg_age = float(np.mean([current_time - t.arrival_time for t in pending_tasks]))
+        avg_age_norm = avg_age / 300.0  # normalise by 5 minutes
+        frac_urgent = sum(1 for t in pending_tasks if t.manual_priority >= 4) / num_pending
+    else:
+        avg_age_norm = 0.0
+        frac_urgent = 0.0
+
+    stock_ratios = [
+        node.stock_level / node.max_stock
+        for node in graph_state.nodes
+        if node.max_stock > 0
+    ]
+    mean_stock = float(np.mean(stock_ratios)) if stock_ratios else 1.0
+
+    frac_moving = sum(
+        1 for r in robots
+        if r.telemetry is not None and getattr(r.telemetry, 'is_moving', False)
+    ) / num_robots
+
+    return np.array(
+        [queue_fill, robot_idle, hour_frac, avg_age_norm,
+         frac_urgent, mean_stock, frac_moving, queue_fill],
+        dtype=np.float32,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Top-level container
+# ---------------------------------------------------------------------------
 
 class TaskCreationActor(nn.Module):
     """
-    Two-stage task creation actor:
-    1) Bayesian factorizer proposes a shortlist.
-    2) Deterministic scorer ranks selected candidates.
+    Container for BayesianCandidateFactorizer (#7) and TaskCreationScorer (#8).
+
+    Called from GAPOTaskAssignmentEnv._generate_stochastic_tasks() to proactively
+    create SKU replenishment tasks driven by inventory state, replacing blind
+    random ad-hoc task generation.
+
+    Full pipeline per firing:
+        1. build_candidate_universe()   → eligible pool (filtered, subsampled ≤30)
+        2. BayesianCandidateFactorizer  → Thompson-sampled shortlist (k=5)
+        3. TaskCreationScorer           → pick 1 candidate
+        4. Instantiate Task with live quantity safeguard
     """
 
     def __init__(
         self,
+        state_dim: int = STATE_SUMMARY_DIM,
+        candidate_feat_dim: int = CANDIDATE_FEAT_DIM,
         hidden_dim: int = 64,
-        queue_feat_dim: int = 16,
-        task_feat_dim: int = 15,
-        factor_embed_dim: int = 48,
-        factor_hidden_dim: int = 128,
+        shortlist_k: int = 5,
         prior_sigma: float = 1.0,
+        temperature: float = 1.0,
+        candidate_subsample_size: int = 30,
+        device: str = 'cpu',
     ):
         super().__init__()
-        self.queue_norm = nn.LayerNorm(queue_feat_dim)
-        self.state_context_dim = hidden_dim * 2 + queue_feat_dim
+        self.candidate_subsample_size = candidate_subsample_size
+        self.device = device
 
         self.factorizer = BayesianCandidateFactorizer(
-            state_context_dim=self.state_context_dim,
-            candidate_feat_dim=task_feat_dim,
-            embed_dim=factor_embed_dim,
-            hidden_dim=factor_hidden_dim,
+            state_dim=state_dim,
+            candidate_feat_dim=candidate_feat_dim,
+            hidden_dim=hidden_dim,
+            shortlist_k=shortlist_k,
             prior_sigma=prior_sigma,
+            temperature=temperature,
         )
         self.scorer = TaskCreationScorer(
-            state_context_dim=self.state_context_dim,
-            candidate_feat_dim=task_feat_dim,
-            hidden_dim=factor_hidden_dim,
+            state_dim=state_dim,
+            candidate_feat_dim=candidate_feat_dim,
+            hidden_dim=hidden_dim,
         )
 
-    def build_state_context(
+    def create_task(
         self,
-        graph_embedding: torch.Tensor,
-        fleet_embedding: torch.Tensor,
-        queue_features: torch.Tensor,
-    ) -> torch.Tensor:
-        queue_features = self.queue_norm(queue_features)
-        return torch.cat([graph_embedding, fleet_embedding, queue_features], dim=-1)
+        graph_state,
+        pending_tasks: list,
+        robots: list,
+        current_time: float,
+        next_task_id: int,
+        training: bool = False,
+    ):
+        """
+        Run the full two-stage pipeline and return one new Task (or None).
 
-    def score_candidates(
-        self,
-        task_features: torch.Tensor,
-        graph_embedding: torch.Tensor,
-        fleet_embedding: torch.Tensor,
-        queue_features: torch.Tensor,
-    ) -> torch.Tensor:
-        state_context = self.build_state_context(graph_embedding, fleet_embedding, queue_features)
-        return self.scorer(state_context, task_features)
+        Returns:
+            task: Task object, or None if no eligible candidates or quantity guard fails
+            new_next_task_id: int
+        """
+        from ..environment.tasks.task_state import Task
 
-    @staticmethod
-    def _sample_topk(
-        logits: torch.Tensor,
-        k: int,
-        temperature: float,
-        deterministic: bool,
-    ) -> torch.Tensor:
-        if logits.numel() == 0 or k <= 0:
-            return torch.empty(0, dtype=torch.long, device=logits.device)
+        source_idx = _find_source_node(graph_state)
+        if source_idx is None:
+            return None, next_task_id
 
-        k = min(k, logits.shape[0])
-        if deterministic:
-            return torch.topk(logits, k=k, dim=0).indices
-
-        tau = max(float(temperature), 1e-6)
-        scaled = logits / tau
-        gumbel = -torch.log(-torch.log(torch.rand_like(scaled).clamp(min=1e-8, max=1.0 - 1e-8)))
-        return torch.topk(scaled + gumbel, k=k, dim=0).indices
-
-    def _select_shortlist(
-        self,
-        factor_logits: torch.Tensor,
-        shortlist_size: int,
-        urgent_mask: Optional[torch.Tensor],
-        candidate_mask: Optional[torch.Tensor],
-        temperature: float,
-        deterministic: bool,
-    ) -> torch.Tensor:
-        num_candidates = factor_logits.shape[0]
-        shortlist_size = max(1, min(int(shortlist_size), num_candidates))
-
-        feasible_mask = torch.isfinite(factor_logits)
-        if candidate_mask is not None:
-            feasible_mask = feasible_mask & candidate_mask
-
-        urgent = torch.zeros_like(feasible_mask)
-        if urgent_mask is not None:
-            urgent = urgent_mask & feasible_mask
-
-        urgent_indices = torch.nonzero(urgent, as_tuple=False).squeeze(-1)
-        if urgent_indices.numel() >= shortlist_size:
-            urgent_logits = factor_logits[urgent_indices]
-            keep = self._sample_topk(
-                urgent_logits, k=shortlist_size, temperature=temperature, deterministic=deterministic
-            )
-            return urgent_indices[keep]
-
-        selected = []
-        if urgent_indices.numel() > 0:
-            selected.append(urgent_indices)
-
-        remaining_k = shortlist_size - urgent_indices.numel()
-        candidate_pool_mask = feasible_mask & ~urgent
-        pool_indices = torch.nonzero(candidate_pool_mask, as_tuple=False).squeeze(-1)
-
-        if remaining_k > 0 and pool_indices.numel() > 0:
-            pool_logits = factor_logits[pool_indices]
-            chosen = self._sample_topk(
-                pool_logits, k=remaining_k, temperature=temperature, deterministic=deterministic
-            )
-            selected.append(pool_indices[chosen])
-
-        if selected:
-            return torch.cat(selected, dim=0)
-
-        fallback = torch.nonzero(feasible_mask, as_tuple=False).squeeze(-1)
-        if fallback.numel() == 0:
-            return torch.arange(shortlist_size, device=factor_logits.device)
-        if fallback.numel() <= shortlist_size:
-            return fallback
-        keep = self._sample_topk(
-            factor_logits[fallback], k=shortlist_size, temperature=temperature, deterministic=deterministic
+        candidates = build_candidate_universe(
+            graph_state=graph_state,
+            pending_tasks=pending_tasks,
+            current_time=current_time,
+            source_node_idx=source_idx,
+            max_subsample=self.candidate_subsample_size,
         )
-        return fallback[keep]
+        if not candidates:
+            return None, next_task_id
 
-    def rank_candidates(
-        self,
-        task_features: torch.Tensor,
-        graph_embedding: torch.Tensor,
-        fleet_embedding: torch.Tensor,
-        queue_features: torch.Tensor,
-        shortlist_size: int,
-        temperature: float = 1.0,
-        urgent_mask: Optional[torch.Tensor] = None,
-        candidate_mask: Optional[torch.Tensor] = None,
-        deterministic: bool = False,
-    ) -> TaskCreationRanking:
-        state_context = self.build_state_context(graph_embedding, fleet_embedding, queue_features)
+        state_np = build_state_summary(pending_tasks, robots, graph_state, current_time)
+        state_t = torch.from_numpy(state_np).float().to(self.device)
 
-        factor_out = self.factorizer(
-            state_context=state_context,
-            candidate_features=task_features,
-            candidate_mask=candidate_mask,
-            deterministic=deterministic,
-        )
-        factor_logits = factor_out["logits"]
+        feat_np = np.stack([c.features for c in candidates], axis=0)  # [N, 15]
+        feat_t = torch.from_numpy(feat_np).float().to(self.device)
 
-        shortlist_indices = self._select_shortlist(
-            factor_logits=factor_logits,
-            shortlist_size=shortlist_size,
-            urgent_mask=urgent_mask,
-            candidate_mask=candidate_mask,
-            temperature=temperature,
-            deterministic=deterministic,
-        )
+        with torch.set_grad_enabled(training):
+            shortlist_idx, _, _kl = self.factorizer(state_t, feat_t, training=training)
+            shortlist_specs = [candidates[i] for i in shortlist_idx.tolist()]
+            shortlist_feat = feat_t[shortlist_idx]
+            _, chosen = self.scorer(state_t, shortlist_feat)
 
-        scorer_scores = self.scorer(state_context, task_features)
-        if candidate_mask is not None:
-            scorer_scores = scorer_scores.masked_fill(~candidate_mask, float("-inf"))
+        selected = shortlist_specs[chosen]
 
-        shortlist_scores = scorer_scores[shortlist_indices]
-        shortlist_order = torch.argsort(shortlist_scores, descending=True)
-        ranked_shortlist = shortlist_indices[shortlist_order]
-
-        all_indices = torch.arange(task_features.shape[0], device=task_features.device)
-        remaining_mask = torch.ones_like(all_indices, dtype=torch.bool)
-        remaining_mask[ranked_shortlist] = False
-        if candidate_mask is not None:
-            remaining_mask = remaining_mask & candidate_mask
-
-        remaining_indices = all_indices[remaining_mask]
-        if remaining_indices.numel() > 0:
-            remaining_scores = scorer_scores[remaining_indices]
-            remaining_order = torch.argsort(remaining_scores, descending=True)
-            ranked_remaining = remaining_indices[remaining_order]
-            ranked_indices = torch.cat([ranked_shortlist, ranked_remaining], dim=0)
+        # Quantity safeguard: re-fetch live inventory immediately before creating Task
+        node = graph_state.nodes[selected.to_node_idx]
+        if (
+            selected.sku_id
+            and node.sku_inventory
+            and selected.sku_id in node.sku_inventory
+        ):
+            data = node.sku_inventory[selected.sku_id]
+            live_stock = float(data.get('stock', 0.0))
+            max_stock = float(data.get('max', 0.0))
+            reorder = float(data.get('reorder', 0.0))
         else:
-            ranked_indices = ranked_shortlist
+            live_stock = node.stock_level
+            max_stock = node.max_stock
+            reorder = selected.reorder
 
-        if candidate_mask is not None:
-            infeasible = all_indices[~candidate_mask]
-            if infeasible.numel() > 0:
-                ranked_indices = torch.cat([ranked_indices, infeasible], dim=0)
+        room = max_stock - live_stock
+        if room <= 0:
+            return None, next_task_id
 
-        return TaskCreationRanking(
-            ranked_indices=ranked_indices,
-            shortlist_indices=shortlist_indices,
-            scorer_scores=scorer_scores,
-            factor_logits=factor_logits,
-            factor_kl=factor_out["kl"],
+        num_items = max(1, int(room))
+        tts_seconds = selected.time_to_stockout * 3600
+        deadline = current_time + max(tts_seconds, 300.0)  # At least 5 minutes
+
+        task = Task(
+            task_id=next_task_id,
+            from_location_index=selected.from_node_idx,
+            to_location_index=selected.to_node_idx,
+            manual_priority=2,           # Non-urgent; deterministic path handles urgent
+            deadline=deadline,
+            arrival_time=current_time,
+            estimated_duration=120.0,
+            task_type='replenishment',
+            num_items=num_items,
+            sku_id=selected.sku_id,
+            category_id=selected.category_id,
+            source_stock_level=live_stock,
+            time_to_stockout=selected.time_to_stockout,
+            sku_stock_level=live_stock,
+            sku_max_level=max_stock,
+            reorder_point=reorder,
         )
+        return task, next_task_id + 1

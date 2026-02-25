@@ -66,7 +66,6 @@ def draw_tasks(screen, env, bounds, width, height):
         color = (255, 200, 50) if task.manual_priority >= 4 else (200, 200, 200)
         pygame.draw.circle(screen, color, (fx, fy), 4)
         pygame.draw.circle(screen, (50, 200, 255), (tx, ty), 4)
-        pygame.draw.line(screen, (80, 80, 120), (fx, fy), (tx, ty), 1)
 
 
 def draw_robots(screen, env, bounds, width, height, font):
@@ -74,9 +73,30 @@ def draw_robots(screen, env, bounds, width, height, font):
         if not robot.telemetry:
             continue
         x, y = world_to_screen(robot.telemetry.x, robot.telemetry.y, bounds, width, height)
+
+        # Draw the robot's actual planned movement path on the graph (if any).
+        remaining_path = list(robot.telemetry.remaining_path or [])
+        if remaining_path:
+            path_points = [(x, y)]
+            for node_idx in remaining_path:
+                if 0 <= node_idx < len(env.graph_state.nodes):
+                    node = env.graph_state.nodes[node_idx]
+                    path_points.append(
+                        world_to_screen(node.center_x, node.center_y, bounds, width, height)
+                    )
+            if len(path_points) >= 2:
+                pygame.draw.lines(screen, (70, 170, 255), False, path_points, 2)
+
         load_ratio = min(robot.current_load / max(robot.max_capacity, 1), 1.0)
         color = (50 + int(200 * load_ratio), 80, 200)
-        pygame.draw.circle(screen, color, (x, y), 8)
+        pygame.draw.circle(screen, color, (x, y), 10)
+
+        # Heading/velocity indicator to make motion direction visible.
+        heading = float(robot.telemetry.heading)
+        vx = int(14 * np.cos(heading))
+        vy = int(-14 * np.sin(heading))
+        pygame.draw.line(screen, (235, 235, 235), (x, y), (x + vx, y + vy), 2)
+
         label = font.render(f"R{robot.robot_id}", True, (255, 255, 255))
         screen.blit(label, (x + 10, y - 8))
 

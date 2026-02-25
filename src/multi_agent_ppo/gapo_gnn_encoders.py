@@ -286,21 +286,32 @@ class RobotFleetEncoder(nn.Module):
             flat_features = robot_features.view(batch_size * num_robots, feat_dim)
 
             if robot_positions is not None:
-                edge_indices = []
-                for b in range(batch_size):
-                    edge_index_b = self._build_proximity_graph(
-                        robot_positions[b],
-                        threshold=proximity_threshold
-                    )
-                    edge_index_b = edge_index_b + (b * num_robots)
-                    edge_indices.append(edge_index_b)
-                edge_index = torch.cat(edge_indices, dim=1)
-            else:
-                idx = torch.arange(
-                    batch_size * num_robots,
-                    device=robot_features.device
+                # Vectorized: compute all pairwise distances across the entire batch at once
+                # dist_matrix: [batch_size, num_robots, num_robots]
+                dist_matrix = torch.cdist(robot_positions, robot_positions)
+
+                row, col = torch.triu_indices(
+                    num_robots, num_robots, offset=1, device=robot_features.device
                 )
-                edge_index = torch.stack([idx, idx], dim=0)
+
+                # dists: [batch_size, num_pairs]
+                dists = dist_matrix[:, row, col]
+                mask = dists < proximity_threshold  # [batch_size, num_pairs]
+
+                batch_idx, pair_idx = mask.nonzero(as_tuple=True)
+
+                if batch_idx.numel() > 0:
+                    batch_offsets = batch_idx * num_robots
+                    src_global = row[pair_idx] + batch_offsets
+                    dst_global = col[pair_idx] + batch_offsets
+                    edge_index = torch.stack([
+                        torch.cat([src_global, dst_global]),
+                        torch.cat([dst_global, src_global])
+                    ], dim=0)
+                else:
+                    edge_index = torch.zeros(2, 0, dtype=torch.long, device=robot_features.device)
+            else:
+                edge_index = torch.zeros(2, 0, dtype=torch.long, device=robot_features.device)
 
             x = self.sage1(flat_features, edge_index)
             x = F.relu(x)
@@ -311,15 +322,12 @@ class RobotFleetEncoder(nn.Module):
             return robot_embeddings, fleet_embedding
 
         if robot_positions is not None:
-            # Build proximity graph
             edge_index = self._build_proximity_graph(
                 robot_positions,
                 threshold=proximity_threshold
             )
         else:
-            num_robots = robot_features.shape[0]
-            edge_index = torch.arange(num_robots, device=robot_features.device)
-            edge_index = torch.stack([edge_index, edge_index], dim=0)
+            edge_index = torch.zeros(2, 0, dtype=torch.long, device=robot_features.device)
 
         # GNN encoding
 
@@ -339,34 +347,35 @@ class RobotFleetEncoder(nn.Module):
     ) -> torch.Tensor:
         """
         Build edges between robots within threshold distance.
+        Vectorized using torch.cdist — no Python loops over robot pairs.
 
         Args:
             positions: [num_robots, 2]
             threshold: Distance threshold
 
         Returns:
-            edge_index: [2, num_edges]
+            edge_index: [2, num_edges] — empty tensor if no pairs within threshold.
+            SAGEConv handles self-information implicitly via its root-node concat,
+            so self-loops are not needed.
         """
         num_robots = positions.shape[0]
-        edges = []
 
-        for i in range(num_robots):
-            for j in range(i + 1, num_robots):
-                dist = torch.norm(positions[i] - positions[j])
-                if dist < threshold:
-                    edges.append([i, j])
-                    edges.append([j, i])  # Undirected
+        dist_matrix = torch.cdist(positions, positions)  # [num_robots, num_robots]
+        row, col = torch.triu_indices(num_robots, num_robots, offset=1, device=positions.device)
 
-        if edges:
-            edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
-        else:
-            # No connections - create self-loops
-            edge_index = torch.tensor(
-                [[i, i] for i in range(num_robots)],
-                dtype=torch.long
-            ).t().contiguous()
+        mask = dist_matrix[row, col] < threshold
+        src = row[mask]
+        dst = col[mask]
 
-        return edge_index.to(positions.device)
+        if src.numel() == 0:
+            return torch.zeros(2, 0, dtype=torch.long, device=positions.device)
+
+        edge_index = torch.stack([
+            torch.cat([src, dst]),
+            torch.cat([dst, src])
+        ], dim=0)
+
+        return edge_index
 
 
 class TaskEncoder(nn.Module):

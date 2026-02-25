@@ -19,6 +19,7 @@ from .tasks.task_generator import (
     generate_random_ad_hoc_tasks,
     update_inventory_levels
 )
+from ..multi_agent_ppo.task_creation_actor import TaskCreationActor
 from .graph_helpers import dijkstra_shortest_path
 from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
 
@@ -43,7 +44,9 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         hospital_config: Optional[HospitalConfig] = None,
         stochastic_tasks_per_hour: float = 2.0,
         max_stochastic_tasks_per_hour: int = 2,
-        initial_stochastic_tasks: int = 0
+        initial_stochastic_tasks: int = 0,
+        use_task_creation_actor: bool = True,
+        device: str = 'cpu',
     ):
         super(GAPOTaskAssignmentEnv, self).__init__()
 
@@ -94,6 +97,13 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self.episode_collisions = 0
         self.last_collision_count = 0
 
+        # Proactive SKU task creation actor (#7 factorizer + #8 scorer)
+        # Creates inventory-aware stochastic replenishment tasks instead of blind random.
+        if use_task_creation_actor:
+            self.task_creation_actor = TaskCreationActor(device=device)
+        else:
+            self.task_creation_actor = None
+
         # Learned edge cost model (supervised, trains from traversal data)
         self.edge_cost_manager = EdgeCostManager(
             hidden_dim=64,
@@ -112,9 +122,13 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             # Note: Reusing the same graph_state object, so inventory persists across episodes
             self.graph_state = self._custom_graph_state
 
-            # Reset edge congestion states
+            # Reset edge and node occupancy (graph object is reused, so these must
+            # be explicitly cleared — otherwise stale robot IDs from the previous
+            # episode corrupt the occupancy_count node feature fed to the GNN)
             for edge in self.graph_state.edges:
                 edge.active_robot_ids = []
+            for node in self.graph_state.nodes:
+                node.current_robot_ids = []
         else:
             # Create new graph from hospital_config or default
             self.graph_state = GraphState(config=self.hospital_config)
@@ -155,13 +169,31 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         if self.initial_stochastic_tasks > 0:
             initial_budget = self._remaining_stochastic_task_budget()
             initial_count = min(self.initial_stochastic_tasks, initial_budget)
-            if initial_count > 0:
-                ad_hoc_tasks, self.next_task_id = generate_random_ad_hoc_tasks(
-                    self.graph_state, self.current_time, initial_count, self.next_task_id
-                )
-                if ad_hoc_tasks:
-                    self.pending_tasks.extend(ad_hoc_tasks)
-                    self._record_stochastic_tasks(len(ad_hoc_tasks))
+            created = 0
+            for _ in range(initial_count):
+                new_task = None
+                if self.task_creation_actor is not None:
+                    new_task, self.next_task_id = self.task_creation_actor.create_task(
+                        graph_state=self.graph_state,
+                        pending_tasks=self.pending_tasks,
+                        robots=self.robots,
+                        current_time=self.current_time,
+                        next_task_id=self.next_task_id,
+                        training=False,
+                    )
+                if new_task is not None:
+                    self.pending_tasks.append(new_task)
+                    created += 1
+                else:
+                    # Fallback for seed tasks when no eligible SKU candidates exist
+                    ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
+                        self.graph_state, self.current_time, 1, self.next_task_id
+                    )
+                    if ad_hoc:
+                        self.pending_tasks.extend(ad_hoc)
+                        created += len(ad_hoc)
+            if created > 0:
+                self._record_stochastic_tasks(created)
 
         self._apply_fallback_pending_rank()
 
@@ -289,7 +321,11 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
     def _generate_stochastic_tasks(self, dt: float):
         """
-        Generate ad-hoc stochastic tasks using a rate (tasks/hour) and a hard hourly cap.
+        Generate stochastic tasks via the TaskCreationActor pipeline (#7/#8).
+
+        Rate and hard hourly cap are checked first. If the actor finds no eligible
+        candidates, falls back to generate_random_ad_hoc_tasks so training is never
+        starved of task diversity.
         """
         remaining_budget = self._remaining_stochastic_task_budget()
         if remaining_budget <= 0 or self.stochastic_tasks_per_hour <= 0.0:
@@ -300,14 +336,30 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         if np.random.random() >= p_create:
             return
 
-        num_new = min(1, remaining_budget)
-        ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
-            self.graph_state, self.current_time, num_new, self.next_task_id
-        )
-        if ad_hoc:
-            self.pending_tasks.extend(ad_hoc)
-            self._record_stochastic_tasks(len(ad_hoc))
+        new_task = None
+        if self.task_creation_actor is not None:
+            new_task, self.next_task_id = self.task_creation_actor.create_task(
+                graph_state=self.graph_state,
+                pending_tasks=self.pending_tasks,
+                robots=self.robots,
+                current_time=self.current_time,
+                next_task_id=self.next_task_id,
+                training=False,
+            )
+
+        if new_task is not None:
+            self.pending_tasks.append(new_task)
+            self._record_stochastic_tasks(1)
             self._apply_fallback_pending_rank()
+        else:
+            # Fallback: blind random task when no eligible SKU candidates exist
+            ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
+                self.graph_state, self.current_time, 1, self.next_task_id
+            )
+            if ad_hoc:
+                self.pending_tasks.extend(ad_hoc)
+                self._record_stochastic_tasks(len(ad_hoc))
+                self._apply_fallback_pending_rank()
 
     def assign_task_to_robot(self, robot_id: int, task: Task) -> bool:
         """
@@ -911,14 +963,22 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         return None
 
     def _update_edge_congestion(self):
-        """Update edge congestion."""
+        """Update edge and node occupancy from current telemetry."""
         for edge in self.graph_state.edges:
             edge.active_robot_ids.clear()
             edge.active_robot_progress.clear()
             edge.approaching_robot_count = 0
 
+        # Clear node occupancy so it is rebuilt fresh each step.
+        # node.add_robot / remove_robot are never called incrementally, so we
+        # reconstruct from telemetry here — the same pattern used for edges above.
+        for node in self.graph_state.nodes:
+            node.current_robot_ids.clear()
+
         for robot, simulator in zip(self.robots, self.robot_simulators):
-            if robot.telemetry and robot.telemetry.is_on_edge:
+            if not robot.telemetry:
+                continue
+            if robot.telemetry.is_on_edge:
                 edge_idx = robot.telemetry.current_edge_index
                 if edge_idx is not None and edge_idx < len(self.graph_state.edges):
                     edge = self.graph_state.edges[edge_idx]
@@ -928,6 +988,11 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                         simulator.current_node_index,
                         simulator.current_target_node
                     )
+            else:
+                # Robot is at a node — update node occupancy
+                node_idx = robot.telemetry.current_node_index
+                if node_idx is not None and 0 <= node_idx < len(self.graph_state.nodes):
+                    self.graph_state.nodes[node_idx].add_robot(robot.robot_id)
 
         for edge_idx, edge in enumerate(self.graph_state.edges):
             edge.approaching_robot_count = self._count_approaching_robots(edge_idx)

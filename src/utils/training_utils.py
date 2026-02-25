@@ -53,8 +53,8 @@ def parse_args():
                         help='Hidden dimension for GNN (default: 64)')
     parser.add_argument('--no-debiasing', action='store_true',
                         help='Disable de-biasing loss')
-    parser.add_argument('--critic-coef', type=float, default=0.02,
-                        help='Critic loss coefficient (default: 0.02)')
+    parser.add_argument('--critic-coef', type=float, default=0.5,
+                        help='Critic loss coefficient (default: 0.5)')
     parser.add_argument('--entropy-coef', type=float, default=0.01,
                         help='Entropy coefficient magnitude (default: 0.01)')
     parser.add_argument('--min-adv-std', type=float, default=1e-3,
@@ -108,25 +108,6 @@ def parse_args():
     parser.add_argument('--warmup-entropy-mult', type=float, default=2.0,
                         help='Entropy coefficient multiplier during warmup (default: 2.0)')
 
-    # Task-creation actor (optional; default keeps existing behavior)
-    parser.add_argument('--enable-task-creation-actor', action='store_true',
-                        help='Enable Bayesian shortlist + task-creation scorer during task ranking')
-    parser.add_argument('--task-creation-shortlist-size', type=int, default=50,
-                        help='Shortlist size produced by task-creation actor (default: 50)')
-    parser.add_argument('--task-creation-temperature', type=float, default=1.0,
-                        help='Sampling temperature for Bayesian shortlist (default: 1.0)')
-    parser.add_argument('--task-creation-urgent-priority', type=int, default=4,
-                        help='Priority threshold for deterministic urgent inclusion (default: 4)')
-    parser.add_argument('--task-creation-near-deadline', type=float, default=300.0,
-                        help='Near-deadline threshold in seconds for urgent inclusion (default: 300)')
-    parser.add_argument('--task-creation-stockout-hours', type=float, default=1.0,
-                        help='Stockout threshold in hours for urgent inclusion (default: 1.0)')
-    parser.add_argument('--task-creation-prior-sigma', type=float, default=1.0,
-                        help='Prior sigma for Bayesian factorizer (default: 1.0)')
-    parser.add_argument('--task-creation-loss-coef', type=float, default=0.05,
-                        help='Auxiliary loss coefficient for task-creation scorer (default: 0.05)')
-    parser.add_argument('--task-creation-kl-coef', type=float, default=1e-4,
-                        help='KL coefficient for Bayesian factorizer regularization (default: 1e-4)')
     parser.add_argument('--ranking-max-pairs-per-group', type=int, default=64,
                         help='Max sampled assignment pairs per env-step group for ranking losses (default: 64)')
     parser.add_argument('--ranking-min-adv-gap', type=float, default=1e-4,
