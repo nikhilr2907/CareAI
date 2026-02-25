@@ -241,7 +241,7 @@ class RobotFleetEncoder(nn.Module):
     Output: Robot embeddings + fleet embedding
     """
 
-    def __init__(self, robot_feat_dim=20, hidden_dim=64):
+    def __init__(self, robot_feat_dim=19, hidden_dim=64):
         super().__init__()
 
         self.hidden_dim = hidden_dim
@@ -441,7 +441,7 @@ def test_encoders():
     # Test Robot Fleet Encoder
     print("\n2. Robot Fleet Encoder")
     robot_encoder = RobotFleetEncoder(
-        robot_feat_dim=20,
+        robot_feat_dim=19,
         hidden_dim=64
     )
 

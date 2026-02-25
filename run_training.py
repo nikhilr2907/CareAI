@@ -93,6 +93,9 @@ def main():
     num_robots = args.num_robots  # Can be None (will be read from config)
     max_episode_time = args.max_episode_time
     timestep_seconds = 1.0
+    stochastic_tasks_per_hour = args.stochastic_tasks_per_hour
+    stochastic_task_cap_per_hour = args.stochastic_task_cap_per_hour
+    initial_stochastic_tasks = args.initial_stochastic_tasks
 
     # Curriculum settings
     curriculum_schedule = args.curriculum
@@ -174,6 +177,11 @@ def main():
     logger.info(f"Warmup: iters={warmup_iters} mix={warmup_mix} reward_offset={warmup_reward_offset} penalty_scale={warmup_penalty_scale} consumption_scale={warmup_consumption_scale} entropy_mult={warmup_entropy_mult}")
     logger.info(f"Max Assignments Per Step: {max_assignments_per_step}")
     logger.info(
+        f"Stochastic Tasks: rate_per_hour={stochastic_tasks_per_hour} "
+        f"cap_per_hour={stochastic_task_cap_per_hour} "
+        f"initial={initial_stochastic_tasks}"
+    )
+    logger.info(
         "Task Creation Actor: "
         f"enabled={enable_task_creation_actor} shortlist={task_creation_shortlist_size} "
         f"temp={task_creation_temperature} urgent_prio>={task_creation_urgent_priority} "
@@ -223,7 +231,10 @@ def main():
             config_path,
             num_robots=num_robots,
             max_episode_time=max_episode_time,
-            timestep_seconds=timestep_seconds
+            timestep_seconds=timestep_seconds,
+            stochastic_tasks_per_hour=stochastic_tasks_per_hour,
+            stochastic_task_cap_per_hour=stochastic_task_cap_per_hour,
+            initial_stochastic_tasks=initial_stochastic_tasks
         )
 
         print(f"  Nodes: {num_nodes}")
@@ -269,7 +280,7 @@ def main():
         department_embedding_dim=16,
         shift_embedding_dim=4,
         day_type_embedding_dim=4,
-        robot_feat_dim=20,
+        robot_feat_dim=19,
         task_feat_dim=15,
         queue_feat_dim=16,
         sku_feat_dim=sku_feat_dim,
@@ -323,6 +334,10 @@ def main():
 
     # Training metrics
     memory = Memory()
+    # Maps original task_id -> memory buffer index at assignment time.
+    # Used to route task completion bonuses back to the decision that caused them,
+    # rather than distributing them to whatever assignments happen at completion time.
+    task_to_memory_idx: dict = {}
     running_reward = 0
     iteration_rewards = []
     config_rewards = []
@@ -423,7 +438,7 @@ def main():
                         state_tensor = ppo._state_dict_to_tensor(state_dict)
                         mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
                         with torch.no_grad():
-                            logprob, _, _ = ppo.policy_old.evaluate_actions(
+                            logprob, _, _, _ = ppo.policy_old.evaluate_actions(
                                 [state_tensor],
                                 torch.tensor([action], dtype=torch.long).to(ppo.device),
                                 [mask_tensor]
@@ -453,6 +468,9 @@ def main():
                     num_assignments += 1
                     assignments_this_step += 1
                     reward = 0.0
+                    # Record which memory slot this task was assigned from, so
+                    # its completion bonus can be routed back here later.
+                    task_to_memory_idx[task.task_id] = mem_idx_before
                     state_dict = env._get_state_dict()
                 else:
                     reward = -1.0
@@ -471,30 +489,85 @@ def main():
             # Simulation time step
             prev_completed = len(env.completed_tasks)
             state_dict, step_reward, done, info = env.step(dt=timesteps_per_decision)
-            if reward_clip is not None and reward_clip > 0:
-                step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
-            if iteration <= warmup_iters:
-                if step_reward < 0:
-                    step_reward *= warmup_penalty_scale
-                step_reward += warmup_reward_offset
-            step_reward *= reward_scale
-            if len(env.completed_tasks) > prev_completed:
-                for task in env.completed_tasks[prev_completed:]:
-                    if task.arrival_time is not None:
-                        iteration_completion_times.append(env.current_time - task.arrival_time)
 
-            # Distribute step reward across ALL assignments in this step (not just the last)
-            if step_reward != 0 and step_memory_indices:
-                iteration_reward += step_reward
-                share = step_reward / len(step_memory_indices)
+            # --- Per-task completion credit attribution ---
+            # Constants must stay in sync with _compute_timestep_reward.
+            _COMPLETION_BONUS = 10.0
+            _REPLENISHMENT_BONUS = 6.0
+            newly_completed = env.completed_tasks[prev_completed:]
+
+            # Track completion time metrics
+            for task in newly_completed:
+                if task.arrival_time is not None:
+                    iteration_completion_times.append(env.current_time - task.arrival_time)
+
+            # Compute per-task completion bonuses (mirrors _compute_timestep_reward logic)
+            task_completion_credits: dict = {}
+            total_completion_bonus = 0.0
+            for task in newly_completed:
+                bonus = _COMPLETION_BONUS
+                if task.task_type == 'replenishment' and task.leg_type == "dropoff":
+                    to_node = env.graph_state.nodes[task.to_location_index]
+                    capacity_ratio = task.num_items / max(to_node.max_stock, 1.0)
+                    bonus += _REPLENISHMENT_BONUS * min(1.0, capacity_ratio)
+                parent_id = getattr(task, 'parent_task_id', None)
+                if parent_id is not None:
+                    task_completion_credits[parent_id] = bonus
+                total_completion_bonus += bonus
+
+            # Systemic reward = step_reward minus completion bonuses (backlog, stockout,
+            # age penalties, load balance, congestion — all ambient/shared signals).
+            systemic_reward = step_reward - total_completion_bonus
+
+            # Apply clipping/scaling to systemic reward
+            if reward_clip is not None and reward_clip > 0:
+                systemic_reward = float(np.clip(systemic_reward, -reward_clip, reward_clip))
+            if iteration <= warmup_iters:
+                if systemic_reward < 0:
+                    systemic_reward *= warmup_penalty_scale
+                systemic_reward += warmup_reward_offset
+            systemic_reward *= reward_scale
+
+            # Route each completion bonus to the memory slot of the original assignment.
+            # If the task was assigned in a previous rollout (memory cleared), fall back
+            # to distributing to current-step assignments.
+            for parent_id, bonus in task_completion_credits.items():
+                scaled_bonus = bonus * reward_scale
+                if reward_clip is not None and reward_clip > 0:
+                    scaled_bonus = float(np.clip(scaled_bonus, 0.0, reward_clip))
+                iteration_reward += scaled_bonus
+                orig_idx = task_to_memory_idx.get(parent_id)
+                if orig_idx is not None and orig_idx < len(memory.rewards):
+                    memory.rewards[orig_idx] += scaled_bonus
+                elif step_memory_indices:
+                    # Fallback: no valid memory slot (cross-rollout case)
+                    share = scaled_bonus / len(step_memory_indices)
+                    for idx in step_memory_indices:
+                        if idx < len(memory.rewards):
+                            memory.rewards[idx] += share
+                # If neither, credit is lost (step with no assignments, edge case)
+
+            # Distribute systemic reward equally across current-step assignments
+            if systemic_reward != 0 and step_memory_indices:
+                iteration_reward += systemic_reward
+                share = systemic_reward / len(step_memory_indices)
                 for idx in step_memory_indices:
                     if idx < len(memory.rewards):
                         memory.rewards[idx] += share
+            elif systemic_reward != 0 and len(memory.rewards) > 0:
+                # No assignments this step — attribute ambient penalties to the last entry
+                iteration_reward += systemic_reward
+                memory.rewards[-1] += systemic_reward
 
             if done:
                 state_dict = env.reset()
-            if (done or step == rollout_steps - 1) and len(memory.is_terminals) > 0:
-                memory.is_terminals[-1] = True
+                # Task IDs are reset on env.reset(), so clear the mapping to avoid
+                # routing completion bonuses to stale memory indices next episode.
+                task_to_memory_idx.clear()
+                # Only mark terminal on true episode ends — rollout boundaries are NOT
+                # terminals (environment continues) so next_value bootstrap must flow through
+                if len(memory.is_terminals) > 0:
+                    memory.is_terminals[-1] = True
 
         buffer_size = len(memory.actions)
 
@@ -510,7 +583,9 @@ def main():
             print(f"!!! Buffer info: {len(memory.actions)} actions, {len(memory.state_dicts)} states", flush=True)
             raise
         memory.clear_memory()
-        # Batch by reshaping, batch by reshaping, batch by reshaping
+        # Memory indices are now invalid; clear the task mapping so stale entries
+        # from this rollout don't pollute the next one's credit attribution.
+        task_to_memory_idx.clear()
         # Metrics
         iteration_time = time.time() - iteration_start_time
         process_time_now = time.process_time()

@@ -20,20 +20,21 @@ from typing import List, Optional, Tuple
 
 
 # Feature indices in EdgeTraversalRecord.to_feature_vector()
-# [0] distance_m
-# [1] corridor_width
-# [2] num_robots_on_edge
-# [3] people_count
-# [4] clutter_level
-# [5] approaching_robot_count
-# [6] from_node_occupancy
-# [7] to_node_occupancy
-# [8] time_of_day
+# [0] distance_m  — NOT fed to encoder; extracted in predict_cost() to convert seconds
+# [1] corridor_width         ┐
+# [2] num_robots_on_edge     │
+# [3] people_count           │  These 8 congestion features are the encoder input
+# [4] clutter_level          │  (indices 1–8 of the 9-element vector)
+# [5] approaching_robot_count│
+# [6] from_node_occupancy    │
+# [7] to_node_occupancy      │
+# [8] time_of_day            ┘
 #
 # Removed from original: same_direction_count, opposite_direction_count, stop_count.
 # Direction is unknown at inference time; stop_count only exists post-traversal.
 
-EDGE_COST_FEATURE_DIM = 9
+EDGE_COST_FEATURE_DIM = 9   # Full feature vector length (including distance_m at [0])
+EDGE_COST_ENCODER_DIM = 8   # Congestion features fed to encoder (distance_m excluded)
 
 
 class LearnedEdgeCostModel(nn.Module):
@@ -55,10 +56,14 @@ class LearnedEdgeCostModel(nn.Module):
         super().__init__()
 
         self.input_dim = input_dim
+        encoder_input_dim = input_dim - 1  # distance_m (index 0) excluded from encoder
 
-        # Shared feature encoder
+        # Normalize congestion features before encoding (indices 1–8 span very different scales)
+        self.input_norm = nn.LayerNorm(encoder_input_dim)
+
+        # Shared feature encoder (congestion features only)
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(encoder_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -78,8 +83,9 @@ class LearnedEdgeCostModel(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
         )
 
-        # Initialize mean head bias to 0 (delay_factor starts at ~1.0 after softplus)
-        nn.init.zeros_(self.mean_head[-1].bias)
+        # Init mean head bias to -3.0: softplus(-3) ≈ 0.049 → delay_factor starts near 1.05
+        # (avoids the softplus(0) = 0.693 default which would start delay_factor at ~1.69)
+        nn.init.constant_(self.mean_head[-1].bias, -3.0)
         # Initialize log_var head bias to small value (low initial uncertainty)
         nn.init.constant_(self.log_var_head[-1].bias, -2.0)
 
@@ -88,25 +94,31 @@ class LearnedEdgeCostModel(nn.Module):
         Predict delay factor distribution.
 
         Args:
-            features: [batch, input_dim] edge congestion features
+            features: [batch, input_dim] edge features (distance_m at [0], congestion at [1:])
 
         Returns:
             delay_factor: [batch] predicted mean delay factor (>= 1.0, dimensionless)
-            log_var: [batch] log-variance of delay factor
+            log_var: [batch] log-variance of delay factor, clamped to [-8, 4]
 
         The delay factor is scale-invariant: delay_factor = actual_time / base_time.
         To get traversal time in seconds: time = delay_factor * (distance_m / max_v_ms).
         Training on delay_factor rather than absolute seconds prevents long corridors
         from dominating the gradient signal.
+
+        distance_m (index 0) is NOT passed to the encoder — it is only used in
+        predict_cost() to convert the dimensionless delay_factor back to seconds.
         """
-        h = self.encoder(features)
+        # Congestion features only (exclude distance_m at index 0)
+        congestion_features = features[:, 1:]  # [batch, input_dim-1]
+        h = self.encoder(self.input_norm(congestion_features))
 
         # Predict delay factor >= 1.0 (corridor can only be slower than free-flow)
         raw_delay = self.mean_head(h).squeeze(-1)
         delay_factor = 1.0 + F.softplus(raw_delay)
 
-        # Predicted log-variance of delay factor
+        # Predicted log-variance of delay factor (clamped for numerical stability)
         log_var = self.log_var_head(h).squeeze(-1)
+        log_var = torch.clamp(log_var, min=-8.0, max=4.0)
 
         return delay_factor, log_var
 
@@ -176,8 +188,19 @@ class HeuristicEdgeCostModel:
         """
         Heuristic cost prediction.
 
+        Feature layout (matches EdgeTraversalRecord.to_feature_vector / build_edge_features):
+            [0] distance_m
+            [1] corridor_width
+            [2] num_robots_on_edge
+            [3] people_count
+            [4] clutter_level
+            [5] approaching_robot_count
+            [6] from_node_occupancy
+            [7] to_node_occupancy
+            [8] time_of_day
+
         Args:
-            features_np: [num_edges, 12] feature array
+            features_np: [num_edges, 9] feature array
             risk_sensitivity: ignored in heuristic mode
 
         Returns:
@@ -185,15 +208,14 @@ class HeuristicEdgeCostModel:
         """
         distance = features_np[:, 0]
         num_robots = features_np[:, 2]
-        same_dir = features_np[:, 3]
-        opposite_dir = features_np[:, 4]
-        people_count = features_np[:, 5]
-        clutter = features_np[:, 6]
+        people_count = features_np[:, 3]
+        clutter = features_np[:, 4]
+        approaching = features_np[:, 5]
 
         base_time = distance / 1.0  # Assume 1 m/s
 
         # Simple additive penalties
-        congestion = num_robots * 1.5 + opposite_dir * 2.0
+        congestion = (num_robots + approaching) * 1.5
         people_penalty = people_count * 0.5
         clutter_penalty = clutter * 10.0
 

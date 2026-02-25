@@ -3,7 +3,7 @@ Inventory-driven task generation for hospital logistics.
 Generates tasks based on stock levels and consumption rates.
 """
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Optional, Set, Tuple, Dict
 from .task_state import Task, TaskQueue
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -84,7 +84,8 @@ def _compute_sku_rate(node, sku_id: str, graph_state, current_time_seconds: floa
 def generate_inventory_tasks(
     graph_state,
     current_time: float,
-    next_task_id: int = 0
+    next_task_id: int = 0,
+    existing_task_keys: Optional[Set[Tuple]] = None,
 ) -> Tuple[List[Task], int]:
     """
     Generate tasks based on inventory needs.
@@ -94,12 +95,21 @@ def generate_inventory_tasks(
         graph_state: GraphState with inventory information
         current_time: Current simulation time (seconds)
         next_task_id: Next available task ID
+        existing_task_keys: Set of (sku_id, dest_node_idx) tuples already covered
+            by pending or in-flight tasks. Tasks matching an existing key are
+            skipped so we never create duplicate replenishment demand. Pass None
+            to skip deduplication (backwards-compatible).
 
     Returns:
         Tuple of (list of new tasks, next task ID)
     """
     new_tasks = []
     task_id = next_task_id
+
+    # Work on a mutable copy so we can accumulate keys within this call too
+    # (prevents duplicates within a single generate call for different SKUs
+    # at the same dest node — unlikely but safe).
+    seen_keys: Set[Tuple] = set(existing_task_keys) if existing_task_keys else set()
 
     # Find storage nodes (sources of supplies)
     storage_nodes = [
@@ -128,6 +138,11 @@ def generate_inventory_tasks(
                 if max_level <= 0:
                     continue
                 if stock > reorder:
+                    continue
+
+                # Skip if this (sku, destination) is already pending or in-flight
+                key = (sku_id, dest_idx)
+                if key in seen_keys:
                     continue
 
                 rate = _compute_sku_rate(dest_node, sku_id, graph_state, current_time)
@@ -167,9 +182,15 @@ def generate_inventory_tasks(
                 )
 
                 new_tasks.append(task)
+                seen_keys.add(key)
                 task_id += 1
         else:
             if dest_node.needs_restock:
+                # Non-SKU node: key on (None, dest_idx)
+                key = (None, dest_idx)
+                if key in seen_keys:
+                    continue
+
                 target_stock = dest_node.buffer_time * dest_node.consumption_rate
                 delivery_amount = min(
                     dest_node.max_stock - dest_node.stock_level,
@@ -194,6 +215,7 @@ def generate_inventory_tasks(
                     time_to_stockout=dest_node.time_to_stockout
                 )
                 new_tasks.append(task)
+                seen_keys.add(key)
                 task_id += 1
 
     return new_tasks, task_id

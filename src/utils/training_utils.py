@@ -73,6 +73,12 @@ def parse_args():
                         help='Number of robots (default: read from config or 5)')
     parser.add_argument('--max-episode-time', type=float, default=28800.0,
                         help='Max episode time in seconds (default: 28800 = 8 hours)')
+    parser.add_argument('--stochastic-tasks-per-hour', type=float, default=2.0,
+                        help='Expected stochastic ad-hoc task generation rate per simulated hour (default: 2.0)')
+    parser.add_argument('--stochastic-task-cap-per-hour', type=int, default=2,
+                        help='Hard cap on stochastic ad-hoc tasks created in any rolling simulated hour (default: 2)')
+    parser.add_argument('--initial-stochastic-tasks', type=int, default=0,
+                        help='Initial stochastic ad-hoc tasks at reset (bounded by hourly cap, default: 0)')
 
     # Logging and output
     parser.add_argument('--output-dir', type=str, default='outputs',
@@ -159,7 +165,10 @@ def load_curriculum_from_configs(config_paths: list) -> list:
 
 def create_env_from_config_file(config_path: str, num_robots: int = None,
                                 max_episode_time: float = 28800.0,
-                                timestep_seconds: float = 1.0):
+                                timestep_seconds: float = 1.0,
+                                stochastic_tasks_per_hour: float = 2.0,
+                                stochastic_task_cap_per_hour: int = 2,
+                                initial_stochastic_tasks: int = 0):
     """
     Create environment from config file.
     """
@@ -206,7 +215,10 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
         num_nodes=num_nodes,
         max_episode_time=max_episode_time,
         timestep_seconds=timestep_seconds,
-        hospital_config=None
+        hospital_config=None,
+        stochastic_tasks_per_hour=stochastic_tasks_per_hour,
+        max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
+        initial_stochastic_tasks=initial_stochastic_tasks
     )
 
     env.graph_state = graph_state
@@ -369,12 +381,13 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
                 if task.get_time_to_deadline(eval_env.current_time) < 0:
                     late_at_assignment += 1
 
+        prev_completed = len(eval_env.completed_tasks)
         state, step_reward, done, _ = eval_env.step(dt=timesteps_per_decision)
         if reward_clip is not None and reward_clip > 0:
             step_reward = float(np.clip(step_reward, -reward_clip, reward_clip))
         eval_reward += step_reward
-        if eval_env.completed_tasks:
-            for task in eval_env.completed_tasks:
+        if len(eval_env.completed_tasks) > prev_completed:
+            for task in eval_env.completed_tasks[prev_completed:]:
                 if task.deadline is None:
                     continue
                 if eval_env.current_time <= task.deadline:

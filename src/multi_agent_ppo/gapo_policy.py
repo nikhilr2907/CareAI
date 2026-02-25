@@ -35,7 +35,7 @@ class GAPOPolicyNetwork(nn.Module):
         department_embedding_dim=16,
         shift_embedding_dim=4,
         day_type_embedding_dim=4,
-        robot_feat_dim=20,
+        robot_feat_dim=19,
         task_feat_dim=15,
         queue_feat_dim=16,
         sku_feat_dim=None,
@@ -379,14 +379,15 @@ class GAPOPolicyNetwork(nn.Module):
             return (
                 torch.tensor([], device=actions.device),
                 torch.tensor([], device=actions.device),
-                torch.tensor([], device=actions.device)
+                torch.tensor([], device=actions.device),
+                torch.tensor([], device=actions.device),
             )
 
-        action_logits, state_values, _ = self._forward_batched(state_dicts, robot_masks)
+        raw_action_logits, state_values, _ = self._forward_batched(state_dicts, robot_masks)
 
         # Apply mask
         mask_list = []
-        num_robots = action_logits.shape[1]
+        num_robots = raw_action_logits.shape[1]
         if robot_masks is not None:
             for mask in robot_masks:
                 if mask is None or not mask.any():
@@ -397,7 +398,7 @@ class GAPOPolicyNetwork(nn.Module):
             mask_list = [torch.ones(num_robots, dtype=torch.bool, device=actions.device) for _ in range(batch_size)]
 
         mask_tensor = torch.stack(mask_list, dim=0)
-        action_logits = action_logits.masked_fill(~mask_tensor, float('-inf'))
+        action_logits = raw_action_logits.masked_fill(~mask_tensor, float('-inf'))
 
         # Compute log prob
         action_probs = F.softmax(action_logits, dim=-1)
@@ -408,7 +409,8 @@ class GAPOPolicyNetwork(nn.Module):
         # Compute entropy
         entropies = -(action_probs * torch.log(action_probs + 1e-8)).sum(dim=-1)
 
-        return log_probs, state_values.squeeze(-1), entropies
+        # Return raw (pre-mask) logits for de-biasing so gradient flows cleanly
+        return log_probs, state_values.squeeze(-1), entropies, raw_action_logits
 
     def _forward_batched(
         self,
@@ -556,25 +558,31 @@ class GAPOPolicyNetwork(nn.Module):
 
         return action_logits, state_value, attention_info
 
-    def compute_debias_loss(self) -> Tuple[torch.Tensor, Dict]:
+    def compute_debias_loss(
+        self,
+        fresh_logits: Optional[List[torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Dict]:
         """
         Compute de-biasing loss from current episode.
+
+        Args:
+            fresh_logits: Live (gradient-connected) logits from the current PPO
+                          update forward pass. When provided these are used instead
+                          of the detached episode_logits stored during rollout, so
+                          gradients can reach the GNN encoders.
 
         Returns:
             debias_loss: Scalar de-biasing penalty
             loss_breakdown: Dictionary with loss components
         """
-        if not self.use_debiasing or len(self.episode_logits) < 2:
+        logits_to_use = fresh_logits if fresh_logits is not None else self.episode_logits
+        if not self.use_debiasing or len(logits_to_use) < 2:
             return torch.tensor(0.0), {}
 
-        # Convert lists to format expected by debiaser
-        # (We don't have explicit state sequence in this architecture,
-        #  so we use embeddings as proxy)
-
         debias_loss, breakdown = self.debiaser.compute_total_debias_loss(
-            state_sequence=[],  # Not used in current implementation
+            state_sequence=self.episode_task_features,  # task features as state proxy
             action_sequence=self.episode_actions,
-            action_logits_sequence=self.episode_logits,
+            action_logits_sequence=logits_to_use,
             task_features_sequence=self.episode_task_features
         )
 
@@ -604,7 +612,7 @@ def test_gapo_policy():
         num_node_types=4,
         edge_feat_dim=21,
         node_type_embedding_dim=8,
-        robot_feat_dim=20,
+        robot_feat_dim=19,
         task_feat_dim=15,
         hidden_dim=64,
         use_debiasing=True

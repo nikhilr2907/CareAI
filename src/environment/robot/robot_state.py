@@ -38,8 +38,12 @@ class RobotState:
 
     @property
     def num_queued_tasks(self) -> int:
-        """Get number of queued tasks."""
-        return len(self.task_queue)
+        """Get number of original (parent) tasks queued, not counting pickup+dropoff legs separately."""
+        seen = set()
+        for task in self.task_queue:
+            pid = task.parent_task_id if task.leg_type in ("pickup", "dropoff") else task.task_id
+            seen.add(pid)
+        return len(seen)
 
     @property
     def current_task(self) -> Optional['Task']:
@@ -69,15 +73,24 @@ class RobotState:
 
     @property
     def current_load(self) -> int:
-        """Get current number of items loaded (from telemetry)."""
+        """Get current number of items physically loaded (from telemetry)."""
         if self.telemetry:
             return self.telemetry.current_capacity
         return 0
 
     @property
+    def effective_load(self) -> int:
+        """Physical load plus items committed by queued pickup legs not yet executed."""
+        committed = sum(
+            t.num_items for t in self.task_queue
+            if getattr(t, "leg_type", "full") == "pickup"
+        )
+        return self.current_load + committed
+
+    @property
     def available_capacity(self) -> int:
-        """How many more items can be loaded."""
-        return self.max_capacity - self.current_load
+        """How many more items can be loaded, accounting for committed pickups."""
+        return max(0, self.max_capacity - self.effective_load)
 
     @property
     def is_available(self) -> bool:
@@ -161,22 +174,21 @@ class RobotState:
         available_slots = max(0, self.max_capacity - self.current_load)
         promoted = []
         deferred = []
+        # Seed pickup_count from ALL pickups already committed in the main queue
+        # (current task + remaining), not just the current task, to avoid over-promotion.
         pickup_count = 0
         pickup_ready_parents = set(self.picked_up_task_ids)
         for task in self.task_queue:
-            if getattr(task, "leg_type", "full") == "pickup" and task.parent_task_id is not None:
-                pickup_ready_parents.add(task.parent_task_id)
-
-        if current_task and getattr(current_task, "leg_type", "full") == "pickup":
-            pickup_count = 1
-            if current_task.parent_task_id is not None:
-                pickup_ready_parents.add(current_task.parent_task_id)
+            if getattr(task, "leg_type", "full") == "pickup":
+                pickup_count += task.num_items
+                if task.parent_task_id is not None:
+                    pickup_ready_parents.add(task.parent_task_id)
 
         for task in self.overflow_queue:
             if getattr(task, "leg_type", "full") == "pickup":
-                if pickup_count < available_slots:
+                if pickup_count + task.num_items <= available_slots:
                     promoted.append(task)
-                    pickup_count += 1
+                    pickup_count += task.num_items  # count items, not tasks
                     if task.parent_task_id is not None:
                         pickup_ready_parents.add(task.parent_task_id)
                 else:
@@ -242,15 +254,15 @@ class RobotState:
         deferred_parent_ids = set()
         pickup_count = 0
 
-        # Count current pickup if applicable
+        # Count current pickup if applicable (in items, not task count)
         if getattr(current_task, "leg_type", "full") == "pickup":
-            pickup_count = 1
+            pickup_count = current_task.num_items
 
         for task in remaining:
             if getattr(task, "leg_type", "full") == "pickup":
-                if pickup_count < available_slots:
+                if pickup_count + task.num_items <= available_slots:
                     kept.append(task)
-                    pickup_count += 1
+                    pickup_count += task.num_items
                 else:
                     self.overflow_queue.append(task)
                     if task.parent_task_id is not None:

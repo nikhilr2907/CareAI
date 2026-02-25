@@ -59,7 +59,7 @@ class GAPOPPO:
         department_embedding_dim=16,
         shift_embedding_dim=4,
         day_type_embedding_dim=4,
-        robot_feat_dim=20,
+        robot_feat_dim=19,
         task_feat_dim=15,
         queue_feat_dim=16,
         sku_feat_dim=None,
@@ -570,6 +570,13 @@ class GAPOPPO:
         old_logprobs = torch.tensor(memory.logprobs, dtype=torch.float32).to(self.device)
         rewards_tensor = torch.tensor(memory.rewards, dtype=torch.float32).to(self.device)
 
+        # Normalize rewards by std only (preserves sign/ordering, bounds critic targets
+        # to the same scale as GAE values so baseline subtraction is effective).
+        # Mean-centering is intentionally skipped to preserve the reward signal direction.
+        rewards_std = rewards_tensor.std()
+        if rewards_std > 1e-8:
+            rewards_tensor = rewards_tensor / rewards_std
+
         # Convert state dicts to tensors
         state_dict_tensors = [
             self._state_dict_to_tensor(sd) for sd in memory.state_dicts
@@ -586,7 +593,7 @@ class GAPOPPO:
 
         # Compute state values for all states
         with torch.no_grad():
-            _, values, _ = self.policy.evaluate_actions(
+            _, values, _, _ = self.policy.evaluate_actions(
                 state_dict_tensors,
                 old_actions,
                 robot_mask_tensors
@@ -596,7 +603,7 @@ class GAPOPPO:
             # Get value of next state for bootstrapping
             if next_state_dict is not None:
                 next_state_tensor = self._state_dict_to_tensor(next_state_dict)
-                _, next_value, _ = self.policy.evaluate_actions(
+                _, next_value, _, _ = self.policy.evaluate_actions(
                     [next_state_tensor],
                     torch.zeros(1, dtype=torch.long).to(self.device),
                     [robot_mask_tensors[-1] if robot_mask_tensors else None]
@@ -613,13 +620,9 @@ class GAPOPPO:
             memory.is_terminals
         )
 
-        # Compute returns for critic training
+        # Compute returns for critic training (same scale as GAE values after reward
+        # normalization above, so baseline subtraction is statistically meaningful)
         returns = advantages + values
-        if self.normalize_returns:
-            returns_std = returns.std()
-            if returns_std < self.min_adv_std:
-                returns_std = torch.tensor(self.min_adv_std, device=returns.device)
-            returns = (returns - returns.mean()) / (returns_std + 1e-7)
 
         # Normalize advantages
         adv_std = advantages.std()
@@ -631,8 +634,8 @@ class GAPOPPO:
 
         # Optimize policy for K epochs
         for epoch in range(self.K_epochs):
-            # Evaluate actions
-            logprobs, state_values, dist_entropy = self.policy.evaluate_actions(
+            # Evaluate actions — raw_logits are live (gradient-connected) for de-biasing
+            logprobs, state_values, dist_entropy, raw_logits = self.policy.evaluate_actions(
                 state_dict_tensors,
                 old_actions,
                 robot_mask_tensors
@@ -657,9 +660,12 @@ class GAPOPPO:
             # Entropy bonus (exploration)
             entropy_loss = -self.entropy_coef * dist_entropy.mean()
 
-            # De-biasing loss
+            # De-biasing loss — pass live logits so gradients reach GNN encoders
             if self.use_debiasing:
-                debias_loss, debias_breakdown = self.policy.compute_debias_loss()
+                fresh_logits_list = list(raw_logits.unbind(0))
+                debias_loss, debias_breakdown = self.policy.compute_debias_loss(
+                    fresh_logits=fresh_logits_list
+                )
             else:
                 debias_loss = torch.tensor(0.0)
                 debias_breakdown = {}
@@ -829,7 +835,7 @@ def test_gapo_ppo():
     ppo = GAPOPPO(
         node_feat_dim=5,
         edge_feat_dim=21,
-        robot_feat_dim=20,
+        robot_feat_dim=19,
         task_feat_dim=15,
         hidden_dim=64,
         lr=0.0003,
@@ -843,7 +849,7 @@ def test_gapo_ppo():
     state_dict = env.reset()
 
     for step in range(10):
-        mask = env.get_action_mask()
+        mask = np.ones(env.num_robots, dtype=bool)
         action = ppo.select_action(state_dict, memory, mask)
 
         next_state_dict, reward, done, info = env.step(action)

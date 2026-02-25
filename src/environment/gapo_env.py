@@ -13,7 +13,7 @@ from .graph.graph_state import GraphState
 from .graph.hospital_config import HospitalConfig
 from .robot.robot_state import RobotState, create_default_robot
 from .robot.robot_simulator import RobotSimulator
-from .tasks.task_state import Task, TaskQueue, rank_tasks
+from .tasks.task_state import Task
 from .tasks.task_generator import (
     generate_inventory_tasks,
     generate_random_ad_hoc_tasks,
@@ -40,7 +40,10 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         num_nodes=10,
         max_episode_time=28800.0,
         timestep_seconds=1.0,
-        hospital_config: Optional[HospitalConfig] = None
+        hospital_config: Optional[HospitalConfig] = None,
+        stochastic_tasks_per_hour: float = 2.0,
+        max_stochastic_tasks_per_hour: int = 2,
+        initial_stochastic_tasks: int = 0
     ):
         super(GAPOTaskAssignmentEnv, self).__init__()
 
@@ -72,11 +75,18 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         # Task management (continuous operation)
         self.pending_tasks = []  # Tasks waiting for assignment
         self.completed_tasks = []  # Tasks that have been completed
+        # Fallback-only heuristic queue ranker.
+        # Default OFF so training/deployment can use learned ranking as source of truth.
+        self.use_heuristic_pending_rank = False
 
         # Time tracking
         self.current_time = 0.0
         self.last_inventory_check = 0.0
         self.inventory_check_interval = 10.0  # Check every 10 seconds
+        self.stochastic_tasks_per_hour = max(0.0, float(stochastic_tasks_per_hour))
+        self.max_stochastic_tasks_per_hour = max(0, int(max_stochastic_tasks_per_hour))
+        self.initial_stochastic_tasks = max(0, int(initial_stochastic_tasks))
+        self._stochastic_task_timestamps = []
 
         # Episode metrics
         self.episode_stockouts = 0
@@ -132,24 +142,28 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self.current_time = 0.0
         self.last_inventory_check = 0.0
         self.graph_state.current_time = self.current_time
+        self._stochastic_task_timestamps = []
 
-        # Generate initial inventory tasks
+        # Generate initial inventory tasks (no existing tasks yet at reset)
         new_tasks, self.next_task_id = generate_inventory_tasks(
-            self.graph_state, self.current_time, self.next_task_id
+            self.graph_state, self.current_time, self.next_task_id,
+            existing_task_keys=set()
         )
         self.pending_tasks.extend(new_tasks)
 
-        # Add some ad-hoc tasks
-        ad_hoc_tasks, self.next_task_id = generate_random_ad_hoc_tasks(
-            self.graph_state, self.current_time, 2, self.next_task_id
-        )
-        self.pending_tasks.extend(ad_hoc_tasks)
+        # Optional initial stochastic tasks, bounded by hourly cap.
+        if self.initial_stochastic_tasks > 0:
+            initial_budget = self._remaining_stochastic_task_budget()
+            initial_count = min(self.initial_stochastic_tasks, initial_budget)
+            if initial_count > 0:
+                ad_hoc_tasks, self.next_task_id = generate_random_ad_hoc_tasks(
+                    self.graph_state, self.current_time, initial_count, self.next_task_id
+                )
+                if ad_hoc_tasks:
+                    self.pending_tasks.extend(ad_hoc_tasks)
+                    self._record_stochastic_tasks(len(ad_hoc_tasks))
 
-        # Rank pending tasks by urgency
-        if self.pending_tasks:
-            task_queue = TaskQueue(tasks=self.pending_tasks)
-            ranked = rank_tasks(task_queue, self.current_time)
-            self.pending_tasks = ranked
+        self._apply_fallback_pending_rank()
 
         # Reset metrics
         self.episode_stockouts = 0
@@ -186,26 +200,18 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         # 2. Generate tasks from low-stock nodes
         if self.current_time - self.last_inventory_check >= self.inventory_check_interval:
             new_tasks, self.next_task_id = generate_inventory_tasks(
-                self.graph_state, self.current_time, self.next_task_id
+                self.graph_state, self.current_time, self.next_task_id,
+                existing_task_keys=self._build_covered_replenishment_keys()
             )
 
             if new_tasks:
                 self.pending_tasks.extend(new_tasks)
-
-                # Re-rank all pending tasks
-                task_queue = TaskQueue(tasks=self.pending_tasks)
-                ranked = rank_tasks(task_queue, self.current_time)
-                self.pending_tasks = ranked
+                self._apply_fallback_pending_rank()
 
             self.last_inventory_check = self.current_time
 
-        # Occasionally add random ad-hoc tasks for testing
-        if np.random.random() < 0.1:  # 10% chance per step
-            ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
-                self.graph_state, self.current_time, 1, self.next_task_id
-            )
-            if ad_hoc:
-                self.pending_tasks.extend(ad_hoc)
+        # Stochastic task creation, rate-controlled and hard-capped per simulated hour.
+        self._generate_stochastic_tasks(dt)
 
         # 3. Update edge congestion before motion (for speed adjustments)
         self._update_edge_congestion()
@@ -247,6 +253,61 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         }
 
         return state_dict, reward, done, info
+
+    def _apply_fallback_pending_rank(self):
+        """
+        Optional heuristic ranking for pending queue.
+
+        This is intentionally fallback-only. Keep disabled when using learned ranking.
+        """
+        if not self.use_heuristic_pending_rank or not self.pending_tasks:
+            return
+        # Lazy import keeps heuristic ranking dependency out of the default path.
+        from .tasks.task_state import TaskQueue, rank_tasks
+
+        task_queue = TaskQueue(tasks=self.pending_tasks)
+        self.pending_tasks = rank_tasks(task_queue, self.current_time)
+
+    def _prune_stochastic_task_history(self):
+        """Keep only stochastic task timestamps within the last simulated hour."""
+        cutoff = self.current_time - 3600.0
+        self._stochastic_task_timestamps = [
+            t for t in self._stochastic_task_timestamps if t >= cutoff
+        ]
+
+    def _remaining_stochastic_task_budget(self) -> int:
+        """Remaining stochastic tasks allowed in the rolling 1-hour window."""
+        self._prune_stochastic_task_history()
+        return max(0, self.max_stochastic_tasks_per_hour - len(self._stochastic_task_timestamps))
+
+    def _record_stochastic_tasks(self, count: int):
+        """Record creation timestamps for stochastic tasks."""
+        if count <= 0:
+            return
+        self._stochastic_task_timestamps.extend([self.current_time] * count)
+        self._prune_stochastic_task_history()
+
+    def _generate_stochastic_tasks(self, dt: float):
+        """
+        Generate ad-hoc stochastic tasks using a rate (tasks/hour) and a hard hourly cap.
+        """
+        remaining_budget = self._remaining_stochastic_task_budget()
+        if remaining_budget <= 0 or self.stochastic_tasks_per_hour <= 0.0:
+            return
+
+        expected_events = self.stochastic_tasks_per_hour * max(float(dt), 0.0) / 3600.0
+        p_create = min(max(expected_events, 0.0), 1.0)
+        if np.random.random() >= p_create:
+            return
+
+        num_new = min(1, remaining_budget)
+        ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
+            self.graph_state, self.current_time, num_new, self.next_task_id
+        )
+        if ad_hoc:
+            self.pending_tasks.extend(ad_hoc)
+            self._record_stochastic_tasks(len(ad_hoc))
+            self._apply_fallback_pending_rank()
 
     def assign_task_to_robot(self, robot_id: int, task: Task) -> bool:
         """
@@ -416,10 +477,17 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             # If robot is idle but has queued tasks, plan the next valid task
             if (not simulator.path_queue and simulator.current_target_node is None and
                     robot.current_task is not None):
-                while (robot.current_task and robot.current_task.leg_type == "dropoff" and
+                _max_demotes = len(robot.task_queue)
+                _demotes = 0
+                while (_demotes < _max_demotes and
+                        robot.current_task and robot.current_task.leg_type == "dropoff" and
                         not robot.is_pickup_complete(robot.current_task.parent_task_id)):
                     robot.demote_current_task()
-                if robot.current_task:
+                    _demotes += 1
+                if robot.current_task and not (
+                    robot.current_task.leg_type == "dropoff" and
+                    not robot.is_pickup_complete(robot.current_task.parent_task_id)
+                ):
                     self._plan_path_for_robot(robot, robot.current_task, simulator)
 
     def _check_task_completions(self) -> List[Task]:
@@ -471,9 +539,17 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
                 # If robot has more tasks, plan next one
                 if robot.current_task:
-                    while robot.current_task and robot.current_task.leg_type == "dropoff" and not robot.is_pickup_complete(robot.current_task.parent_task_id):
+                    _max_demotes = len(robot.task_queue)
+                    _demotes = 0
+                    while (_demotes < _max_demotes and
+                            robot.current_task and robot.current_task.leg_type == "dropoff" and
+                            not robot.is_pickup_complete(robot.current_task.parent_task_id)):
                         robot.demote_current_task()
-                    if robot.current_task:
+                        _demotes += 1
+                    if robot.current_task and not (
+                        robot.current_task.leg_type == "dropoff" and
+                        not robot.is_pickup_complete(robot.current_task.parent_task_id)
+                    ):
                         self._plan_path_for_robot(robot, robot.current_task, simulator)
 
         return completed_tasks
@@ -687,7 +763,6 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 target_node = remaining_path[0] if remaining_path else -1
                 is_blocked = 1.0 if (has_path and robot.telemetry.velocity_ms < 0.05) else 0.0
                 feat = [
-                    float(robot.robot_id),
                     robot.telemetry.x,
                     robot.telemetry.y,
                     robot.telemetry.velocity_ms,
@@ -698,7 +773,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                     robot.telemetry.edge_progress,
                     robot.telemetry.eta_to_next_node,
                     float(robot.num_queued_tasks),
-                    float(robot.telemetry.current_capacity),
+                    float(robot.effective_load),   # effective load: physical + committed pickups
                     heading_sin,
                     heading_cos,
                     velocity_ratio,
@@ -711,7 +786,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 robot_features.append(feat)
                 robot_positions.append([robot.telemetry.x, robot.telemetry.y])
             else:
-                robot_features.append(np.zeros(20))
+                robot_features.append(np.zeros(19))
                 robot_positions.append([0.0, 0.0])
 
         robot_features = np.array(robot_features, dtype=np.float32)
@@ -835,87 +910,6 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 return i
         return None
 
-    def get_action_mask(self) -> np.ndarray:
-        """Get boolean mask for valid actions."""
-        mask = np.ones(self.num_robots, dtype=bool)
-
-        if self.current_task_index >= len(self.tasks):
-            mask[:] = False
-            return mask
-
-        current_task = self.tasks[self.current_task_index]
-
-        for i, robot in enumerate(self.robots):
-            if not robot.is_available:
-                mask[i] = False
-                continue
-
-            if robot.current_capacity + current_task.num_items > robot.max_capacity:
-                mask[i] = False
-                continue
-
-            if robot.current_node_index is not None:
-                _, distance = dijkstra_shortest_path(
-                    robot.current_node_index,
-                    current_task.to_location_index,
-                    self.graph_state,
-                    len(self.graph_state.nodes),
-                    edge_cost_manager=self.edge_cost_manager,
-                    all_robots=self.robots,
-                )
-                battery_needed = distance * 0.001
-                if robot.battery_level < battery_needed:
-                    mask[i] = False
-
-        return mask
-
-    # ===== HELPER METHODS (same as V2) =====
-    def _assign_task_to_robot(self, robot, task):
-        """Assign task to robot."""
-        simulator = self.robot_simulators[robot.robot_id]
-
-        start_node = robot.current_node_index
-        if start_node is None:
-            start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
-
-        path, distance = dijkstra_shortest_path(
-            start_node, task.to_location_index, self.graph_state, len(self.graph_state.nodes),
-            edge_cost_manager=self.edge_cost_manager, all_robots=self.robots,
-        )
-
-        simulator.set_path(path, task.task_id, task.num_items)
-
-        robot.queued_tasks.append(task.task_id)
-        robot.planned_path = path
-        robot.target_node_index = task.to_location_index
-        robot.travel_start_time = self.current_time
-
-        task.is_assigned = True
-        task.assigned_robot_id = robot.robot_id
-
-        self.episode_assignments.append({
-            'time': self.current_time,
-            'robot_id': robot.robot_id,
-            'task_id': task.task_id
-        })
-
-    def _update_robot_telemetry(self, time_delta):
-        """Update robot simulators."""
-        for simulator, robot_state in zip(self.robot_simulators, self.robots):
-            telemetry = simulator.update(time_delta)
-            telemetry.timestamp = self.current_time
-            robot_state.update_telemetry(telemetry)
-
-            if telemetry.is_at_node and robot_state.queued_tasks:
-                task = self.tasks[robot_state.queued_tasks[0]]
-
-                if telemetry.current_node_index == task.to_location_index:
-                    dest_node = self.graph_state.nodes[task.to_location_index]
-                    dest_node.restock(task.num_items)
-
-                    robot_state.queued_tasks.pop(0)
-                    simulator.complete_task(task.num_items)
-
     def _update_edge_congestion(self):
         """Update edge congestion."""
         for edge in self.graph_state.edges:
@@ -937,52 +931,6 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         for edge_idx, edge in enumerate(self.graph_state.edges):
             edge.approaching_robot_count = self._count_approaching_robots(edge_idx)
-
-    def _check_stockouts(self):
-        """Check stockouts and return penalty."""
-        penalty = 0.0
-
-        for node in self.graph_state.nodes:
-            if node.consumption_rate > 0:
-                if node.is_stockout:
-                    penalty -= 100.0
-                    self.episode_stockouts += 1
-                elif node.time_to_stockout < 0.5:
-                    penalty -= 20.0 * (0.5 - node.time_to_stockout)
-
-        self.cumulative_stockout_penalty += penalty
-        return penalty
-
-    def _compute_assignment_reward(self, robot, task):
-        """Compute assignment reward."""
-        reward = 5.0
-
-        start_node = robot.current_node_index or 0
-        path, distance = dijkstra_shortest_path(
-            start_node, task.to_location_index, self.graph_state, len(self.graph_state.nodes),
-            edge_cost_manager=self.edge_cost_manager, all_robots=self.robots,
-        )
-        reward -= 0.1 * distance
-
-        if robot.battery_level < 0.3:
-            reward -= 3.0
-
-        if robot.current_capacity + task.num_items <= robot.max_capacity:
-            capacity_ratio = (robot.current_capacity + task.num_items) / robot.max_capacity
-            reward += 2.0 * capacity_ratio
-        else:
-            reward -= 20.0
-
-        reward += task.manual_priority * 0.5
-
-        if task.time_to_stockout < 1.0:
-            reward += 5.0 * (1.0 - task.time_to_stockout)
-
-        return reward
-
-    def _get_available_robots(self):
-        """Get available robots."""
-        return [r for r in self.robots if r.is_available]
 
     def _find_nearest_node(self, x, y):
         """Find nearest node."""
@@ -1006,6 +954,33 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         if all_records:
             self.edge_cost_manager.add_traversal_records(all_records)
+
+    def _build_covered_replenishment_keys(self) -> set:
+        """
+        Return a set of (sku_id, dest_node_idx) tuples that are already covered
+        by a pending or in-flight replenishment task, so the inventory check
+        does not create duplicates.
+
+        Non-SKU nodes use (None, dest_node_idx) as the key.
+        """
+        keys = set()
+        # Pending tasks (not yet assigned)
+        for task in self.pending_tasks:
+            if task.task_type == 'replenishment':
+                keys.add((task.sku_id, task.to_location_index))
+
+        # Tasks already assigned to robots (in main queue and overflow)
+        for robot in self.robots:
+            for task in robot.task_queue:
+                if task.task_type == 'replenishment':
+                    # Use the dropoff leg (or full) as the canonical demand signal
+                    if getattr(task, 'leg_type', 'full') in ('dropoff', 'full'):
+                        keys.add((task.sku_id, task.to_location_index))
+            for task in robot.overflow_queue:
+                if task.task_type == 'replenishment':
+                    if getattr(task, 'leg_type', 'full') in ('dropoff', 'full'):
+                        keys.add((task.sku_id, task.to_location_index))
+        return keys
 
     def _count_approaching_robots(self, edge_index: int, exclude_robot_id: int = -1) -> int:
         """Count robots with the given edge in their planned path but not currently on it."""

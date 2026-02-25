@@ -11,7 +11,6 @@ from pathlib import Path
 import os
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
-from src.environment.graph.hospital_config import HospitalConfig
 from src.deployment.robot_bridge import MockRobotBridge
 from src.environment.tasks.task_generator import generate_inventory_tasks, update_inventory_levels
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO
@@ -32,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Hospital robot simulation runner")
     parser.add_argument("--use-trained", action="store_true", help="Use trained policy")
     parser.add_argument("--checkpoint", type=str, default="outputs/gapo_latest/checkpoints/gapo_final.pth")
+    parser.add_argument("--config", type=str, default="configs/revised_hospital_config_v3.json",
+                        help="Path to hospital config JSON (default: revised_hospital_config_v3.json)")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--num-robots", type=int, default=5)
     parser.add_argument("--num-nodes", type=int, default=10)
@@ -49,19 +50,17 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
-    hospital_config = None
+
+    # Config resolution: --config flag > HOSPITAL_CONFIG_NAME env var > fallback to procedural
     config_path = None
     config_name_override = os.environ.get("HOSPITAL_CONFIG_NAME")
     if config_name_override:
         config_path = Path("configs") / config_name_override
-    else:
-        configs_dir = Path("configs")
-        if configs_dir.exists():
-            config_files = sorted(configs_dir.glob("*.json"))
-            if config_files:
-                config_path = config_files[0]
+    elif args.config:
+        config_path = Path(args.config)
 
     if config_path and config_path.exists():
+        print(f"Loading hospital config: {config_path}")
         env, _ = create_env_from_config_file(
             str(config_path),
             num_robots=args.num_robots,
@@ -70,15 +69,12 @@ def main():
         )
         env.reset()
     else:
-        num_nodes = args.num_nodes
-        if hospital_config is not None:
-            num_nodes = len(hospital_config.nodes)
+        print(f"Config not found at '{config_path}', falling back to procedural {args.num_nodes}-node layout")
         env = GAPOTaskAssignmentEnv(
             num_robots=args.num_robots,
-            num_nodes=num_nodes,
+            num_nodes=args.num_nodes,
             max_episode_time=args.max_runtime,
             timestep_seconds=args.cycle_time,
-            hospital_config=hospital_config
         )
         env.reset()
 
@@ -94,15 +90,28 @@ def main():
         edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
         sku_embed_dim = 16
         node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
+
+        # Peek at checkpoint metadata to reconstruct the exact architecture used at training time
+        checkpoint_meta = torch.load(args.checkpoint, map_location="cpu")
+        enable_task_creation_actor = checkpoint_meta.get("enable_task_creation_actor", False)
+
         ppo = GAPOPPO(
             node_continuous_dim=node_continuous_dim,
             num_node_types=4,
+            num_departments=10,
+            num_shift_periods=4,
+            num_day_types=2,
+            node_type_embedding_dim=8,
+            department_embedding_dim=16,
+            shift_embedding_dim=4,
+            day_type_embedding_dim=4,
             edge_feat_dim=edge_feat_dim,
-            robot_feat_dim=20,
+            robot_feat_dim=19,
             task_feat_dim=15,
             queue_feat_dim=16,
             sku_feat_dim=sku_feat_dim,
             sku_embed_dim=sku_embed_dim,
+            enable_task_creation_actor=enable_task_creation_actor,
             device=args.device
         )
         ppo.load(args.checkpoint)
