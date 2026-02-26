@@ -481,7 +481,7 @@ class GAPOPPO:
                 old_actions,
                 robot_mask_tensors
             )
-            values = values.squeeze()
+            values = values.squeeze(-1)
 
             # Get value of next state for bootstrapping
             if next_state_dict is not None:
@@ -526,7 +526,7 @@ class GAPOPPO:
                 robot_mask_tensors
             )
 
-            state_values = state_values.squeeze()
+            state_values = state_values.squeeze(-1)
 
             # Build per-memory-index context cache for ranking loss.
             # graph_emb_batch[i] / fleet_emb_batch[i] correspond to state_dict_tensors[i].

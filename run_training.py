@@ -411,7 +411,7 @@ def main():
                         state_tensor = ppo._state_dict_to_tensor(state_dict)
                         mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
                         with torch.no_grad():
-                            logprob, _, _, _ = ppo.policy_old.evaluate_actions(
+                            logprob, _, _, _, _, _ = ppo.policy_old.evaluate_actions(
                                 [state_tensor],
                                 torch.tensor([action], dtype=torch.long).to(ppo.device),
                                 [mask_tensor]
@@ -553,14 +553,17 @@ def main():
         # Update policy
         next_state_dict = state_dict
         print(f">>> PPO update (buffer={buffer_size})...", flush=True)
-        try:
-            ppo.update(memory, next_state_dict)
-        except Exception as e:
-            print(f"!!! PPO UPDATE ERROR at iteration {iteration}: {type(e).__name__}: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            print(f"!!! Buffer info: {len(memory.actions)} actions, {len(memory.state_dicts)} states", flush=True)
-            raise
+        if buffer_size == 0:
+            print("  Skipping PPO update: empty buffer (no assignments this iteration)", flush=True)
+        else:
+            try:
+                ppo.update(memory, next_state_dict)
+            except Exception as e:
+                print(f"!!! PPO UPDATE ERROR at iteration {iteration}: {type(e).__name__}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                print(f"!!! Buffer info: {len(memory.actions)} actions, {len(memory.state_dicts)} states", flush=True)
+                raise
         memory.clear_memory()
         # Memory indices are now invalid; clear the task mapping so stale entries
         # from this rollout don't pollute the next one's credit attribution.

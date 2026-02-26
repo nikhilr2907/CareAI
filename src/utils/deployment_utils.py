@@ -184,7 +184,7 @@ def draw_nodes(screen, graph_state, bounds, width, height, font):
         "recovery": (245, 203, 145),
         "hub": (151, 218, 186),
     }
-    occupied_label_rects = []
+    node_draw_data = []
     for node in graph_state.nodes:
         cx, cy = _get_node_center(node)
         nw, nh = _get_node_size(node)
@@ -193,15 +193,19 @@ def draw_nodes(screen, graph_state, bounds, width, height, font):
         h = max(14, int(nh * 8))
         color = type_colors.get(node.node_type, (160, 160, 160))
         rect = pygame.Rect(x - w // 2, y - h // 2, w, h)
+        node_draw_data.append((node, x, y, w, h, color, rect))
+
+    for node, _, _, _, _, color, rect in node_draw_data:
         pygame.draw.rect(screen, color, rect, border_radius=6)
         pygame.draw.rect(screen, (112, 126, 140), rect, width=1, border_radius=6)
         if node.is_stockout:
             pygame.draw.rect(screen, (255, 86, 86), rect, 2, border_radius=6)
 
-        # Suppress raw internal node IDs (e.g. node_7) from the visual map.
-
-        # Draw name labels outside with collision-aware placement.
-        name_text = _short_label(_node_label(node))
+    # Place labels in a second pass so they avoid both node geometry and each other.
+    blocked_rects = [rect.inflate(10, 10) for _, _, _, _, _, _, rect in node_draw_data]
+    occupied_label_rects = []
+    for node, x, y, w, h, _, _ in sorted(node_draw_data, key=lambda t: (t[2], t[1])):
+        name_text = _short_label(_node_label(node), max_len=18)
         label = font.render(name_text, True, (37, 50, 63))
         lw, lh = label.get_size()
         candidates = [
@@ -211,30 +215,28 @@ def draw_nodes(screen, graph_state, bounds, width, height, font):
             (x - lw // 2, y + h // 2 + 8),
             (x + w // 2 + 8, y - h // 2 - lh - 6),
             (x + w // 2 + 8, y + h // 2 + 6),
+            (x - w // 2 - lw - 8, y - h // 2 - lh - 6),
+            (x - w // 2 - lw - 8, y + h // 2 + 6),
         ]
 
-        chosen = None
+        placed = False
         for lx, ly in candidates:
-            label_rect = pygame.Rect(lx - 3, ly - 2, lw + 6, lh + 4)
+            label_rect = pygame.Rect(lx - 2, ly - 1, lw + 4, lh + 2)
             if label_rect.left < 0 or label_rect.right > width:
                 continue
             if label_rect.top < 0 or label_rect.bottom > height:
                 continue
             if any(label_rect.colliderect(r) for r in occupied_label_rects):
                 continue
-            chosen = (lx, ly, label_rect)
+            if any(label_rect.colliderect(r) for r in blocked_rects):
+                continue
+            screen.blit(label, (lx, ly))
+            occupied_label_rects.append(label_rect)
+            placed = True
             break
-        if chosen is None:
-            lx, ly = candidates[0][0], candidates[0][1]
-            label_rect = pygame.Rect(lx - 3, ly - 2, lw + 6, lh + 4)
-        else:
-            lx, ly, label_rect = chosen
-
-        occupied_label_rects.append(label_rect)
-        pygame.draw.rect(screen, (248, 251, 254), label_rect, border_radius=4)
-        pygame.draw.rect(screen, (180, 190, 200), label_rect, width=1, border_radius=4)
-        pygame.draw.line(screen, (170, 180, 192), (x, y), (label_rect.centerx, label_rect.centery), 1)
-        screen.blit(label, (lx, ly))
+        if not placed:
+            # Skip labels when space is dense; avoids unreadable overlap.
+            continue
 
 
 def draw_tasks(screen, env, bounds, width, height):
