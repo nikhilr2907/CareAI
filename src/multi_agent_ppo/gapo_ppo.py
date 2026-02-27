@@ -75,7 +75,7 @@ class GAPOPPO:
         use_debiasing=True,
         lambda_debias=0.1,
         lambda_gae=0.95,
-        critic_coef: float = 0.02,
+        critic_coef: float = 0.5,
         entropy_coef: float = 0.01,
         min_adv_std: float = 1e-3,
         normalize_returns=True,
@@ -443,13 +443,6 @@ class GAPOPPO:
         old_logprobs = torch.tensor(memory.logprobs, dtype=torch.float32).to(self.device)
         rewards_tensor = torch.tensor(memory.rewards, dtype=torch.float32).to(self.device)
 
-        # Normalize rewards by std only (preserves sign/ordering, bounds critic targets
-        # to the same scale as GAE values so baseline subtraction is effective).
-        # Mean-centering is intentionally skipped to preserve the reward signal direction.
-        rewards_std = rewards_tensor.std()
-        if rewards_std > 1e-8:
-            rewards_tensor = rewards_tensor / rewards_std
-
         # Convert state dicts to tensors
         state_dict_tensors = [
             self._state_dict_to_tensor(sd) for sd in memory.state_dicts
@@ -491,27 +484,36 @@ class GAPOPPO:
                     torch.zeros(1, dtype=torch.long).to(self.device),
                     [robot_mask_tensors[-1] if robot_mask_tensors else None]
                 )
-                next_value = next_value.squeeze()
+                next_value = next_value.squeeze().to(self.device)
             else:
                 next_value = torch.tensor(0.0).to(self.device)
 
-        # Compute GAE advantages
-        advantages = self._compute_gae(
+        # Compute GAE advantages from raw rewards.
+        # Advantages and returns are kept on the raw reward scale here.
+        # The critic trains on raw-scale returns (correct value targets).
+        # The actor receives separately normalized advantages (see below).
+        raw_advantages = self._compute_gae(
             rewards_tensor,
             values,
             next_value,
             memory.is_terminals
         )
 
-        # Compute returns for critic training (same scale as GAE values after reward
-        # normalization above, so baseline subtraction is statistically meaningful)
-        returns = advantages + values
+        # Critic targets: raw advantage + baseline (= discounted return estimate).
+        # These are on the same scale as the rewards, which is what the critic should predict.
+        returns = (raw_advantages + values).detach()
 
-        # Normalize advantages
-        adv_std = advantages.std()
-        if adv_std < self.min_adv_std:
-            adv_std = torch.tensor(self.min_adv_std, device=advantages.device)
-        advantages = (advantages - advantages.mean()) / (adv_std + 1e-7)
+        # Normalize advantages for actor gradient only.
+        # Prevents high-variance rewards from dominating gradient magnitude.
+        # If the buffer has no meaningful signal (all rewards zero, adv_std below threshold),
+        # skip scaling to avoid amplifying random critic-init noise by min_adv_std.
+        adv_std = raw_advantages.std()
+        if adv_std > self.min_adv_std:
+            advantages = (raw_advantages - raw_advantages.mean()) / (adv_std + 1e-7)
+        else:
+            # No meaningful signal — just mean-center without scaling.
+            # Using min_adv_std as a floor here would amplify noise 100-1000x.
+            advantages = raw_advantages - raw_advantages.mean()
 
         self.logger.info(f"  Starting PPO update ({self.K_epochs} epochs)...")
 
@@ -605,6 +607,10 @@ class GAPOPPO:
                     'debias_loss': debias_loss.item() if self.use_debiasing else 0.0,
                     'clip_fraction': clip_fraction.item(),
                     'grad_norm': float(grad_norm),
+                    # Advantage diagnostics: low adv_std means sparse/no rewards this rollout
+                    'adv_std_raw': float(adv_std.item()),
+                    'returns_mean': float(returns.mean().item()),
+                    'returns_std': float(returns.std().item()),
                     **debias_breakdown
                 }
 

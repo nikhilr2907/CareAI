@@ -30,7 +30,8 @@ class StateDeltaDebiasing(nn.Module):
     def compute_loss(
         self,
         state_sequence: List[torch.Tensor],
-        action_sequence: List[int]
+        action_sequence: List[int],
+        device=None,
     ) -> torch.Tensor:
         """
         Compute de-biasing loss from state changes.
@@ -38,12 +39,14 @@ class StateDeltaDebiasing(nn.Module):
         Args:
             state_sequence: List of states [s_0, s_1, ..., s_T]
             action_sequence: List of actions [a_0, a_1, ..., a_{T-1}]
+            device: Target device for zero tensors (inferred from state_sequence if None)
 
         Returns:
             debias_loss: Scalar penalty for large state changes
         """
+        dev = (state_sequence[0].device if state_sequence else device) or torch.device('cpu')
         if len(state_sequence) < 2:
-            return torch.tensor(0.0)
+            return torch.zeros((), device=dev)
 
         state_deltas = []
 
@@ -57,7 +60,7 @@ class StateDeltaDebiasing(nn.Module):
             mean_delta = torch.mean(torch.stack(state_deltas))
             debias_loss = self.lambda_debias * mean_delta
         else:
-            debias_loss = torch.tensor(0.0)
+            debias_loss = torch.zeros((), device=dev)
 
         return debias_loss
 
@@ -77,7 +80,8 @@ class TemporalConsistencyDebiasing(nn.Module):
     def compute_loss(
         self,
         action_logits_sequence: List[torch.Tensor],
-        task_similarity_matrix: torch.Tensor
+        task_similarity_matrix: torch.Tensor,
+        device=None,
     ) -> torch.Tensor:
         """
         Penalize inconsistent action distributions for similar tasks.
@@ -85,12 +89,14 @@ class TemporalConsistencyDebiasing(nn.Module):
         Args:
             action_logits_sequence: List of action logits for each step
             task_similarity_matrix: [T, T] - pairwise task similarities
+            device: Target device for zero tensors (inferred from action_logits_sequence if None)
 
         Returns:
             consistency_loss: Scalar penalty for inconsistency
         """
+        dev = (action_logits_sequence[0].device if action_logits_sequence else device) or torch.device('cpu')
         if len(action_logits_sequence) < 2:
-            return torch.tensor(0.0)
+            return torch.zeros((), device=dev)
 
         T = len(action_logits_sequence)
         consistency_penalties = []
@@ -122,7 +128,7 @@ class TemporalConsistencyDebiasing(nn.Module):
                 torch.stack(consistency_penalties)
             )
         else:
-            consistency_loss = torch.tensor(0.0)
+            consistency_loss = torch.zeros((), device=dev)
 
         return consistency_loss
 
@@ -144,7 +150,8 @@ class PermutationInvarianceDebiasing(nn.Module):
     def compute_loss(
         self,
         policy_outputs: List[Tuple[torch.Tensor, torch.Tensor]],
-        original_assignments: List[Tuple[int, int]]
+        original_assignments: List[Tuple[int, int]],
+        device=None,
     ) -> torch.Tensor:
         """
         Compare policy outputs on different task orderings.
@@ -152,12 +159,14 @@ class PermutationInvarianceDebiasing(nn.Module):
         Args:
             policy_outputs: List of (state, action_logits) for each permutation
             original_assignments: List of (task_id, robot_id) from canonical order
+            device: Target device for zero tensors (inferred from policy_outputs if None)
 
         Returns:
             permutation_loss: Penalty for order-dependent decisions
         """
+        dev = (policy_outputs[0][1].device if policy_outputs else device) or torch.device('cpu')
         if len(policy_outputs) < 2:
-            return torch.tensor(0.0)
+            return torch.zeros((), device=dev)
 
         # Extract action distributions
         action_dists = [F.softmax(logits, dim=-1) for _, logits in policy_outputs]
@@ -239,10 +248,14 @@ class ComprehensiveDebiasing(nn.Module):
             total_loss: Combined de-biasing loss
             loss_breakdown: Dictionary with individual loss components
         """
+        # Infer device from action logits (always non-empty when called during training).
+        dev = action_logits_sequence[0].device if action_logits_sequence else torch.device('cpu')
+
         # 1. State delta loss
         state_delta_loss = self.state_delta_debias.compute_loss(
             state_sequence,
-            action_sequence
+            action_sequence,
+            device=dev,
         )
 
         # 2. Temporal consistency loss
@@ -252,7 +265,8 @@ class ComprehensiveDebiasing(nn.Module):
 
             consistency_loss = self.temporal_consistency_debias.compute_loss(
                 action_logits_sequence,
-                task_similarity
+                task_similarity,
+                device=dev,
             )
             similarity_threshold = 0.7
             upper_tri = torch.triu(task_similarity, diagonal=1)
@@ -260,7 +274,7 @@ class ComprehensiveDebiasing(nn.Module):
             sim_mean = float(upper_tri[upper_tri > 0].mean().item()) if (upper_tri > 0).any() else 0.0
             sim_max = float(upper_tri.max().item()) if upper_tri.numel() > 0 else 0.0
         else:
-            consistency_loss = torch.tensor(0.0)
+            consistency_loss = torch.zeros((), device=dev)
             similarity_threshold = 0.7
             similar_pairs = 0
             sim_mean = 0.0

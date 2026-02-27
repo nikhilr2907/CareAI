@@ -99,10 +99,6 @@ def parse_args():
                         help='Warmup iterations using heuristic/mild penalties (default: 200)')
     parser.add_argument('--warmup-mix', type=float, default=0.8,
                         help='Probability of heuristic action during warmup (default: 0.8)')
-    parser.add_argument('--warmup-reward-offset', type=float, default=0.1,
-                        help='Reward offset per step during warmup (default: 0.1)')
-    parser.add_argument('--warmup-penalty-scale', type=float, default=0.3,
-                        help='Scale negative rewards during warmup (default: 0.3)')
     parser.add_argument('--warmup-consumption-scale', type=float, default=0.6,
                         help='Scale consumption rates during warmup (default: 0.6)')
     parser.add_argument('--warmup-entropy-mult', type=float, default=2.0,

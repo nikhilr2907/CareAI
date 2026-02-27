@@ -97,6 +97,10 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self.episode_collisions = 0
         self.last_collision_count = 0
 
+        # Per-task completion credits from the most recent timestep (populated by
+        # _compute_timestep_reward, consumed by step() info dict and run_training.py).
+        self._last_per_task_credits: Dict[int, float] = {}
+
         # Proactive SKU task creation actor (#7 factorizer + #8 scorer)
         # Creates inventory-aware stochastic replenishment tasks instead of blind random.
         if use_task_creation_actor:
@@ -282,6 +286,12 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             'collisions': self.last_collision_count,
             'cumulative_reward': self.cumulative_reward,
             'edge_cost_model': self.edge_cost_manager.get_stats(),
+            # Per-task completion credits: {parent_task_id: reward}.
+            # Used by run_training.py to route rewards to the causal assignment slot.
+            'task_completion_credits': self._last_per_task_credits,
+            # Ambient monitoring stats (not in reward, just for logging).
+            'episode_stockouts': self.episode_stockouts,
+            'episode_collisions': self.episode_collisions,
         }
 
         return state_dict, reward, done, info
@@ -610,78 +620,73 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         """
         Compute reward for this timestep.
 
+        All rewards are per-task only — no ambient signals enter the training buffer.
+        Each completed task's reward is routed back to the memory slot of the action
+        that originally assigned it (via run_training.py's task_to_memory_idx mechanism).
+        The per-task credits are stored in self._last_per_task_credits for step() to
+        pass through the info dict.
+
+        Ambient environment stats (stockouts, congestion, collisions) are still tracked
+        as episode metrics for monitoring but are NOT included in the returned reward.
+
         Args:
             completed_tasks: List of tasks completed this timestep
 
         Returns:
-            Reward scalar
+            Total completion reward scalar (sum of per-task rewards)
         """
-        reward = 0.0
+        self._last_per_task_credits = {}
+        completion_time = self.current_time
+        total_reward = 0.0
 
-        # Reward shaping constants (tuned for stability)
-        completion_bonus = 10.0
-        replenishment_bonus = 6.0
-        backlog_penalty = 0.1
-        sku_stockout_penalty = 4.0
-        sku_low_stock_penalty = 1.5
-        low_stock_ratio = 0.2
-
-        # 1. Task completion rewards (no deadline-based spikes)
+        # Per-task completion rewards
         for task in completed_tasks:
-            reward += completion_bonus
+            task_reward = 10.0  # Base completion bonus
 
-            if task.task_type == 'replenishment' and task.leg_type == "dropoff":
+            # 1. Timeliness bonus/penalty (±5 to ±20)
+            margin = task.deadline - completion_time
+            if margin >= 0:
+                task_reward += min(5.0, 5.0 * margin / max(task.estimated_duration, 1.0))
+            else:
+                task_reward -= min(20.0, 5.0 * abs(margin) / max(task.estimated_duration, 1.0))
+
+            # 2. Replenishment dropoff: stock fill + preventive maintenance bonuses
+            if task.task_type == 'replenishment' and task.leg_type == 'dropoff':
                 to_node = self.graph_state.nodes[task.to_location_index]
+
+                # Capacity fill bonus: reward for delivering a large batch (+0 to +6)
                 capacity_ratio = task.num_items / max(to_node.max_stock, 1.0)
-                reward += replenishment_bonus * min(1.0, capacity_ratio)
+                task_reward += 6.0 * min(1.0, capacity_ratio)
 
-        # 2. Backlog penalty (discourages large queues without depending on raw age values)
-        backlog_size = len(self.pending_tasks)
-        if backlog_size > 0:
-            reward -= backlog_penalty * backlog_size
+                # Stock health bonus: bigger reward when stock was already healthy (preventive
+                # maintenance philosophy — keep things topped up before they get critical).
+                # sku_stock_level is captured at task creation time.
+                stock_ratio = task.sku_stock_level / max(task.sku_max_level, 1.0)
+                task_reward += 8.0 * stock_ratio  # +0 (was empty) to +8 (was fully stocked)
 
-        # 3. Per-SKU stockout/low-stock penalties (inventory-based)
+                # Timely prevention bonus: completed before projected stockout, scaled by
+                # stock health (timely delivery of well-stocked nodes earns more).
+                projected_stockout_time = task.arrival_time + task.time_to_stockout * 3600.0
+                if completion_time <= projected_stockout_time:
+                    task_reward += 4.0 * stock_ratio  # +0 to +4
+
+            parent_id = getattr(task, 'parent_task_id', None)
+            if parent_id is not None:
+                self._last_per_task_credits[parent_id] = task_reward
+            total_reward += task_reward
+
+        # ── Ambient monitoring (NOT included in reward) ─────────────────────────
+        # Track stockouts for episode metrics / info dict only.
         stockout_count = 0
         for node in self.graph_state.nodes:
             if not node.sku_inventory or not node.consumption_enabled:
                 continue
-            node_stockout = 0
-            low_stock_acc = 0.0
-            num_skus = max(len(node.sku_inventory), 1)
-            for sku_id, sku_data in node.sku_inventory.items():
-                stock = float(sku_data.get("stock", 0.0))
-                max_level = float(sku_data.get("max", 0.0))
-                if max_level <= 0:
-                    continue
-                ratio = stock / max_level
-                if stock <= 0:
-                    node_stockout += 1
-                elif ratio < low_stock_ratio:
-                    low_stock_acc += (low_stock_ratio - ratio) / max(low_stock_ratio, 1e-6)
-            if node_stockout > 0 or low_stock_acc > 0:
-                reward -= (sku_stockout_penalty * node_stockout + sku_low_stock_penalty * low_stock_acc) / num_skus
-                stockout_count += node_stockout
-
+            for sku_data in node.sku_inventory.values():
+                if float(sku_data.get("stock", 0.0)) <= 0:
+                    stockout_count += 1
         self.episode_stockouts = stockout_count
 
-        # 4. Load balancing bonus
-        if len(self.robots) > 0:
-            loads = [robot.current_load for robot in self.robots]
-            load_variance = np.var(loads)
-            reward -= 0.1 * load_variance
-
-        # 5. Congestion penalties (heavy)
-        congestion_penalty = 0.0
-        for edge in self.graph_state.edges:
-            num_active = len(edge.active_robot_ids)
-            if num_active > 0:
-                corridor_capacity = 2
-                if num_active > corridor_capacity:
-                    excess = num_active - corridor_capacity
-                    congestion_penalty += (excess ** 2) + excess
-        reward -= 2.0 * congestion_penalty
-
-        # 6. Collision penalty (robots too close)
+        # Track collisions for episode metrics / info dict only.
         collision_distance_m = 0.5
         collision_count = 0
         for i in range(len(self.robots)):
@@ -696,14 +701,10 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 dy = ri.telemetry.y - rj.telemetry.y
                 if (dx * dx + dy * dy) ** 0.5 < collision_distance_m:
                     collision_count += 1
-
-        if collision_count > 0:
-            reward -= 5.0 * collision_count
-
         self.episode_collisions += collision_count
         self.last_collision_count = collision_count
 
-        return reward
+        return total_reward
 
     def get_robot_availability_mask(self, task: Task) -> np.ndarray:
         """

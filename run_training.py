@@ -134,8 +134,6 @@ def main():
     reward_scale = args.reward_scale
     warmup_iters = args.warmup_iters
     warmup_mix = args.warmup_mix
-    warmup_reward_offset = args.warmup_reward_offset
-    warmup_penalty_scale = args.warmup_penalty_scale
     warmup_consumption_scale = args.warmup_consumption_scale
     warmup_entropy_mult = args.warmup_entropy_mult
     ranking_max_pairs_per_group = args.ranking_max_pairs_per_group
@@ -168,7 +166,7 @@ def main():
     logger.info(f"Critic Coef: {critic_coef}")
     logger.info(f"Entropy Coef: {entropy_coef}")
     logger.info(f"Min Advantage Std: {min_adv_std}")
-    logger.info(f"Warmup: iters={warmup_iters} mix={warmup_mix} reward_offset={warmup_reward_offset} penalty_scale={warmup_penalty_scale} consumption_scale={warmup_consumption_scale} entropy_mult={warmup_entropy_mult}")
+    logger.info(f"Warmup: iters={warmup_iters} mix={warmup_mix} consumption_scale={warmup_consumption_scale} entropy_mult={warmup_entropy_mult}")
     logger.info(f"Max Assignments Per Step: {max_assignments_per_step}")
     logger.info(
         f"Stochastic Tasks: rate_per_hour={stochastic_tasks_per_hour} "
@@ -311,6 +309,13 @@ def main():
     # Used to route task completion bonuses back to the decision that caused them,
     # rather than distributing them to whatever assignments happen at completion time.
     task_to_memory_idx: dict = {}
+    # Carry-over credit buffer: holds the original (s, a, logprob, mask) for every
+    # assigned task that has not yet completed.  Survives memory.clear_memory() so
+    # cross-rollout completions can be attributed to the correct causal tuple rather
+    # than being misrouted to unrelated current-step assignments.
+    open_assignments: dict = {}   # parent_task_id -> {state, action, logprob, mask, reward, born_iter}
+    closed_buffer: list = []      # completed open_assignment entries ready for next PPO update
+    OPEN_ASSIGNMENT_TTL = 5       # drop entries older than this many rollouts (stuck/lost tasks)
     running_reward = 0
     iteration_rewards = []
     config_rewards = []
@@ -351,6 +356,7 @@ def main():
         else:
             apply_consumption_scale(env, 1.0)
             ppo.entropy_coef = entropy_coef
+            
         iterations_on_current_config += 1
         iteration_reward = 0.0
         num_assignments = 0
@@ -449,6 +455,17 @@ def main():
                 # Record which memory slot this task was assigned from, so
                 # its completion bonus can be routed back here later.
                 task_to_memory_idx[task.task_id] = mem_idx_before
+                # Preserve the original (s, a, logprob) for cross-rollout credit.
+                # If the task completes after memory.clear_memory(), this entry
+                # is the only way to route the bonus to the causal decision.
+                open_assignments[task.task_id] = {
+                    'state':     state_dict,
+                    'action':    action,
+                    'logprob':   memory.logprobs[mem_idx_before],
+                    'mask':      robot_mask,
+                    'reward':    0.0,
+                    'born_iter': iteration,
+                }
                 state_dict = env._get_state_dict()
                 memory.rewards.append(0.0)
                 memory.is_terminals.append(False)
@@ -462,9 +479,8 @@ def main():
             state_dict, step_reward, done, info = env.step(dt=timesteps_per_decision)
 
             # --- Per-task completion credit attribution ---
-            # Constants must stay in sync with _compute_timestep_reward.
-            _COMPLETION_BONUS = 10.0
-            _REPLENISHMENT_BONUS = 6.0
+            # Credits are computed by _compute_timestep_reward() and returned via info.
+            # Each value is the full per-task reward (base + timeliness + stock bonuses).
             newly_completed = env.completed_tasks[prev_completed:]
 
             # Track completion time metrics
@@ -472,36 +488,12 @@ def main():
                 if task.arrival_time is not None:
                     iteration_completion_times.append(env.current_time - task.arrival_time)
 
-            # Compute per-task completion bonuses (mirrors _compute_timestep_reward logic)
-            task_completion_credits: dict = {}
-            total_completion_bonus = 0.0
-            for task in newly_completed:
-                bonus = _COMPLETION_BONUS
-                if task.task_type == 'replenishment' and task.leg_type == "dropoff":
-                    to_node = env.graph_state.nodes[task.to_location_index]
-                    capacity_ratio = task.num_items / max(to_node.max_stock, 1.0)
-                    bonus += _REPLENISHMENT_BONUS * min(1.0, capacity_ratio)
-                parent_id = getattr(task, 'parent_task_id', None)
-                if parent_id is not None:
-                    task_completion_credits[parent_id] = bonus
-                total_completion_bonus += bonus
-
-            # Systemic reward = step_reward minus completion bonuses (backlog, stockout,
-            # age penalties, load balance, congestion — all ambient/shared signals).
-            systemic_reward = step_reward - total_completion_bonus
-
-            # Apply clipping/scaling to systemic reward
-            if reward_clip is not None and reward_clip > 0:
-                systemic_reward = float(np.clip(systemic_reward, -reward_clip, reward_clip))
-            if iteration <= warmup_iters:
-                if systemic_reward < 0:
-                    systemic_reward *= warmup_penalty_scale
-                systemic_reward += warmup_reward_offset
-            systemic_reward *= reward_scale
+            # Retrieve per-task credits from env (computed in _compute_timestep_reward).
+            task_completion_credits: dict = info.get('task_completion_credits', {})
 
             # Route each completion bonus to the memory slot of the original assignment.
             # If the task was assigned in a previous rollout (memory cleared), fall back
-            # to distributing to current-step assignments.
+            # to the closed_buffer cross-rollout mechanism.
             for parent_id, bonus in task_completion_credits.items():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
@@ -512,49 +504,56 @@ def main():
                 iteration_reward += scaled_bonus
                 orig_idx = task_to_memory_idx.get(parent_id)
                 if orig_idx is not None and orig_idx < len(memory.rewards):
+                    # In-rollout completion: inject directly into the causal memory slot
+                    # and remove from open_assignments (no longer needed).
                     memory.rewards[orig_idx] += scaled_bonus
-                elif step_memory_indices:
-                    # Fallback: no valid memory slot (cross-rollout case)
-                    share = scaled_bonus / len(step_memory_indices)
-                    for idx in step_memory_indices:
-                        if idx < len(memory.rewards):
-                            memory.rewards[idx] += share
-                # If neither, credit is lost (step with no assignments, edge case)
-
-            # Distribute systemic reward equally across current-step assignments
-            if systemic_reward != 0 and step_memory_indices:
-                iteration_reward += systemic_reward
-                share = systemic_reward / len(step_memory_indices)
-                for idx in step_memory_indices:
-                    if idx < len(memory.rewards):
-                        memory.rewards[idx] += share
-            elif systemic_reward != 0 and len(memory.rewards) > 0:
-                # No assignments this step — spread ambient signal across the most recent
-                # window of entries (at most max_assignments_per_step entries back) rather
-                # than concentrating it all on a single arbitrary memory slot.
-                iteration_reward += systemic_reward
-                window = min(max_assignments_per_step, len(memory.rewards))
-                share = systemic_reward / window
-                for idx in range(len(memory.rewards) - window, len(memory.rewards)):
-                    memory.rewards[idx] += share
+                    open_assignments.pop(parent_id, None)
+                else:
+                    # Cross-rollout completion: retrieve the original (s, a, logprob)
+                    # tuple and defer it to the next PPO update as a terminal entry.
+                    # This preserves the causal (s, a) pair rather than misrouting
+                    # the bonus to unrelated current-step assignments.
+                    entry = open_assignments.pop(parent_id, None)
+                    if entry is not None:
+                        entry['reward'] += scaled_bonus
+                        closed_buffer.append(entry)
+                    # else: task predates open_assignments tracking → credit dropped
 
             if done:
                 state_dict = env.reset()
                 # Task IDs are reset on env.reset(), so clear the mapping to avoid
                 # routing completion bonuses to stale memory indices next episode.
                 task_to_memory_idx.clear()
+                # Episode boundary invalidates all open assignments: task IDs will
+                # be reused and robot/graph state is fully reset.
+                open_assignments.clear()
                 # Only mark terminal on true episode ends — rollout boundaries are NOT
                 # terminals (environment continues) so next_value bootstrap must flow through
                 if len(memory.is_terminals) > 0:
                     memory.is_terminals[-1] = True
+
+        # Inject carry-over completion entries from previous rollouts.
+        # Each entry holds the original (s, a, logprob) from when the task was
+        # assigned.  is_terminals=True makes GAE compute a single-step advantage
+        # (r - V(s)) for each entry without bootstrapping into the new rollout data,
+        # which is correct since the task is fully resolved at this point.
+        for entry in closed_buffer:
+            if iteration - entry['born_iter'] <= OPEN_ASSIGNMENT_TTL:
+                memory.state_dicts.append(entry['state'])
+                memory.actions.append(entry['action'])
+                memory.logprobs.append(entry['logprob'])
+                memory.rewards.append(entry['reward'])
+                memory.is_terminals.append(True)
+                memory.robot_masks.append(entry['mask'])
+        closed_buffer.clear()
 
         buffer_size = len(memory.actions)
 
         # Update policy
         next_state_dict = state_dict
         print(f">>> PPO update (buffer={buffer_size})...", flush=True)
-        if buffer_size == 0:
-            print("  Skipping PPO update: empty buffer (no assignments this iteration)", flush=True)
+        if buffer_size < 2:
+            print(f"  Skipping PPO update: buffer too small ({buffer_size} samples)", flush=True)
         else:
             try:
                 ppo.update(memory, next_state_dict)
@@ -568,6 +567,14 @@ def main():
         # Memory indices are now invalid; clear the task mapping so stale entries
         # from this rollout don't pollute the next one's credit attribution.
         task_to_memory_idx.clear()
+        # Prune open_assignments entries that have exceeded their TTL.
+        # These are tasks assigned but never completed (e.g. stuck robots).
+        stale_ids = [
+            pid for pid, e in open_assignments.items()
+            if iteration - e['born_iter'] > OPEN_ASSIGNMENT_TTL
+        ]
+        for pid in stale_ids:
+            open_assignments.pop(pid)
         # Metrics
         iteration_time = time.time() - iteration_start_time
         process_time_now = time.process_time()
