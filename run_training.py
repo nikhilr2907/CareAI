@@ -497,7 +497,7 @@ def main():
             for parent_id, bonus in task_completion_credits.items():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
-                    scaled_bonus = float(np.clip(scaled_bonus, 0.0, reward_clip))
+                    scaled_bonus = float(np.clip(scaled_bonus, -reward_clip, reward_clip))
                 # Route completion signal to task creation actor buffer (#7/#8 training)
                 if env.task_creation_actor is not None:
                     env.task_creation_actor.record_completion(parent_id, scaled_bonus)
