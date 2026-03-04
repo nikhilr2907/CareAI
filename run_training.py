@@ -111,10 +111,10 @@ def main():
     lr = args.lr
     actor_lr = args.actor_lr if args.actor_lr is not None else lr * 1.2
     critic_lr = args.critic_lr if args.critic_lr is not None else lr * 0.5
-    gamma = 1.0  # No intrinsic time preference; deadline/age penalties encode urgency.
-    # Also eliminates the per-assignment vs per-sim-second discount mismatch (gamma^10
-    # per 10-assignment step was 0.90 instead of 0.99). lambda_gae=0.95 still limits
-    # the effective advantage horizon to ~50 steps regardless.
+    gamma = 0.99  # Reduced from 1.0: bounded critic targets (vs unbounded undiscounted returns)
+    # so critic can calibrate. Also creates timing differentiation in advantages —
+    # fast completions valued more than slow ones. lambda_gae=0.95 still controls
+    # the effective advantage horizon.
     K_epochs = 4
     eps_clip = 0.2
     lambda_debias = 0.1
