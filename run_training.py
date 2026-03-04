@@ -371,8 +371,8 @@ def main():
         # Collect rollout_steps timesteps of experience
         for step in range(rollout_steps):
             total_timesteps += 1
-            if step % 10 == 0:  # Print every 10 steps
-                print(f"  Step {step}/{rollout_steps}", flush=True)
+            # if step % 10 == 0:  # Print every 10 steps
+            #     print(f"  Step {step}/{rollout_steps}", flush=True)
 
             # Re-rank pending tasks using context-aware scorer with stochastic ranking
             if env.pending_tasks:
