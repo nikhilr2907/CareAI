@@ -38,6 +38,7 @@ from src.utils.training_utils import (
     run_evaluation,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.policy_inspector import PolicyInspector
 
 
 def main():
@@ -109,7 +110,7 @@ def main():
     # GAPO parameters
     hidden_dim = args.hidden_dim
     num_attention_heads = 4
-    use_debiasing = not args.no_debiasing
+    use_debiasing = False  # DISABLED: Debiasing breaks urgency-ordered task allocation
 
     # PPO parameters
     lr = args.lr
@@ -306,6 +307,9 @@ def main():
         f"edge_cost={edge_cost_params:,} total={total_params:,} "
         f"trainable={trainable_params:,}"
     )
+
+    # Policy inspector for learning analysis
+    policy_inspector = PolicyInspector(ppo.policy, device=device)
 
     # Training metrics
     memory = Memory()
@@ -679,7 +683,18 @@ def main():
             config_rewards = []
             iterations_on_current_config = 0
 
-        # Logging
+        # Brief loss metrics (every iteration for audit)
+        loss_info_current = ppo.get_last_loss_info()
+        if loss_info_current:
+            logger.info(
+                f"[ITER {iteration}] Reward={iteration_reward:.2f} | "
+                f"Actor={loss_info_current.get('actor_loss', 0):.4f} | "
+                f"Clip={loss_info_current.get('clip_fraction', 0):.4f} | "
+                f"GradNorm={loss_info_current.get('grad_norm', 0):.2f} | "
+                f"Assigned={num_assignments} Pending={len(env.pending_tasks)}"
+            )
+
+        # Full logging
         if iteration % log_interval == 0:
             avg_reward = np.mean(iteration_rewards[-log_interval:])
             loss_info = ppo.get_last_loss_info()
@@ -731,14 +746,11 @@ def main():
 
             if loss_info:
                 logger.info(f"  Loss - Total: {loss_info.get('total_loss', 0):.4f} | Actor: {loss_info.get('actor_loss', 0):.4f} | Critic: {loss_info.get('critic_loss', 0):.4f} | Ranking: {loss_info.get('ranking_loss', 0):.4f}")
+                logger.info(f"  PPO Clip Fraction: {loss_info.get('clip_fraction', 'N/A'):.4f if isinstance(loss_info.get('clip_fraction'), (int, float)) else 'N/A'} | Grad Norm: {loss_info.get('grad_norm', 'N/A'):.4f if isinstance(loss_info.get('grad_norm'), (int, float)) else 'N/A'}")
                 if use_debiasing:
                     logger.info(f"  De-bias: {loss_info.get('debias_loss', 0):.4f} (delta: {loss_info.get('state_delta', 0):.4f}, cons: {loss_info.get('consistency', 0):.4f})")
-                if 'clip_fraction' in loss_info:
-                    logger.info(f"  PPO Clip Fraction: {loss_info.get('clip_fraction', 0):.4f}")
                 if 'entropy_loss' in loss_info:
                     logger.info(f"  Entropy Loss: {loss_info.get('entropy_loss', 0):.4f}")
-                if 'grad_norm' in loss_info:
-                    logger.info(f"  Grad Norm: {loss_info.get('grad_norm', 0):.4f}")
                 if use_debiasing and 'debias_sim_pairs' in loss_info:
                     logger.info(
                         f"  Debias Stats: steps={loss_info.get('debias_seq_len', 0)}, "
@@ -752,6 +764,12 @@ def main():
                     grad_norm_history.append(loss_info.get('grad_norm', 0))
                 if 'entropy_loss' in loss_info:
                     entropy_history.append(loss_info.get('entropy_loss', 0))
+
+                # Log policy learning state (weight stats, frozen params, learning signals)
+                try:
+                    policy_inspector.log_learning_state(logger, loss_info, iteration)
+                except Exception as e:
+                    logger.warning(f"  Policy inspection failed: {e}")
 
                 if clip_fraction_history:
                     clip_mean = float(np.mean(clip_fraction_history))
