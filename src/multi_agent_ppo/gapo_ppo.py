@@ -570,20 +570,25 @@ class GAPOPPO:
             )
             lambda_ranking = 0.05
 
-            # Total loss
-            loss = (
-                actor_loss
-                + (self.critic_coef * critic_loss)
-                + entropy_loss
-                + debias_loss
-                + (lambda_ranking * ranking_loss)
-            )
+            # Separate actor and critic gradient steps to prevent critic dominance
+            # (critic loss can be 100x larger, overwhelming actor updates)
 
-            # Take gradient step
+            # Actor step: policy + entropy + ranking (no critic)
+            actor_combined = actor_loss + entropy_loss + (lambda_ranking * ranking_loss)
             self.optimizer.zero_grad()
-            loss.backward()
+            actor_combined.backward(retain_graph=True)
             grad_norm = torch.nn.utils.clip_grad_norm_(list(self.policy.parameters()), 0.5)
             self.optimizer.step()
+
+            # Critic step: value function only
+            self.optimizer.zero_grad()
+            critic_scaled = self.critic_coef * critic_loss
+            critic_scaled.backward()
+            torch.nn.utils.clip_grad_norm_(list(self.policy.parameters()), 0.5)
+            self.optimizer.step()
+
+            # Total loss for logging only
+            loss = actor_combined + critic_scaled + debias_loss
 
             # Log losses for each epoch
             self.logger.info(

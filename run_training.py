@@ -508,6 +508,15 @@ def main():
             # Retrieve per-task credits from env (computed in _compute_timestep_reward).
             task_completion_credits: dict = info.get('task_completion_credits', {})
 
+            # Debug: Check if tasks are completing
+            if len(newly_completed) > 0 and len(task_completion_credits) > 0:
+                logger.debug(
+                    f"[DEBUG iter={iteration}] newly_completed={len(newly_completed)} "
+                    f"tasks, task_ids=[{', '.join(str(t.task_id) for t in newly_completed[:5])}...] | "
+                    f"completion_credits={len(task_completion_credits)}, "
+                    f"parent_ids=[{', '.join(str(p) for p in list(task_completion_credits.keys())[:5])}...]"
+                )
+
             # Route each completion bonus to the memory slot of the original assignment.
             # If the task was assigned in a previous rollout (memory cleared), fall back
             # to the closed_buffer cross-rollout mechanism.
@@ -521,6 +530,8 @@ def main():
                     (t for t in newly_completed if t.task_id == parent_id),
                     None
                 )
+                actual_completion_time = None
+                on_time = False
                 if completed_task is not None:
                     actual_completion_time = (
                         env.current_time - completed_task.arrival_time
@@ -530,11 +541,13 @@ def main():
                         completed_task.deadline is None or
                         env.current_time <= completed_task.deadline
                     )
-                    task_logger.log_completion(
-                        parent_id, scaled_bonus,
-                        actual_completion_time, on_time,
-                        env.current_time
-                    )
+
+                # Always log completion (even if task_id wasn't in assignment log)
+                task_logger.log_completion(
+                    parent_id, scaled_bonus,
+                    actual_completion_time, on_time,
+                    env.current_time
+                )
 
                 # Route completion signal to task creation actor buffer (#7/#8 training)
                 if env.task_creation_actor is not None:
@@ -565,6 +578,8 @@ def main():
                 # Episode boundary invalidates all open assignments: task IDs will
                 # be reused and robot/graph state is fully reset.
                 open_assignments.clear()
+                # Clear task logger metadata to avoid stale task_ids from previous episode
+                task_logger.task_metadata.clear()
                 # Only mark terminal on true episode ends — rollout boundaries are NOT
                 # terminals (environment continues) so next_value bootstrap must flow through
                 if len(memory.is_terminals) > 0:
@@ -746,7 +761,11 @@ def main():
 
             if loss_info:
                 logger.info(f"  Loss - Total: {loss_info.get('total_loss', 0):.4f} | Actor: {loss_info.get('actor_loss', 0):.4f} | Critic: {loss_info.get('critic_loss', 0):.4f} | Ranking: {loss_info.get('ranking_loss', 0):.4f}")
-                logger.info(f"  PPO Clip Fraction: {loss_info.get('clip_fraction', 'N/A'):.4f if isinstance(loss_info.get('clip_fraction'), (int, float)) else 'N/A'} | Grad Norm: {loss_info.get('grad_norm', 'N/A'):.4f if isinstance(loss_info.get('grad_norm'), (int, float)) else 'N/A'}")
+                clip_val = loss_info.get('clip_fraction', 0)
+                grad_val = loss_info.get('grad_norm', 0)
+                clip_str = f"{clip_val:.4f}" if isinstance(clip_val, (int, float)) else "N/A"
+                grad_str = f"{grad_val:.4f}" if isinstance(grad_val, (int, float)) else "N/A"
+                logger.info(f"  PPO Clip Fraction: {clip_str} | Grad Norm: {grad_str}")
                 if use_debiasing:
                     logger.info(f"  De-bias: {loss_info.get('debias_loss', 0):.4f} (delta: {loss_info.get('state_delta', 0):.4f}, cons: {loss_info.get('consistency', 0):.4f})")
                 if 'entropy_loss' in loss_info:

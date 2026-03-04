@@ -84,7 +84,14 @@ class TaskLogger:
                       sim_time: float):
         """Log task completion."""
         if task_id not in self.task_metadata:
-            return  # Task not in our log (maybe predates logging)
+            # Task not in our log (maybe predates logging), but still log the completion
+            self.logger.warning(
+                f"COMPLT task_id={task_id} [NO METADATA] sim_time={sim_time:.1f}s "
+                f"completion_reward={completion_reward:.4f} "
+                f"actual_time={actual_completion_time:.1f}s if actual_completion_time else '?' "
+                f"on_time={'YES' if on_time else 'LATE'}"
+            )
+            return
 
         meta = self.task_metadata[task_id]
         total_reward = meta['assignment_reward'] + completion_reward
@@ -98,12 +105,13 @@ class TaskLogger:
                 sku_info += f" reorder={meta['reorder_point']:.1f}"
 
         # Log completion event
+        actual_time_str = f"{actual_completion_time:.1f}s" if actual_completion_time is not None else "?"
         self.logger.info(
             f"COMPLT task_id={task_id} iter={meta['iteration']} sim_time={sim_time:.1f}s "
             f"robot={meta['assigned_robot']} location={meta['from_location_idx']}->{meta['to_location_idx'] or '?'} "
             f"time_from_assign={sim_time - meta['sim_time_assigned']:.1f}s "
             f"assign_reward={meta['assignment_reward']:.4f} completion_reward={completion_reward:.4f} "
-            f"total_reward={total_reward:.4f} actual_time={actual_completion_time:.1f}s "
+            f"total_reward={total_reward:.4f} actual_time={actual_time_str} "
             f"on_time={'YES' if on_time else 'LATE'} {sku_info}"
         )
 
