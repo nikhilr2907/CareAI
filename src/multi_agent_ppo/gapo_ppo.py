@@ -528,7 +528,7 @@ class GAPOPPO:
                 robot_mask_tensors
             )
 
-            state_values = state_values.squeeze(-1)
+            state_values = state_values.squeeze(-1).clone()
 
             # Build per-memory-index context cache for ranking loss.
             # graph_emb_batch[i] / fleet_emb_batch[i] correspond to state_dict_tensors[i].
@@ -543,7 +543,8 @@ class GAPOPPO:
 
             # Surrogate loss
             surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+            clipped_ratios = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip)
+            surr2 = clipped_ratios * advantages
 
             # Actor loss
             actor_loss = -torch.min(surr1, surr2).mean()

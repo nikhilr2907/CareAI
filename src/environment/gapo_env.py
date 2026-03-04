@@ -1009,24 +1009,61 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         does not create duplicates.
 
         Non-SKU nodes use (None, dest_node_idx) as the key.
+
+        For split tasks (pickup+dropoff legs), both legs are recognized as covering
+        the same destination demand. We extract destination from dropoff leg or from
+        the original pending task.
         """
         keys = set()
+
         # Pending tasks (not yet assigned)
         for task in self.pending_tasks:
             if task.task_type == 'replenishment':
                 keys.add((task.sku_id, task.to_location_index))
 
-        # Tasks already assigned to robots (in main queue and overflow)
+        # Build a map of parent_task_id -> destination for split tasks
+        # This lets us find the real destination even when only the pickup leg is in a robot queue
+        parent_to_destination = {}
+
         for robot in self.robots:
             for task in robot.task_queue:
                 if task.task_type == 'replenishment':
-                    # Use the dropoff leg (or full) as the canonical demand signal
-                    if getattr(task, 'leg_type', 'full') in ('dropoff', 'full'):
+                    parent_id = getattr(task, 'parent_task_id', None)
+                    if parent_id is not None:
+                        # Map parent to its real destination (from dropoff leg if available)
+                        leg_type = getattr(task, 'leg_type', 'full')
+                        if leg_type == 'dropoff':
+                            parent_to_destination[parent_id] = (task.sku_id, task.to_location_index)
+                        elif parent_id not in parent_to_destination:
+                            # Pickup leg: store placeholder, will be overwritten by dropoff if found
+                            parent_to_destination[parent_id] = (task.sku_id, None)
+
+            for task in robot.overflow_queue:
+                if task.task_type == 'replenishment':
+                    parent_id = getattr(task, 'parent_task_id', None)
+                    if parent_id is not None:
+                        leg_type = getattr(task, 'leg_type', 'full')
+                        if leg_type == 'dropoff':
+                            parent_to_destination[parent_id] = (task.sku_id, task.to_location_index)
+                        elif parent_id not in parent_to_destination:
+                            parent_to_destination[parent_id] = (task.sku_id, None)
+
+        # Now add all destinations for split tasks, skipping None destinations
+        for (sku_id, dest_idx) in parent_to_destination.values():
+            if dest_idx is not None:
+                keys.add((sku_id, dest_idx))
+
+        # Also add any unsplit tasks (leg_type='full')
+        for robot in self.robots:
+            for task in robot.task_queue:
+                if task.task_type == 'replenishment':
+                    if getattr(task, 'leg_type', 'full') == 'full':
                         keys.add((task.sku_id, task.to_location_index))
             for task in robot.overflow_queue:
                 if task.task_type == 'replenishment':
-                    if getattr(task, 'leg_type', 'full') in ('dropoff', 'full'):
+                    if getattr(task, 'leg_type', 'full') == 'full':
                         keys.add((task.sku_id, task.to_location_index))
+
         return keys
 
     def _count_approaching_robots(self, edge_index: int, exclude_robot_id: int = -1) -> int:
