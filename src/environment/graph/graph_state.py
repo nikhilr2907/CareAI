@@ -57,7 +57,7 @@ class GraphState:
                 corridor_width=1.9,
                 entry_point=entry_point,
                 exit_point=exit_point,
-                max_v_ms=1.0,
+                max_v_ms=0.5,
                 clutter_level=np.random.random() * 0.3,
                 active_robot_ids=[],
                 has_patient_bed=np.random.random() < 0.1
@@ -169,7 +169,7 @@ class GraphState:
                 corridor_width=1.9,
                 entry_point=entry_point,
                 exit_point=exit_point,
-                max_v_ms=1.0,
+                max_v_ms=0.5,
                 clutter_level=np.random.random() * 0.3,  # Random clutter 0-0.3
                 active_robot_ids=[],
                 has_patient_bed=np.random.random() < 0.1  # 10% chance of bed

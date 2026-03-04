@@ -20,7 +20,7 @@ class HospitalEdge:
     exit_point: Optional[Tuple[float, float]] = None   # (x,y) where corridor enters to_node boundary
 
     # Speed Constraints
-    max_v_ms: float = 1.0  # Max speed (1 m/s from specs) [cite: 583]
+    max_v_ms: float = 0.5  # Max speed (1 m/s from specs) [cite: 583]
 
     # Dynamic States (The 'State' part)
     clutter_level: float = 0.0  # 0.0 (clear) to 1.0 (blocked)

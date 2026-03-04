@@ -458,13 +458,16 @@ def main():
                 # Preserve the original (s, a, logprob) for cross-rollout credit.
                 # If the task completes after memory.clear_memory(), this entry
                 # is the only way to route the bonus to the causal decision.
+                feasibility = (task.deadline - env.current_time) / max(task.estimated_duration, 1.0) - 1.0
+                assignment_reward = 0.5 * max(-1.0, min(1.0, feasibility))
                 open_assignments[task.task_id] = {
-                    'state':     state_dict,
-                    'action':    action,
-                    'logprob':   memory.logprobs[mem_idx_before],
-                    'mask':      robot_mask,
-                    'reward':    0.0,
-                    'born_iter': iteration,
+                    'state':             state_dict,
+                    'action':            action,
+                    'logprob':           memory.logprobs[mem_idx_before],
+                    'mask':              robot_mask,
+                    'reward':            0.0,
+                    'assignment_reward': assignment_reward,
+                    'born_iter':         iteration,
                 }
                 state_dict = env._get_state_dict()
                 memory.rewards.append(0.0)
@@ -504,18 +507,18 @@ def main():
                 iteration_reward += scaled_bonus
                 orig_idx = task_to_memory_idx.get(parent_id)
                 if orig_idx is not None and orig_idx < len(memory.rewards):
-                    # In-rollout completion: inject directly into the causal memory slot
-                    # and remove from open_assignments (no longer needed).
-                    memory.rewards[orig_idx] += scaled_bonus
-                    open_assignments.pop(parent_id, None)
+                    # In-rollout completion: combine assignment_reward + completion bonus
+                    # into the causal memory slot, then remove from open_assignments.
+                    entry = open_assignments.pop(parent_id, None)
+                    a_rew = entry['assignment_reward'] if entry else 0.0
+                    memory.rewards[orig_idx] = a_rew + scaled_bonus
                 else:
-                    # Cross-rollout completion: retrieve the original (s, a, logprob)
-                    # tuple and defer it to the next PPO update as a terminal entry.
-                    # This preserves the causal (s, a) pair rather than misrouting
-                    # the bonus to unrelated current-step assignments.
+                    # Cross-rollout completion: combine assignment_reward + completion bonus
+                    # into the closed_buffer entry so the tuple is trained exactly once
+                    # with its full reward signal.
                     entry = open_assignments.pop(parent_id, None)
                     if entry is not None:
-                        entry['reward'] += scaled_bonus
+                        entry['reward'] = entry['assignment_reward'] + scaled_bonus
                         closed_buffer.append(entry)
                     # else: task predates open_assignments tracking → credit dropped
 
@@ -546,6 +549,33 @@ def main():
                 memory.is_terminals.append(True)
                 memory.robot_masks.append(entry['mask'])
         closed_buffer.clear()
+
+        # Remove memory entries for tasks assigned this rollout that did NOT complete.
+        # Those entries have reward=0 and their actual completion bonus will arrive
+        # via closed_buffer in a future rollout.  Including them now would:
+        #   (a) train the critic to predict near-zero value for assignment states, and
+        #   (b) double-count the gradient when the real reward arrives later.
+        if open_assignments and task_to_memory_idx:
+            pending_mem_indices = {
+                task_to_memory_idx[tid]
+                for tid in open_assignments
+                if tid in task_to_memory_idx
+            }
+            if pending_mem_indices:
+                keep = [i for i in range(len(memory.actions)) if i not in pending_mem_indices]
+                idx_remap = {old: new for new, old in enumerate(keep)}
+                memory.state_dicts = [memory.state_dicts[i] for i in keep]
+                memory.actions = [memory.actions[i] for i in keep]
+                memory.logprobs = [memory.logprobs[i] for i in keep]
+                memory.rewards = [memory.rewards[i] for i in keep]
+                memory.is_terminals = [memory.is_terminals[i] for i in keep]
+                memory.robot_masks = [memory.robot_masks[i] for i in keep]
+                new_groups = []
+                for group in memory.step_assignment_groups:
+                    new_group = [idx_remap[i] for i in group if i in idx_remap]
+                    if len(new_group) > 1:
+                        new_groups.append(new_group)
+                memory.step_assignment_groups = new_groups
 
         buffer_size = len(memory.actions)
 

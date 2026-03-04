@@ -641,34 +641,27 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
         # Per-task completion rewards
         for task in completed_tasks:
-            task_reward = 10.0  # Base completion bonus
+            task_reward = 0.0  # No flat base
 
-            # 1. Timeliness bonus/penalty (±5 to ±20)
-            margin = task.deadline - completion_time
-            if margin >= 0:
-                task_reward += min(5.0, 5.0 * margin / max(task.estimated_duration, 1.0))
+            # 1. Timeliness: 0 to +3 on-time, 0 to -5 late
+            margin_ratio = (task.deadline - completion_time) / max(task.estimated_duration, 1.0)
+            if margin_ratio >= 0:
+                task_reward += 3.0 * min(1.0, margin_ratio)
             else:
-                task_reward -= min(20.0, 5.0 * abs(margin) / max(task.estimated_duration, 1.0))
+                task_reward -= 5.0 * min(1.0, abs(margin_ratio))
 
-            # 2. Replenishment dropoff: stock fill + preventive maintenance bonuses
+            # 2. Replenishment dropoff: SKU stock health at delivery time (0 to +6)
+            # Uses pre-delivery stock (back-calculated from live sim state after restock).
+            # High reward when robot arrived before stock was depleted (proactive delivery).
             if task.task_type == 'replenishment' and task.leg_type == 'dropoff':
                 to_node = self.graph_state.nodes[task.to_location_index]
-
-                # Capacity fill bonus: reward for delivering a large batch (+0 to +6)
-                capacity_ratio = task.num_items / max(to_node.max_stock, 1.0)
-                task_reward += 6.0 * min(1.0, capacity_ratio)
-
-                # Stock health bonus: bigger reward when stock was already healthy (preventive
-                # maintenance philosophy — keep things topped up before they get critical).
-                # sku_stock_level is captured at task creation time.
-                stock_ratio = task.sku_stock_level / max(task.sku_max_level, 1.0)
-                task_reward += 8.0 * stock_ratio  # +0 (was empty) to +8 (was fully stocked)
-
-                # Timely prevention bonus: completed before projected stockout, scaled by
-                # stock health (timely delivery of well-stocked nodes earns more).
-                projected_stockout_time = task.arrival_time + task.time_to_stockout * 3600.0
-                if completion_time <= projected_stockout_time:
-                    task_reward += 4.0 * stock_ratio  # +0 to +4
+                if task.sku_id and getattr(to_node, 'sku_inventory', None) and task.sku_id in to_node.sku_inventory:
+                    sku_data = to_node.sku_inventory[task.sku_id]
+                    pre_stock = max(0.0, float(sku_data['stock']) - task.num_items)
+                    pre_ratio = pre_stock / max(float(sku_data['max']), 1.0)
+                else:
+                    pre_ratio = 0.0
+                task_reward += 6.0 * pre_ratio
 
             parent_id = getattr(task, 'parent_task_id', None)
             if parent_id is not None:

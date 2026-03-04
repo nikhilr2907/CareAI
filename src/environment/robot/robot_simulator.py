@@ -112,7 +112,7 @@ class RobotSimulator:
         self.heading = 0.0
         self.velocity_ms = 0.0
         self.prev_velocity_ms = 0.0  # For stop detection
-        self.max_velocity_ms = 1.0  # From spec: 1 m/s
+        self.max_velocity_ms = 0.5  # From spec: 1 m/s
 
         # ===== GRAPH POSITION =====
         self.current_node_index = initial_node_index
