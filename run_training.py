@@ -37,6 +37,7 @@ from src.utils.training_utils import (
     apply_consumption_scale,
     run_evaluation,
 )
+from src.utils.task_logger import TaskLogger
 
 
 def main():
@@ -45,6 +46,9 @@ def main():
 
     # Setup logging and output directories
     logger, output_dir, exp_name = setup_logging_and_output(args)
+
+    # Setup task-specific logging
+    task_logger = TaskLogger(output_dir / "logs")
 
     # Set random seed if provided
     if args.seed is not None:
@@ -469,6 +473,12 @@ def main():
                     'assignment_reward': assignment_reward,
                     'born_iter':         iteration,
                 }
+
+                # Log task assignment
+                task_logger.log_assignment(
+                    task, action, assignment_reward,
+                    iteration, env.current_time, num_assignments, len(memory.actions)
+                )
                 state_dict = env._get_state_dict()
                 memory.rewards.append(0.0)
                 memory.is_terminals.append(False)
@@ -501,6 +511,27 @@ def main():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_bonus = float(np.clip(scaled_bonus, -reward_clip, reward_clip))
+
+                # Log task completion
+                completed_task = next(
+                    (t for t in newly_completed if t.task_id == parent_id),
+                    None
+                )
+                if completed_task is not None:
+                    actual_completion_time = (
+                        env.current_time - completed_task.arrival_time
+                        if completed_task.arrival_time is not None else None
+                    )
+                    on_time = (
+                        completed_task.deadline is None or
+                        env.current_time <= completed_task.deadline
+                    )
+                    task_logger.log_completion(
+                        parent_id, scaled_bonus,
+                        actual_completion_time, on_time,
+                        env.current_time
+                    )
+
                 # Route completion signal to task creation actor buffer (#7/#8 training)
                 if env.task_creation_actor is not None:
                     env.task_creation_actor.record_completion(parent_id, scaled_bonus)
