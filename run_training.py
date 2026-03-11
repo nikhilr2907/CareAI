@@ -61,7 +61,7 @@ def main():
     use_curriculum = args.curriculum != 'none'
 
     if not args.config and not args.config_list and not args.configs_dir:
-        default_config = Path("configs") / "revised_hospital_config_v3.json"
+        default_config = Path("configs") / "revised_hospital_config_v3_consumption_reduced.json"
         args.config = str(default_config)
 
     if args.config:
@@ -881,6 +881,9 @@ def main():
             # Log GPU memory periodically
             if iteration % (log_interval * 10) == 0:
                 log_gpu_memory(logger)
+
+            # Log iteration summary (completions, on-time rates, robot breakdown)
+            task_logger.log_iteration_summary(iteration)
 
             logger.info("-" * 80)
 

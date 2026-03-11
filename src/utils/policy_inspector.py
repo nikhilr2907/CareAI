@@ -109,13 +109,13 @@ class PolicyInspector:
 
         # Warning flags
         if frozen_params > total_params * 0.5:
-            logger.warning(f"  ⚠️ Many frozen weights ({frozen_params}/{total_params}) - learning has stalled!")
+            logger.warning(f"  [WARNING] Many frozen weights ({frozen_params}/{total_params}) - learning has stalled!")
 
         if grad_norm > 10:
-            logger.warning(f"  ⚠️ Exploding gradients (norm={grad_norm:.2f}) - reducing learning rate!")
+            logger.warning(f"  [WARNING] Exploding gradients (norm={grad_norm:.2f}) - reducing learning rate!")
 
         if actor_loss == 0.0:
-            logger.warning(f"  ⚠️ Zero actor loss - policy not receiving advantage signal!")
+            logger.warning(f"  [WARNING] Zero actor loss - policy not receiving advantage signal!")
 
         if critic_loss > 100:
-            logger.warning(f"  ⚠️ High critic loss ({critic_loss:.2f}) - value function unstable!")
+            logger.warning(f"  [WARNING] High critic loss ({critic_loss:.2f}) - value function unstable!")

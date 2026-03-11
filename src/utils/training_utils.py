@@ -95,8 +95,8 @@ def parse_args():
                         help='Clip per-step rewards to [-reward_clip, reward_clip] (default: 200)')
     parser.add_argument('--reward-scale', type=float, default=1.0,
                         help='Scale per-step rewards (default: 1.0)')
-    parser.add_argument('--warmup-iters', type=int, default=200,
-                        help='Warmup iterations using heuristic/mild penalties (default: 200)')
+    parser.add_argument('--warmup-iters', type=int, default=50,
+                        help='Warmup iterations using heuristic/mild penalties (default: 50)')
     parser.add_argument('--warmup-mix', type=float, default=0.8,
                         help='Probability of heuristic action during warmup (default: 0.8)')
     parser.add_argument('--warmup-consumption-scale', type=float, default=0.6,

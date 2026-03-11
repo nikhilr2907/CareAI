@@ -30,8 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Hospital robot simulation runner")
     parser.add_argument("--use-trained", action="store_true", help="Use trained policy")
     parser.add_argument("--checkpoint", type=str, default="outputs/gapo_latest/checkpoints/gapo_final.pth")
-    parser.add_argument("--config", type=str, default="configs/revised_hospital_config_v3.json",
-                        help="Path to hospital config JSON (default: revised_hospital_config_v3.json)")
+    parser.add_argument("--config", type=str, default="configs/revised_hospital_config_v3_consumption_reduced.json",
+                        help="Path to hospital config JSON (default: revised_hospital_config_v3_consumption_reduced.json)")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--num-robots", type=int, default=5)
     parser.add_argument("--num-nodes", type=int, default=10)

@@ -5,6 +5,7 @@ Tracks every assignment and completion with full metadata including SKU levels.
 import logging
 from pathlib import Path
 from typing import Optional
+from collections import defaultdict
 
 
 class TaskLogger:
@@ -31,6 +32,9 @@ class TaskLogger:
         self.logger.addHandler(file_handler)
 
         self.task_metadata = {}  # task_id -> metadata
+        # Track per-iteration stats
+        self.iteration_assignments = defaultdict(list)  # iter -> [robot_ids]
+        self.iteration_completions = defaultdict(lambda: {'on_time': 0, 'late': 0, 'robots': defaultdict(int)})  # iter -> stats
 
     def log_assignment(self, task, assigned_robot: int, assignment_reward: float,
                       iteration: int, sim_time: float, num_assignments: int, buffer_size: int):
@@ -79,6 +83,9 @@ class TaskLogger:
             f"(buffer={buffer_size} assignments={num_assignments})"
         )
 
+        # Track assignment for iteration summary
+        self.iteration_assignments[iteration].append(assigned_robot)
+
     def log_completion(self, task_id: int, completion_reward: float,
                       actual_completion_time: Optional[float], on_time: bool,
                       sim_time: float):
@@ -115,5 +122,48 @@ class TaskLogger:
             f"on_time={'YES' if on_time else 'LATE'} {sku_info}"
         )
 
+        # Track completion for iteration summary
+        iter_num = meta['iteration']
+        robot = meta['assigned_robot']
+        if on_time:
+            self.iteration_completions[iter_num]['on_time'] += 1
+        else:
+            self.iteration_completions[iter_num]['late'] += 1
+        self.iteration_completions[iter_num]['robots'][robot] += 1
+
         # Clean up
         del self.task_metadata[task_id]
+
+    def log_iteration_summary(self, iteration: int):
+        """Log summary of iteration completions and robot breakdown."""
+        if iteration not in self.iteration_completions:
+            return  # No completions in this iteration
+
+        stats = self.iteration_completions[iteration]
+        assignments = self.iteration_assignments[iteration]
+
+        on_time = stats['on_time']
+        late = stats['late']
+        total_completed = on_time + late
+
+        if total_completed == 0:
+            return  # No completions logged
+
+        on_time_pct = (on_time / total_completed * 100) if total_completed > 0 else 0
+        total_assigned = len(assignments)
+        assignment_to_completion_ratio = total_assigned / total_completed if total_completed > 0 else 0
+
+        # Robot breakdown
+        robot_breakdown = ", ".join(
+            f"R{robot}:{count}"
+            for robot, count in sorted(stats['robots'].items())
+        )
+
+        # Log summary
+        self.logger.info(
+            f"=== ITERATION {iteration} SUMMARY ===\n"
+            f"  Assigned: {total_assigned} | Completed: {total_completed} | A:C Ratio: {assignment_to_completion_ratio:.2f}:1\n"
+            f"  On-Time: {on_time}/{total_completed} ({on_time_pct:.1f}%) | Late: {late}/{total_completed}\n"
+            f"  Robot Completion Breakdown: {robot_breakdown}\n"
+            f"{'=' * 60}"
+        )
