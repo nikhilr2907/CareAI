@@ -9,7 +9,11 @@ from collections import defaultdict
 
 
 class TaskLogger:
-    """Log individual task assignments and completions to text file."""
+    """Log individual task assignments and completions to text file.
+
+    Note: on_time/late tracking is informational only (diagnostic).
+    Reward computation is driven solely by inventory health, not deadline compliance.
+    """
 
     def __init__(self, log_dir: Path):
         self.log_dir = Path(log_dir)
@@ -34,7 +38,7 @@ class TaskLogger:
         self.task_metadata = {}  # task_id -> metadata
         # Track per-iteration stats
         self.iteration_assignments = defaultdict(list)  # iter -> [robot_ids]
-        self.iteration_completions = defaultdict(lambda: {'on_time': 0, 'late': 0, 'robots': defaultdict(int)})  # iter -> stats
+        self.iteration_completions = defaultdict(lambda: {'completed': 0, 'robots': defaultdict(int)})  # iter -> stats
 
     def log_assignment(self, task, assigned_robot: int, assignment_reward: float,
                       iteration: int, sim_time: float, num_assignments: int, buffer_size: int):
@@ -45,8 +49,6 @@ class TaskLogger:
         self.task_metadata[task_id] = {
             'iteration': iteration,
             'arrival_time': task.arrival_time,
-            'deadline': task.deadline,
-            'estimated_duration': task.estimated_duration,
             'from_location_idx': task.from_location_index,
             'to_location_idx': getattr(task, 'to_location_index', None),
             'assigned_robot': assigned_robot,
@@ -60,7 +62,6 @@ class TaskLogger:
         }
 
         # Log assignment event
-        feasibility = (task.deadline - sim_time) / max(task.estimated_duration, 1.0) - 1.0
         to_loc = getattr(task, 'to_location_index', '?')
         sku_id = getattr(task, 'sku_id', 'N/A')
         sku_stock = getattr(task, 'sku_stock_level', None)
@@ -77,8 +78,7 @@ class TaskLogger:
         self.logger.info(
             f"ASSIGN task_id={task_id} iter={iteration} sim_time={sim_time:.1f}s "
             f"robot={assigned_robot} location={task.from_location_index}->{to_loc} "
-            f"arrival={task.arrival_time:.1f}s deadline={task.deadline:.1f}s "
-            f"est_duration={task.estimated_duration:.1f}s feasibility={feasibility:.2f} "
+            f"arrival={task.arrival_time:.1f}s "
             f"assign_reward={assignment_reward:.4f} {sku_info} "
             f"(buffer={buffer_size} assignments={num_assignments})"
         )
@@ -87,16 +87,15 @@ class TaskLogger:
         self.iteration_assignments[iteration].append(assigned_robot)
 
     def log_completion(self, task_id: int, completion_reward: float,
-                      actual_completion_time: Optional[float], on_time: bool,
+                      actual_completion_time: Optional[float],
                       sim_time: float):
-        """Log task completion."""
+        """Log task completion (inventory-driven rewards only)."""
         if task_id not in self.task_metadata:
             # Task not in our log (maybe predates logging), but still log the completion
+            actual_time_str = f"{actual_completion_time:.1f}s" if actual_completion_time is not None else "?"
             self.logger.warning(
                 f"COMPLT task_id={task_id} [NO METADATA] sim_time={sim_time:.1f}s "
-                f"completion_reward={completion_reward:.4f} "
-                f"actual_time={actual_completion_time:.1f}s if actual_completion_time else '?' "
-                f"on_time={'YES' if on_time else 'LATE'}"
+                f"completion_reward={completion_reward:.4f} actual_time={actual_time_str}"
             )
             return
 
@@ -118,17 +117,13 @@ class TaskLogger:
             f"robot={meta['assigned_robot']} location={meta['from_location_idx']}->{meta['to_location_idx'] or '?'} "
             f"time_from_assign={sim_time - meta['sim_time_assigned']:.1f}s "
             f"assign_reward={meta['assignment_reward']:.4f} completion_reward={completion_reward:.4f} "
-            f"total_reward={total_reward:.4f} actual_time={actual_time_str} "
-            f"on_time={'YES' if on_time else 'LATE'} {sku_info}"
+            f"total_reward={total_reward:.4f} actual_time={actual_time_str} {sku_info}"
         )
 
         # Track completion for iteration summary
         iter_num = meta['iteration']
         robot = meta['assigned_robot']
-        if on_time:
-            self.iteration_completions[iter_num]['on_time'] += 1
-        else:
-            self.iteration_completions[iter_num]['late'] += 1
+        self.iteration_completions[iter_num]['completed'] += 1
         self.iteration_completions[iter_num]['robots'][robot] += 1
 
         # Clean up
@@ -142,14 +137,11 @@ class TaskLogger:
         stats = self.iteration_completions[iteration]
         assignments = self.iteration_assignments[iteration]
 
-        on_time = stats['on_time']
-        late = stats['late']
-        total_completed = on_time + late
+        total_completed = stats['completed']
 
         if total_completed == 0:
             return  # No completions logged
 
-        on_time_pct = (on_time / total_completed * 100) if total_completed > 0 else 0
         total_assigned = len(assignments)
         assignment_to_completion_ratio = total_assigned / total_completed if total_completed > 0 else 0
 
@@ -163,7 +155,37 @@ class TaskLogger:
         self.logger.info(
             f"=== ITERATION {iteration} SUMMARY ===\n"
             f"  Assigned: {total_assigned} | Completed: {total_completed} | A:C Ratio: {assignment_to_completion_ratio:.2f}:1\n"
-            f"  On-Time: {on_time}/{total_completed} ({on_time_pct:.1f}%) | Late: {late}/{total_completed}\n"
+            f"  Robot Completion Breakdown: {robot_breakdown}\n"
+            f"{'=' * 60}"
+        )
+
+    def log_running_summary(self, iteration: int):
+        """Log cumulative running summary across all iterations."""
+        # Aggregate stats across all iterations up to current
+        total_assigned_all = sum(len(self.iteration_assignments[i]) for i in range(iteration + 1))
+
+        total_completed_all = 0
+        robot_totals = defaultdict(int)
+
+        for i in range(iteration + 1):
+            if i in self.iteration_completions:
+                stats = self.iteration_completions[i]
+                total_completed_all += stats['completed']
+                for robot, count in stats['robots'].items():
+                    robot_totals[robot] += count
+
+        assignment_to_completion_ratio = total_assigned_all / total_completed_all if total_completed_all > 0 else 0
+
+        # Robot breakdown
+        robot_breakdown = ", ".join(
+            f"R{robot}:{count}"
+            for robot, count in sorted(robot_totals.items())
+        )
+
+        # Log running summary
+        self.logger.info(
+            f"=== RUNNING SUMMARY (Iterations 0-{iteration}) ===\n"
+            f"  Total Assigned: {total_assigned_all} | Total Completed: {total_completed_all} | A:C Ratio: {assignment_to_completion_ratio:.2f}:1\n"
             f"  Robot Completion Breakdown: {robot_breakdown}\n"
             f"{'=' * 60}"
         )

@@ -531,21 +531,16 @@ def main():
                     None
                 )
                 actual_completion_time = None
-                on_time = False
                 if completed_task is not None:
                     actual_completion_time = (
                         env.current_time - completed_task.arrival_time
                         if completed_task.arrival_time is not None else None
                     )
-                    on_time = (
-                        completed_task.deadline is None or
-                        env.current_time <= completed_task.deadline
-                    )
 
                 # Always log completion (even if task_id wasn't in assignment log)
                 task_logger.log_completion(
                     parent_id, scaled_bonus,
-                    actual_completion_time, on_time,
+                    actual_completion_time,
                     env.current_time
                 )
 
@@ -708,6 +703,9 @@ def main():
                 f"GradNorm={loss_info_current.get('grad_norm', 0):.2f} | "
                 f"Assigned={num_assignments} Pending={len(env.pending_tasks)}"
             )
+
+        # Log cumulative running summary EVERY iteration
+        task_logger.log_running_summary(iteration)
 
         # Full logging
         if iteration % log_interval == 0:

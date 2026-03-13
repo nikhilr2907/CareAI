@@ -595,9 +595,11 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 # Remove task from robot queue
                 completed_task = robot.complete_current_task()
                 if completed_task:
+                    # Add all task legs to reward computation (pickups + dropoffs)
+                    completed_tasks.append(completed_task)
+                    # Track only dropoffs for episode history
                     if completed_task.leg_type == "dropoff":
                         self.completed_tasks.append(completed_task)
-                        completed_tasks.append(completed_task)
 
                 # If robot has more tasks, plan next one
                 if robot.current_task:
@@ -618,7 +620,13 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
     def _compute_timestep_reward(self, completed_tasks: List[Task]) -> float:
         """
-        Compute reward for this timestep.
+        Compute reward combining inventory health + task completion + utilization.
+
+        Components:
+        A. Ad-hoc completion bonus: +1.0 per task
+        B. Pickup intermediate signal: +0.5 per unit effective load
+        C. Increased replenishment bonus: 0 to +10 (was +6)
+        D. Utilization incentive on dropoff: +2.0 based on load ratio
 
         All rewards are per-task only — no ambient signals enter the training buffer.
         Each completed task's reward is routed back to the memory slot of the action
@@ -630,29 +638,29 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         as episode metrics for monitoring but are NOT included in the returned reward.
 
         Args:
-            completed_tasks: List of tasks completed this timestep
+            completed_tasks: List of tasks completed this timestep (both pickups and dropoffs)
 
         Returns:
             Total completion reward scalar (sum of per-task rewards)
         """
         self._last_per_task_credits = {}
-        completion_time = self.current_time
         total_reward = 0.0
 
         # Per-task completion rewards
         for task in completed_tasks:
             task_reward = 0.0  # No flat base
 
-            # 1. Timeliness: 0 to +3 on-time, 0 to -5 late
-            margin_ratio = (task.deadline - completion_time) / max(task.estimated_duration, 1.0)
-            if margin_ratio >= 0:
-                task_reward += 3.0 * min(1.0, margin_ratio)
-            else:
-                task_reward -= 5.0 * min(1.0, abs(margin_ratio))
+            # Get assigned robot for load-based calculations
+            assigned_robot_id = getattr(task, 'assigned_robot_id', None)
+            robot = None
+            if assigned_robot_id is not None:
+                for r in self.robots:
+                    if r.robot_id == assigned_robot_id:
+                        robot = r
+                        break
 
-            # 2. Replenishment dropoff: SKU stock health at delivery time (0 to +6)
-            # Uses pre-delivery stock (back-calculated from live sim state after restock).
-            # High reward when robot arrived before stock was depleted (proactive delivery).
+            # C: Replenishment dropoff (increased from +6 to +10)
+            # Stock health at delivery time: high reward when proactive (before depletion)
             if task.task_type == 'replenishment' and task.leg_type == 'dropoff':
                 to_node = self.graph_state.nodes[task.to_location_index]
                 if task.sku_id and getattr(to_node, 'sku_inventory', None) and task.sku_id in to_node.sku_inventory:
@@ -661,7 +669,23 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                     pre_ratio = pre_stock / max(float(sku_data['max']), 1.0)
                 else:
                     pre_ratio = 0.0
-                task_reward += 6.0 * pre_ratio
+                task_reward += 10.0 * pre_ratio
+
+            # A: Ad-hoc task completion bonus
+            if task.task_type == 'ad_hoc' and task.leg_type == 'dropoff':
+                task_reward += 1.0
+
+            # B: Pickup intermediate signal
+            # Reward for picking up items (intermediate credit before dropoff)
+            if task.leg_type == 'pickup' and robot:
+                load_ratio = robot.effective_load / max(robot.max_capacity, 1.0)
+                task_reward += 0.5 * load_ratio
+
+            # D: Utilization bonus on dropoff
+            # Encourage efficient batching (more items per trip)
+            if task.leg_type == 'dropoff' and robot:
+                load_ratio = robot.effective_load / max(robot.max_capacity, 1.0)
+                task_reward += 2.0 * load_ratio
 
             parent_id = getattr(task, 'parent_task_id', None)
             if parent_id is not None:
