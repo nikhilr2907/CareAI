@@ -40,6 +40,10 @@ class RobotTelemetry:
     remaining_path: list  # List of node indices still to visit
     eta_to_next_node: float  # Estimated seconds to next waypoint
 
+    # ===== CHARGING STATE (with defaults) =====
+    is_charging: bool = False  # Robot is docked and charging
+    needs_charging: bool = False  # Dynamic threshold crossed, return to hub needed
+
     @property
     def is_at_node(self) -> bool:
         """Check if robot is stationary at a node."""
@@ -67,7 +71,9 @@ class RobotTelemetry:
             'current_capacity': self.current_capacity,
             'is_available': self.is_available,
             'active_task_id': self.active_task_id,
-            'eta_to_next_node': self.eta_to_next_node
+            'eta_to_next_node': self.eta_to_next_node,
+            'is_charging': self.is_charging,
+            'needs_charging': self.needs_charging
         }
 
     @classmethod
@@ -89,5 +95,7 @@ class RobotTelemetry:
             is_available=data['is_available'],
             active_task_id=data.get('active_task_id'),
             remaining_path=data.get('remaining_path', []),
-            eta_to_next_node=data.get('eta_to_next_node', 0.0)
+            eta_to_next_node=data.get('eta_to_next_node', 0.0),
+            is_charging=data.get('is_charging', False),
+            needs_charging=data.get('needs_charging', False)
         )

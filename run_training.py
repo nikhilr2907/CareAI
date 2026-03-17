@@ -538,10 +538,13 @@ def main():
                     )
 
                 # Always log completion (even if task_id wasn't in assignment log)
+                # TODO: distance_traveled and energy_consumed should come from robot telemetry
                 task_logger.log_completion(
                     parent_id, scaled_bonus,
                     actual_completion_time,
-                    env.current_time
+                    env.current_time,
+                    distance_traveled=0.0,  # Placeholder: compute from robot odometry
+                    energy_consumed=0.0     # Placeholder: compute from battery model
                 )
 
                 # Route completion signal to task creation actor buffer (#7/#8 training)
@@ -564,6 +567,14 @@ def main():
                         entry['reward'] = entry['assignment_reward'] + scaled_bonus
                         closed_buffer.append(entry)
                     # else: task predates open_assignments tracking → credit dropped
+
+            # Route ambient battery penalty to current step's memory slots
+            battery_pen = info.get('battery_penalty', 0.0)
+            if battery_pen != 0.0 and step_memory_indices:
+                share = battery_pen / len(step_memory_indices)
+                for midx in step_memory_indices:
+                    if midx < len(memory.rewards):
+                        memory.rewards[midx] += share
 
             if done:
                 state_dict = env.reset()
@@ -883,6 +894,12 @@ def main():
             # Log iteration summary (completions, on-time rates, robot breakdown)
             task_logger.log_iteration_summary(iteration)
 
+            # Generate task metrics snapshots periodically
+            if iteration % 50 == 0:
+                snapshot_dir = output_dir / f"metrics_snapshot_iter{iteration}"
+                task_logger.plot_metrics(snapshot_dir)
+                logger.info(f"Metrics snapshot saved to iter {iteration}")
+
             logger.info("-" * 80)
 
         # Save model
@@ -918,6 +935,11 @@ def main():
         total_timesteps=total_timesteps
     )
     logger.info(f"Training metrics saved to {metrics_path}")
+
+    # Generate final task metrics visualizations
+    final_metrics_dir = output_dir / "metrics_final"
+    task_logger.plot_metrics(final_metrics_dir)
+    logger.info(f"Final metrics plots saved to {final_metrics_dir}")
 
 
 if __name__ == '__main__':

@@ -101,8 +101,15 @@ class RobotState:
 
     @property
     def can_accept_task(self) -> bool:
-        """Robot can accept tasks even when busy if it has capacity."""
-        return self.available_capacity > 0
+        """Robot can accept tasks even when busy if it has capacity and not charging."""
+        return self.available_capacity > 0 and not self.is_charging
+
+    @property
+    def is_charging(self) -> bool:
+        """Check if robot is currently charging."""
+        if self.telemetry:
+            return self.telemetry.is_charging
+        return False
 
     def add_task(self, task: 'Task'):
         """

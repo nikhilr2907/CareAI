@@ -118,6 +118,16 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             train_steps_per_interval=10,
         )
 
+        # Battery management
+        self._offline_robots: set = set()
+        self._robots_routing_to_charge: set = set()
+        self.battery_safety_margin = 1.5
+        self.battery_critical_threshold = 0.10
+        self.battery_low_step_penalty = 0.05
+        self.battery_critical_task_penalty = 1.0
+        self.emergency_tasks: list = []
+        self._last_battery_penalty = 0.0
+
     def reset(self):
         """Reset environment and return initial state dict."""
         # Initialize graph (use custom graph if provided, otherwise use config)
@@ -167,6 +177,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             self.graph_state, self.current_time, self.next_task_id,
             existing_task_keys=set()
         )
+        for task in new_tasks:
+            task.source = 'deterministic'
         self.pending_tasks.extend(new_tasks)
 
         # Optional initial stochastic tasks, bounded by hourly cap.
@@ -186,6 +198,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                         training=False,
                     )
                 if new_task is not None:
+                    new_task.source = 'factoriser'
                     self.pending_tasks.append(new_task)
                     created += 1
                 else:
@@ -194,6 +207,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                         self.graph_state, self.current_time, 1, self.next_task_id
                     )
                     if ad_hoc:
+                        ad_hoc[0].source = 'random_adhoc_fallback'
                         self.pending_tasks.extend(ad_hoc)
                         created += len(ad_hoc)
             if created > 0:
@@ -241,6 +255,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             )
 
             if new_tasks:
+                for task in new_tasks:
+                    task.source = 'deterministic'
                 self.pending_tasks.extend(new_tasks)
                 self._apply_fallback_pending_rank()
 
@@ -292,6 +308,11 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             # Ambient monitoring stats (not in reward, just for logging).
             'episode_stockouts': self.episode_stockouts,
             'episode_collisions': self.episode_collisions,
+            # Battery management info
+            'battery_penalty': self._last_battery_penalty,
+            'emergency_tasks': len(self.emergency_tasks),
+            'offline_robots': list(self._offline_robots),
+            'robots_charging': [rid for rid, sim in enumerate(self.robot_simulators) if sim.is_charging],
         }
 
         return state_dict, reward, done, info
@@ -358,6 +379,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             )
 
         if new_task is not None:
+            new_task.source = 'factoriser'
             self.pending_tasks.append(new_task)
             self._record_stochastic_tasks(1)
             self._apply_fallback_pending_rank()
@@ -367,9 +389,14 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 self.graph_state, self.current_time, 1, self.next_task_id
             )
             if ad_hoc:
+                ad_hoc[0].source = 'random_adhoc_fallback'  # Mark as fallback from factoriser
                 self.pending_tasks.extend(ad_hoc)
                 self._record_stochastic_tasks(len(ad_hoc))
                 self._apply_fallback_pending_rank()
+                # Track fallback occurrence
+                if not hasattr(self, '_factoriser_fallback_count'):
+                    self._factoriser_fallback_count = 0
+                self._factoriser_fallback_count += 1
 
     def assign_task_to_robot(self, robot_id: int, task: Task) -> bool:
         """
@@ -386,6 +413,14 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             True if assignment successful, False otherwise
         """
         if robot_id < 0 or robot_id >= len(self.robots):
+            return False
+
+        # Gate: offline robots cannot accept tasks
+        if robot_id in self._offline_robots:
+            return False
+
+        # Gate: robot needs to charge first
+        if self._should_robot_charge(robot_id):
             return False
 
         robot = self.robots[robot_id]
@@ -552,6 +587,17 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 ):
                     self._plan_path_for_robot(robot, robot.current_task, simulator)
 
+            # Trigger charging trip when robot becomes idle and needs charging
+            robot_id = robot.robot_id
+            if (robot_id not in self._robots_routing_to_charge and
+                    robot_id not in self._offline_robots and
+                    simulator.is_charging is False and
+                    len(robot.task_queue) == 0 and
+                    simulator.path_queue == [] and
+                    simulator.current_target_node is None and
+                    self._should_robot_charge(robot_id)):
+                self._send_robot_to_charge(robot_id)
+
     def _check_task_completions(self) -> List[Task]:
         """
         Check if any robots have completed their current tasks.
@@ -615,6 +661,23 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                         not robot.is_pickup_complete(robot.current_task.parent_task_id)
                     ):
                         self._plan_path_for_robot(robot, robot.current_task, simulator)
+
+            # Handle charging arrival
+            robot_id = robot.robot_id
+            if (robot_id in self._robots_routing_to_charge and
+                    simulator.active_task_id == -1 and
+                    robot.current_node_index is not None):
+                node = self.graph_state.nodes[robot.current_node_index]
+                if node.node_type == 'hub' and not simulator.is_charging:
+                    simulator.start_charging()
+
+            # Handle charging completion
+            if (simulator.is_charging is False and robot_id in self._robots_routing_to_charge and
+                    simulator.active_task_id == -1):
+                # Charging just finished
+                self._robots_routing_to_charge.discard(robot_id)
+                if robot.task_queue:
+                    self._plan_path_for_robot(robot, robot.current_task, simulator)
 
         return completed_tasks
 
@@ -687,6 +750,12 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 load_ratio = robot.effective_load / max(robot.max_capacity, 1.0)
                 task_reward += 2.0 * load_ratio
 
+            # F: Depletion penalty - deduct if robot is critically low on battery at task end
+            if task.leg_type == 'dropoff' and robot:
+                sim = self.robot_simulators[robot.robot_id]
+                if sim.battery_level < self.battery_critical_threshold:
+                    task_reward -= self.battery_critical_task_penalty
+
             parent_id = getattr(task, 'parent_task_id', None)
             if parent_id is not None:
                 self._last_per_task_credits[parent_id] = task_reward
@@ -720,6 +789,16 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                     collision_count += 1
         self.episode_collisions += collision_count
         self.last_collision_count = collision_count
+
+        # E: Per-step low-battery ambient penalty
+        battery_penalty = 0.0
+        for rid in range(len(self.robots)):
+            if rid in self._offline_robots:
+                continue
+            if self._should_robot_charge(rid):
+                battery_penalty -= self.battery_low_step_penalty
+        self._last_battery_penalty = battery_penalty
+        total_reward += battery_penalty
 
         return total_reward
 
@@ -1108,3 +1187,98 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                     count += 1
                     break
         return count
+
+    # ===== BATTERY MANAGEMENT =====
+
+    def _get_hub_node_indices(self) -> list:
+        """Get indices of all hub nodes in the graph."""
+        return [i for i, n in enumerate(self.graph_state.nodes) if n.node_type == 'hub']
+
+    def _should_robot_charge(self, robot_id: int) -> bool:
+        """
+        Check if robot battery is below threshold to reach nearest hub.
+
+        Dynamic threshold: battery_needed = dist_to_hub × drain_rate × safety_margin
+        Robot should charge if: battery_level <= battery_needed
+        """
+        if robot_id in self._offline_robots:
+            return False
+        simulator = self.robot_simulators[robot_id]
+        robot = self.robots[robot_id]
+        hub_indices = self._get_hub_node_indices()
+        if not hub_indices:
+            return False
+
+        from .graph_helpers import estimate_travel_distance
+        min_dist = min(estimate_travel_distance(robot, h, self.graph_state) for h in hub_indices)
+        battery_needed = min_dist * simulator.battery_drain_rate * self.battery_safety_margin
+        return simulator.battery_level <= battery_needed
+
+    def _nearest_hub_index(self, robot_id: int) -> int:
+        """Find index of nearest hub node to robot."""
+        robot = self.robots[robot_id]
+        hub_indices = self._get_hub_node_indices()
+        from .graph_helpers import estimate_travel_distance
+        return min(hub_indices, key=lambda h: estimate_travel_distance(robot, h, self.graph_state))
+
+    def _send_robot_to_charge(self, robot_id: int):
+        """Route robot to nearest hub to charge."""
+        robot = self.robots[robot_id]
+        simulator = self.robot_simulators[robot_id]
+        hub_idx = self._nearest_hub_index(robot_id)
+
+        start_node = robot.current_node_index
+        if start_node is None:
+            start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
+
+        path, _ = dijkstra_shortest_path(
+            start_node, hub_idx, self.graph_state, len(self.graph_state.nodes),
+            edge_cost_manager=self.edge_cost_manager, all_robots=self.robots
+        )
+        simulator.set_path(path, task_id=-1, num_items=0)
+        self._robots_routing_to_charge.add(robot_id)
+
+    def mark_robot_offline(self, robot_id: int):
+        """
+        Mark robot as manually powered off.
+        Items in transit go to emergency_tasks; other tasks go back to pending.
+        """
+        if robot_id < 0 or robot_id >= len(self.robots):
+            return
+        robot = self.robots[robot_id]
+        simulator = self.robot_simulators[robot_id]
+
+        in_transit_parents = set(robot.picked_up_task_ids)
+
+        for task in robot.task_queue:
+            parent_id = getattr(task, 'parent_task_id', None)
+            if parent_id in in_transit_parents:
+                # Items on robot - human handling
+                task.manual_priority = 999
+                task.task_type = 'emergency_manual'
+                self.emergency_tasks.append(task)
+            else:
+                # Not yet picked up - reassign to pending
+                self.pending_tasks.insert(0, task)
+
+        # Clear robot queues
+        robot.task_queue.clear()
+        robot.overflow_queue.clear()
+        robot.picked_up_task_ids.clear()
+        robot.planned_path.clear()
+        robot.target_node_index = None
+
+        # Stop simulator
+        simulator.path_queue.clear()
+        simulator.current_target_node = None
+        simulator.velocity_ms = 0.0
+        simulator.active_task_id = None
+        simulator.is_charging = False
+
+        # Mark offline
+        self._offline_robots.add(robot_id)
+        self._robots_routing_to_charge.discard(robot_id)
+
+    def bring_robot_online(self, robot_id: int):
+        """Mark robot as powered back on."""
+        self._offline_robots.discard(robot_id)

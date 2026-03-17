@@ -43,6 +43,9 @@ class Task:
     estimated_completion_time: Optional[float] = None
     learned_score: float = 0.0
 
+    # Task source tracking
+    source: str = "unknown"  # 'deterministic', 'factoriser', 'random_adhoc', 'random_adhoc_fallback'
+
     # Intra-room coordinates (for precise positioning within nodes)
     from_coordinates: Optional[tuple] = None  # (x, y) exact pickup point in meters
     to_coordinates: Optional[tuple] = None    # (x, y) exact delivery point in meters

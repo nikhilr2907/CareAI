@@ -129,6 +129,10 @@ class RobotSimulator:
         self.battery_drain_rate = 0.001  # per meter traveled
         self.current_capacity = 0
 
+        # ===== CHARGING =====
+        self.is_charging = False
+        self.charging_rate = 0.001  # battery per second while docked
+
         # ===== TASK TRACKING =====
         self.active_task_id = None
 
@@ -232,6 +236,13 @@ class RobotSimulator:
         Returns:
             RobotTelemetry object with current state
         """
+        # Handle charging
+        if self.is_charging:
+            self.battery_level = min(1.0, self.battery_level + self.charging_rate * time_delta)
+            if self.battery_level >= 1.0:
+                self.stop_charging()
+            return self.get_telemetry()
+
         if not self.path_queue and not self.current_target_node:
             # Robot is idle
             self.velocity_ms = 0.0
@@ -336,6 +347,15 @@ class RobotSimulator:
         self.current_capacity += num_items
         self.current_capacity = min(self.current_capacity, self.max_capacity)
 
+    def start_charging(self):
+        """Start charging the robot at a charging dock."""
+        self.is_charging = True
+        self.velocity_ms = 0.0
+
+    def stop_charging(self):
+        """Stop charging the robot."""
+        self.is_charging = False
+
     def get_telemetry(self) -> RobotTelemetry:
         """Generate current telemetry snapshot."""
         # Calculate ETA to next node
@@ -349,7 +369,8 @@ class RobotSimulator:
         is_available = (
             not self.path_queue and
             not self.current_target_node and
-            self.current_capacity == 0
+            self.current_capacity == 0 and
+            not self.is_charging
         )
 
         return RobotTelemetry(
@@ -368,7 +389,8 @@ class RobotSimulator:
             is_available=is_available,
             active_task_id=self.active_task_id,
             remaining_path=self.path_queue.copy(),
-            eta_to_next_node=eta
+            eta_to_next_node=eta,
+            is_charging=self.is_charging
         )
 
     def set_traversal_entry_time(self, time: float):
