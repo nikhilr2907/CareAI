@@ -13,7 +13,9 @@ Status: READY TO USE (not active until Nav2 is deployed)
 
 import asyncio
 import logging
-from typing import Optional, Dict, Callable
+import math
+import time
+from typing import Optional, Dict, Callable, Set
 from datetime import datetime
 
 from .ros_bridge_client import ROSBridgeClient, RobotTelemetryData, LocationInventoryData, LocationConsumptionData
@@ -54,6 +56,12 @@ class ROSBridgeIntegration:
         self.on_task_completed: Optional[Callable] = None
         self.on_task_failed: Optional[Callable] = None
 
+        # Lifecycle and validation state
+        self._running = False
+        self._listen_task: Optional[asyncio.Task] = None
+        self._known_task_ids: Set[str] = set()  # Track which tasks we've submitted
+        self.robot_states: Dict[int, any] = {}
+
         # Register handlers with client
         self.client.on_robot_telemetry = self._handle_robot_telemetry
         self.client.on_task_status = self._handle_task_status
@@ -63,32 +71,50 @@ class ROSBridgeIntegration:
 
         logger.info("ROS Bridge Integration initialized")
 
-    async def start(self, robot_states: Dict[int, RobotState]):
+    async def start(self, robot_states: Dict[int, RobotState], robot_id: int = 0):
         """
-        Start the ROS bridge client and listen for updates.
+        Start the ROS bridge client and listen for updates with auto-reconnection.
 
         Args:
             robot_states: Dict of {robot_id: RobotState}
+            robot_id: Which robot to integrate (for multi-robot future, default 0)
         """
         self.robot_states = robot_states
+        self._running = True
+        self._known_task_ids = set()  # Reset task tracking
 
-        if not await self.client.connect():
-            logger.error("Failed to connect to ROS bridge")
-            return
-
-        # Start listening in background
-        asyncio.create_task(self.client.listen())
-        logger.info("ROS Bridge client listening...")
+        # Start listening with reconnection logic
+        self._listen_task = asyncio.create_task(self._listen_with_reconnect())
+        logger.info(f"ROS Bridge integration started with auto-reconnection (robot_id={robot_id})")
 
     async def stop(self):
         """Stop listening and disconnect."""
+        self._running = False
+        if self._listen_task:
+            self._listen_task.cancel()
+            try:
+                await self._listen_task
+            except asyncio.CancelledError:
+                pass
         await self.client.disconnect()
+        logger.info("ROS Bridge integration stopped")
 
     async def _handle_robot_telemetry(self, telemetry: RobotTelemetryData):
         """Update robot state from bridge telemetry."""
         try:
+            # Validate message before processing
+            if not self._validate_robot_telemetry(telemetry):
+                return
+
+            # Check for stale telemetry
+            if self._is_telemetry_stale(telemetry.timestamp):
+                logger.warning(
+                    f"Stale telemetry ({time.time() - telemetry.timestamp:.1f}s old), skipping"
+                )
+                return
+
+            # MULTI_ROBOT_TODO: Extract robot_id from telemetry once bridge includes it
             # For now, we assume single robot (robot_id=0)
-            # In multi-robot, need to identify which robot from telemetry
             robot_id = 0
 
             if robot_id not in self.robot_states:
@@ -97,24 +123,41 @@ class ROSBridgeIntegration:
 
             robot_state = self.robot_states[robot_id]
 
+            # Extract velocity
+            velocity_linear_x = telemetry.velocity.get('linear_x', 0.0) if telemetry.velocity else 0.0
+
+            # Resolve the three TODOs:
+            # 1. Convert quaternion to heading (yaw)
+            heading = self._quaternion_to_heading(telemetry.orientation)
+
+            # 2. Find nearest node in graph
+            current_node_index = self._find_nearest_node_index(
+                telemetry.position[0], telemetry.position[1]
+            )
+
+            # 3. Determine availability: active_task_id is None AND velocity is near zero
+            is_available = (
+                telemetry.active_task_id is None and abs(velocity_linear_x) < 0.01
+            )
+
             # Create RobotTelemetry object (matches your existing format)
             ros_telemetry = RobotTelemetry(
                 timestamp=telemetry.timestamp,
                 robot_id=robot_id,
                 x=telemetry.position[0],
                 y=telemetry.position[1],
-                heading=0.0,  # TODO: convert quaternion to heading
-                current_node_index=None,  # TODO: find nearest node
+                heading=heading,
+                current_node_index=current_node_index,
                 current_edge_index=None,
                 edge_progress=0.0,
-                velocity_ms=telemetry.velocity.get('linear_x', 0.0),
-                is_moving=telemetry.velocity.get('linear_x', 0.0) > 0.01,
+                velocity_ms=velocity_linear_x,
+                is_moving=velocity_linear_x > 0.01,
                 battery_level=telemetry.battery_level,
                 current_capacity=telemetry.current_capacity,
-                is_available=False,  # TODO: determine from bridge
+                is_available=is_available,
                 active_task_id=telemetry.active_task_id,
                 remaining_path=[],
-                eta_to_next_node=0.0
+                eta_to_next_node=0.0,
             )
 
             # Update robot state
@@ -124,35 +167,55 @@ class ROSBridgeIntegration:
             if self.on_robot_position_updated:
                 await self._call_callback(
                     self.on_robot_position_updated,
-                    {'robot_id': robot_id, 'position': telemetry.position, 'battery': telemetry.battery_level}
+                    {
+                        "robot_id": robot_id,
+                        "position": telemetry.position,
+                        "battery": telemetry.battery_level,
+                    },
                 )
 
-            logger.debug(f"Updated robot {robot_id} telemetry: pos=({telemetry.position[0]:.2f}, {telemetry.position[1]:.2f})")
+            logger.debug(
+                f"Updated robot {robot_id} telemetry: pos=({telemetry.position[0]:.2f}, "
+                f"{telemetry.position[1]:.2f}), heading={heading:.2f}, available={is_available}"
+            )
 
         except Exception as e:
-            logger.error(f"Error handling robot telemetry: {e}")
+            logger.error(f"Error handling robot telemetry: {e}", exc_info=True)
 
     async def _handle_task_status(self, data: Dict):
         """Handle task status updates from bridge."""
         try:
-            task_id = data.get('task_id')
-            status = data.get('status')
+            task_id = data.get("task_id")
+            status = data.get("status")
 
-            if status == 'completed':
+            # Warn if task_id was not previously registered
+            if task_id not in self._known_task_ids:
+                logger.debug(
+                    f"task_status for unknown task_id={task_id} — may be stale or orphaned"
+                )
+
+            if status == "completed":
                 logger.info(f"Task {task_id} completed on bridge")
                 if self.on_task_completed:
-                    await self._call_callback(self.on_task_completed, {'task_id': task_id})
+                    await self._call_callback(
+                        self.on_task_completed, {"task_id": task_id}
+                    )
 
-            elif status == 'failed':
+            elif status == "failed":
                 logger.error(f"Task {task_id} failed on bridge: {data.get('error')}")
                 if self.on_task_failed:
-                    await self._call_callback(self.on_task_failed, {'task_id': task_id, 'error': data.get('error')})
+                    await self._call_callback(
+                        self.on_task_failed,
+                        {"task_id": task_id, "error": data.get("error")},
+                    )
 
-            elif status == 'in_progress':
-                logger.debug(f"Task {task_id} in progress: {data.get('progress_percent', 0):.1f}%")
+            elif status == "in_progress":
+                logger.debug(
+                    f"Task {task_id} in progress: {data.get('progress_percent', 0):.1f}%"
+                )
 
         except Exception as e:
-            logger.error(f"Error handling task status: {e}")
+            logger.error(f"Error handling task status: {e}", exc_info=True)
 
     async def _handle_location_inventory(self, location_updates: list):
         """Update location inventory from bridge."""
@@ -257,9 +320,146 @@ class ROSBridgeIntegration:
         except Exception as e:
             logger.error(f"Error handling system state: {e}")
 
+    async def _listen_with_reconnect(self):
+        """
+        Listen for bridge messages with exponential backoff reconnection.
+
+        Runs continuously while _running is True, attempting to reconnect
+        if connection is lost, with exponential backoff capped at 30 seconds.
+        """
+        backoff = 1.0
+        while self._running:
+            try:
+                if not self.client.is_connected:
+                    connected = await self.client.connect()
+                    if not connected:
+                        logger.warning(
+                            f"Bridge connection failed, retrying in {backoff:.1f}s..."
+                        )
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2.0, 30.0)  # Exponential backoff, cap 30s
+                        continue
+
+                backoff = 1.0  # Reset on successful connection
+                await self.client.listen()
+
+            except asyncio.CancelledError:
+                logger.debug("Bridge listener cancelled")
+                break
+            except Exception as e:
+                logger.error(
+                    f"Bridge listener error: {e}. Retrying in {backoff:.1f}s...",
+                    exc_info=False,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
+
+    def _validate_robot_telemetry(self, telemetry: RobotTelemetryData) -> bool:
+        """
+        Validate that robot telemetry has required fields.
+
+        Args:
+            telemetry: RobotTelemetryData to validate
+
+        Returns:
+            True if valid, False otherwise
+        """
+        try:
+            if not telemetry.position or len(telemetry.position) < 2:
+                logger.warning("robot_telemetry missing position")
+                return False
+            if telemetry.orientation is None:
+                logger.warning("robot_telemetry missing orientation")
+                return False
+            if telemetry.battery_level is None:
+                logger.warning("robot_telemetry missing battery_level")
+                return False
+            if telemetry.velocity is None:
+                logger.warning("robot_telemetry missing velocity")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Error validating telemetry: {e}")
+            return False
+
+    def _is_telemetry_stale(
+        self, timestamp: float, max_age_s: float = 5.0
+    ) -> bool:
+        """
+        Check if telemetry is too old.
+
+        Args:
+            timestamp: Unix timestamp from telemetry
+            max_age_s: Maximum age in seconds (default 5.0)
+
+        Returns:
+            True if telemetry is older than max_age_s
+        """
+        age = time.time() - timestamp
+        return age > max_age_s
+
+    def _quaternion_to_heading(self, quat: Optional[Dict]) -> float:
+        """
+        Convert quaternion to heading angle (yaw in radians).
+
+        Handles missing/malformed quaternion gracefully with safe defaults.
+
+        Args:
+            quat: Dict with x, y, z, w keys (or None)
+
+        Returns:
+            Heading angle in radians (0.0 if quaternion invalid)
+        """
+        if not quat:
+            return 0.0
+        try:
+            qx = quat.get("x", 0.0)
+            qy = quat.get("y", 0.0)
+            qz = quat.get("z", 0.0)
+            qw = quat.get("w", 1.0)
+            # Standard quaternion to yaw formula
+            heading = math.atan2(
+                2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)
+            )
+            return float(heading)
+        except Exception as e:
+            logger.warning(f"Error converting quaternion to heading: {e}")
+            return 0.0
+
+    def _find_nearest_node_index(self, x: float, y: float) -> Optional[int]:
+        """
+        Find the index of the node nearest to (x, y) position.
+
+        Uses Euclidean distance to node centers.
+
+        Args:
+            x: X coordinate
+            y: Y coordinate
+
+        Returns:
+            Node index if found, None if graph is empty or no nodes
+        """
+        try:
+            if not self.graph_state or not self.graph_state.nodes:
+                return None
+
+            best_idx = None
+            best_dist = float("inf")
+
+            for i, node in enumerate(self.graph_state.nodes):
+                dist = (node.center_x - x) ** 2 + (node.center_y - y) ** 2
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+
+            return best_idx
+        except Exception as e:
+            logger.error(f"Error finding nearest node: {e}")
+            return None
+
     def _find_node_by_id(self, location_id: str):
         """Find a node in graph by location_id."""
-        if not hasattr(self.graph_state, 'nodes'):
+        if not hasattr(self.graph_state, "nodes"):
             return None
 
         for node in self.graph_state.nodes:
