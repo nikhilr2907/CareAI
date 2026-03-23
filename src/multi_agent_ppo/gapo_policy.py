@@ -1,12 +1,4 @@
-"""
-GAPO (Graph Attention-Based Policy Optimization) Policy Network.
-
-Integrates:
-- GNN encoders for hospital graph and robot fleet
-- Attention mechanisms for task-robot-node
-- De-biasing for autoregressive decisions
-- Actor-Critic architecture for PPO
-"""
+"""GAPO policy network."""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,9 +11,7 @@ from .debiasing import ComprehensiveDebiasing
 
 
 class GAPOPolicyNetwork(nn.Module):
-    """
-    Complete GAPO policy network with GNN + Attention + De-biasing.
-    """
+    """Policy network with graph encoders, attention, and optional debiasing."""
 
     def __init__(
         self,
@@ -160,31 +150,7 @@ class GAPOPolicyNetwork(nn.Module):
         return_attention: bool = False,
         robot_availability_mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict]]:
-        """
-        Forward pass through GAPO network.
-
-        Args:
-            state_dict: Dictionary with:
-                - 'task_features': [15]
-                - 'node_continuous': [num_nodes, N] - continuous node features
-                - 'node_categorical': [num_nodes, 4] - categorical IDs: [node_type, dept_id, shift_period, day_type]
-                - 'edge_features': [num_edges, 21] - continuous edge features
-                - 'edge_node_indices': [num_edges, 2] - (from_node_idx, to_node_idx)
-                - 'edge_index': [2, num_edges] - graph connectivity for GNN
-                - 'robot_features': [num_robots, 20]
-                - 'robot_positions': [num_robots, 2] (optional)
-            - 'queue_features': [16]
-            return_attention: Whether to return attention weights
-            robot_availability_mask: [num_robots] - boolean mask
-
-        Returns:
-            action_logits: [num_robots] - scores for each robot
-            state_value: [1] - estimated state value
-            attention_info: Optional dict with attention weights
-        """
-        # ===== ENCODE COMPONENTS =====
-
-        # Optional SKU pooling into node features
+        """Run the policy forward pass."""
         if 'node_sku_features' in state_dict and state_dict['node_sku_features'] is not None:
             sku_mask = state_dict.get('node_sku_mask', None)
             pooled = self._pool_sku_embeddings(state_dict['node_sku_features'], sku_mask)
@@ -192,7 +158,6 @@ class GAPOPolicyNetwork(nn.Module):
                 state_dict = dict(state_dict)
                 state_dict['node_continuous'] = torch.cat([state_dict['node_continuous'], pooled], dim=-1)
 
-        # 1. Hospital graph (two-pass encoding with node embeddings)
         node_embeddings, edge_embeddings, graph_embedding = self.hospital_encoder(
             state_dict['node_continuous'],
             state_dict['node_categorical'],
@@ -201,17 +166,14 @@ class GAPOPolicyNetwork(nn.Module):
             state_dict.get('edge_index', None)
         )
 
-        # 2. Robot fleet
         robot_embeddings, fleet_embedding = self.robot_encoder(
             state_dict['robot_features'],
             state_dict.get('robot_positions', None)
         )
 
-        # 3. Task (normalize before encoding)
         task_features_normed = self.task_input_norm(state_dict['task_features'])
         task_embedding = self.task_encoder(task_features_normed)
 
-        # ===== ATTENTION =====
         action_logits, attention_info = self.attention_module(
             task_embedding,
             robot_embeddings,
@@ -616,83 +578,3 @@ class GAPOPolicyNetwork(nn.Module):
         """Record action for de-biasing."""
         if self.training and self.use_debiasing:
             self.episode_actions.append(action)
-
-
-def test_gapo_policy():
-    """Test GAPO policy network."""
-    print("Testing GAPO Policy Network...")
-
-    # Create policy with enhanced features
-    policy = GAPOPolicyNetwork(
-        node_continuous_dim=8,
-        num_node_types=4,
-        edge_feat_dim=21,
-        node_type_embedding_dim=8,
-        robot_feat_dim=19,
-        task_feat_dim=15,
-        hidden_dim=64,
-        use_debiasing=True
-    )
-
-    # Create dummy state (with enhanced features)
-    num_nodes = 10
-    num_edges = 20
-    num_robots = 5
-
-    state_dict = {
-        'task_features': torch.randn(15),
-        'node_continuous': torch.randn(num_nodes, 8),  # Enhanced: 8 continuous features
-        'node_categorical': torch.randint(0, 4, (num_nodes, 1)),  # node_type_id (0-3)
-        'edge_features': torch.randn(num_edges, 21),  # Enhanced: 21 continuous features
-        'edge_node_indices': torch.randint(0, num_nodes, (num_edges, 2)),  # (from, to) indices
-        'edge_index': torch.randint(0, num_nodes, (2, num_edges)),  # GNN connectivity
-        'robot_features': torch.randn(num_robots, 20),
-        'robot_positions': torch.randn(num_robots, 2),
-        'queue_features': torch.randn(16)
-    }
-
-    # Test forward pass
-    print("\n1. Forward pass")
-    action_logits, state_value, attention_info = policy(
-        state_dict,
-        return_attention=True
-    )
-
-    print(f"  Action logits: {action_logits.shape}")
-    print(f"  State value: {state_value.shape}")
-    print(f"  Robot attention: {attention_info['robot_attn_weights']}")
-
-    # Test action selection
-    print("\n2. Action selection")
-    action, log_prob = policy.select_action(state_dict)
-    print(f"  Selected action: {action}")
-    print(f"  Log probability: {log_prob:.4f}")
-
-    # Test with availability mask
-    print("\n3. Action selection with mask")
-    mask = torch.tensor([True, False, True, True, False])
-    action_masked, log_prob_masked = policy.select_action(
-        state_dict,
-        robot_availability_mask=mask
-    )
-    print(f"  Selected action (masked): {action_masked}")
-    print(f"  Available robots: {torch.where(mask)[0].tolist()}")
-
-    # Test de-biasing
-    print("\n4. De-biasing")
-    policy.train()
-
-    for t in range(5):
-        action_logits, _, _ = policy(state_dict)
-        action = torch.argmax(action_logits).item()
-        policy.record_action(action)
-
-    debias_loss, breakdown = policy.compute_debias_loss()
-    print(f"  De-biasing loss: {debias_loss.item():.4f}")
-    print(f"  Breakdown: {breakdown}")
-
-    print("\n✓ GAPO Policy Network working!")
-
-
-if __name__ == '__main__':
-    test_gapo_policy()
