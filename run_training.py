@@ -39,6 +39,7 @@ from src.utils.training_utils import (
 )
 from src.utils.task_logger import TaskLogger
 from src.utils.policy_inspector import PolicyInspector
+from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 
 
 def main():
@@ -50,6 +51,14 @@ def main():
 
     # Setup task-specific logging
     task_logger = TaskLogger(output_dir / "logs")
+
+    # Setup real-time analytics collection
+    analytics = RealtimeAnalyticsCollector(
+        output_dir=output_dir / "analytics",
+        mode='sim',
+        snapshot_frequency=50,
+        task_logger=task_logger,
+    )
 
     # Set random seed if provided
     if args.seed is not None:
@@ -500,6 +509,8 @@ def main():
             # Each value is the full per-task reward (base + timeliness + stock bonuses).
             newly_completed = env.completed_tasks[prev_completed:]
 
+            # Task completions are now tracked by task_logger and read by analytics via task_logger.cost_data
+
             # Track completion time metrics
             for task in newly_completed:
                 if task.arrival_time is not None:
@@ -894,11 +905,25 @@ def main():
             # Log iteration summary (completions, on-time rates, robot breakdown)
             task_logger.log_iteration_summary(iteration)
 
+            # Analytics: Record periodic telemetry and inventory samples
+            if iteration % 10 == 0:
+                analytics.record_robot_telemetry(env.robots, env.current_time)
+            if iteration % 50 == 0:
+                analytics.record_inventory_snapshot(env.graph_state.nodes, env.current_time)
+                analytics.record_corridor_state(env.graph_state.edges, env.current_time)
+
             # Generate task metrics snapshots periodically
             if iteration % 50 == 0:
                 snapshot_dir = output_dir / f"metrics_snapshot_iter{iteration}"
                 task_logger.plot_metrics(snapshot_dir)
                 logger.info(f"Metrics snapshot saved to iter {iteration}")
+
+                # Generate analytics snapshots
+                analytics.increment_iteration()
+                analytics.plot_snapshot(final=False)
+                analytics.save_metrics_json()
+                analytics.save_metrics_csv()
+                logger.info(f"Analytics snapshot saved to iter {iteration}")
 
             logger.info("-" * 80)
 
@@ -940,6 +965,14 @@ def main():
     final_metrics_dir = output_dir / "metrics_final"
     task_logger.plot_metrics(final_metrics_dir)
     logger.info(f"Final metrics plots saved to {final_metrics_dir}")
+
+    # Generate final analytics visualizations
+    analytics.increment_iteration()
+    analytics.plot_snapshot(final=True)
+    analytics.save_metrics_json()
+    analytics.save_metrics_csv()
+    logger.info(f"Final analytics plots saved to {analytics.output_dir / 'plots_final'}")
+    logger.info(f"Analytics metrics saved to {analytics.output_dir}")
 
 
 if __name__ == '__main__':

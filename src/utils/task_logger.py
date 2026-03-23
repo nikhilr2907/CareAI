@@ -68,6 +68,8 @@ class TaskLogger:
             'reorder_point': getattr(task, 'reorder_point', None),
             'par_level': getattr(task, 'par_level', None),
             'source': source,
+            'task_type': getattr(task, 'task_type', None),
+            'leg_type': getattr(task, 'leg_type', None),
         }
 
         # Track source breakdown
@@ -173,6 +175,13 @@ class TaskLogger:
             'total_reward': total_reward,
             'cost_per_reward': cost_per_reward,
             'sim_time': sim_time,
+            'latency': actual_completion_time,
+            'arrival_time': meta.get('arrival_time'),
+            'from_location_idx': meta.get('from_location_idx'),
+            'to_location_idx': meta.get('to_location_idx'),
+            'task_type': meta.get('task_type'),
+            'leg_type': meta.get('leg_type'),
+            'iteration': meta.get('iteration'),
         })
 
         # Clean up
