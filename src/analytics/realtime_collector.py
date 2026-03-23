@@ -55,6 +55,12 @@ class RealtimeAnalyticsCollector:
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+        # ===== Flow Metrics Infrastructure =====
+        self.nodes = None                    # Set by record_inventory_snapshot()
+        self.metric_helpers = None           # Set by _initialize_metrics()
+        self.metric_modules: Dict = {}       # {metric_name: metric_instance}
+        self.flow_metrics_cache: Dict = {}   # Cached results from last compute()
+
         # Raw event streams (append-only)
         # Note: task completion data now read from task_logger.cost_data
         self.robot_samples = []    # {robot_id, status, battery, position, assigned_tasks}
@@ -111,10 +117,17 @@ class RealtimeAnalyticsCollector:
         Sample inventory levels from HospitalNode objects.
         Called periodically during training (e.g., every 50 steps).
 
+        On first call: store nodes and initialize flow metrics.
+
         Args:
             nodes: List of HospitalNode objects
             current_time: Current simulation/real time
         """
+        # Initialize metrics on first call (capture nodes + floor layout)
+        if self.nodes is None:
+            self.nodes = nodes
+            self._initialize_metrics()
+
         for node in nodes:
             # SKU-level inventory if available
             if hasattr(node, 'sku_inventory') and node.sku_inventory:
@@ -167,6 +180,50 @@ class RealtimeAnalyticsCollector:
             'reward': total_reward,
             'cost_per_reward': total_cost / total_reward if total_reward > 0 else 0,
         }
+
+    # ========== FLOW METRICS ORCHESTRATION ==========
+
+    def _initialize_metrics(self):
+        """Instantiate all flow metric modules (called on first inventory snapshot)."""
+        try:
+            from src.analytics.metrics import (
+                MetricHelpers, ZoneLatencyMetric, RoutePerformanceMetric,
+                TaskCompletionDistributionMetric, EfficiencyComparisonMetric,
+            )
+            self.metric_helpers = MetricHelpers(self.nodes)
+            self.metric_modules = {
+                'zone_latency': ZoneLatencyMetric(self.task_logger, self.nodes, self.metric_helpers),
+                'route_performance': RoutePerformanceMetric(self.task_logger, self.nodes, self.metric_helpers),
+                'task_completion_dist': TaskCompletionDistributionMetric(self.task_logger, self.nodes, self.metric_helpers),
+                'efficiency_comparison': EfficiencyComparisonMetric(self.task_logger, self.nodes, self.metric_helpers),
+            }
+        except Exception:
+            self.metric_modules = {}
+
+    def compute_flow_metrics(self) -> Dict:
+        """
+        Orchestrate computation of all flow metrics.
+
+        Returns:
+            {
+                'zone_latency': {...},
+                'route_performance': {...},
+                'task_completion_dist': {...},
+                'efficiency_comparison': {...},
+            }
+        """
+        if not self.metric_modules:
+            return {}
+
+        result = {}
+        for name, metric in self.metric_modules.items():
+            try:
+                result[name] = metric.compute()
+            except Exception:
+                result[name] = {}
+
+        self.flow_metrics_cache = result
+        return result
 
     # ========== METRICS COMPUTATION ==========
 
@@ -227,7 +284,7 @@ class RealtimeAnalyticsCollector:
     # ========== OUTPUT GENERATION ==========
 
     def save_metrics_json(self):
-        """Save all raw events to JSON for later analysis."""
+        """Save all raw events and flow metrics to JSON for later analysis."""
         output = {
             'mode': self.mode,
             'iteration': self.current_iteration,
@@ -236,6 +293,7 @@ class RealtimeAnalyticsCollector:
             'inventory_snapshots': self.inventory_snapshots,
             'corridor_samples': self.corridor_samples,
             'metrics': self.metrics,
+            'flow_metrics': self.flow_metrics_cache,
         }
 
         json_path = self.output_dir / 'metrics.json'
@@ -429,6 +487,7 @@ class RealtimeAnalyticsCollector:
         return {
             'iteration': self.current_iteration,
             'metrics': self.metrics,
+            'flow_metrics': self.flow_metrics_cache,
             'event_counts': {
                 'tasks': task_count,
                 'robot_samples': len(self.robot_samples),

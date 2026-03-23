@@ -911,6 +911,7 @@ def main():
             if iteration % 50 == 0:
                 analytics.record_inventory_snapshot(env.graph_state.nodes, env.current_time)
                 analytics.record_corridor_state(env.graph_state.edges, env.current_time)
+                analytics.compute_flow_metrics()  # Compute and cache flow analytics
 
             # Generate task metrics snapshots periodically
             if iteration % 50 == 0:
