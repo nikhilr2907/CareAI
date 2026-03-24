@@ -7,6 +7,11 @@ from typing import List, Tuple, Optional
 import heapq
 
 
+def _is_valid_edge_index(edge_idx: Optional[int], graph_state) -> bool:
+    """Check if edge index is valid (not None and within bounds)."""
+    return edge_idx is not None and 0 <= edge_idx < len(graph_state.edges)
+
+
 def dijkstra_shortest_path(
     start_node_idx: int,
     goal_node_idx: int,
@@ -370,7 +375,7 @@ def estimate_travel_distance(robot, target_node_idx: int, graph_state) -> float:
         )
         return distance
 
-    elif robot.telemetry and robot.telemetry.current_edge_index is not None:
+    elif robot.telemetry and _is_valid_edge_index(robot.telemetry.current_edge_index, graph_state):
         # Robot is on edge - compute remaining distance on current edge + path from edge end
         edge_idx = robot.telemetry.current_edge_index
         edge = graph_state.edges[edge_idx]

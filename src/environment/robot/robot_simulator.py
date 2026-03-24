@@ -248,7 +248,7 @@ class RobotSimulator:
             self.velocity_ms = 0.0
             return self.get_telemetry()
 
-        if self.current_edge_index is not None:
+        if self.current_edge_index is not None and 0 <= self.current_edge_index < len(self.graph_state.edges):
             # Robot is on an edge
             edge = self.graph_state.edges[self.current_edge_index]
             num_active = max(1, len(edge.active_robot_ids))
@@ -360,7 +360,7 @@ class RobotSimulator:
         """Generate current telemetry snapshot."""
         # Calculate ETA to next node
         eta = 0.0
-        if self.current_edge_index is not None:
+        if self.current_edge_index is not None and 0 <= self.current_edge_index < len(self.graph_state.edges):
             edge = self.graph_state.edges[self.current_edge_index]
             remaining_distance = edge.distance_m * (1.0 - self.edge_progress)
             eta = remaining_distance / self.velocity_ms if self.velocity_ms > 0 else 0.0

@@ -1065,7 +1065,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
                 continue
             if robot.telemetry.is_on_edge:
                 edge_idx = robot.telemetry.current_edge_index
-                if edge_idx is not None and edge_idx < len(self.graph_state.edges):
+                if edge_idx is not None and 0 <= edge_idx < len(self.graph_state.edges):
                     edge = self.graph_state.edges[edge_idx]
                     edge.active_robot_ids.append(robot.robot_id)
                     edge.active_robot_progress[robot.robot_id] = (
@@ -1171,6 +1171,8 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
 
     def _count_approaching_robots(self, edge_index: int, exclude_robot_id: int = -1) -> int:
         """Count robots with the given edge in their planned path but not currently on it."""
+        if edge_index is None or not (0 <= edge_index < len(self.graph_state.edges)):
+            return 0
         edge = self.graph_state.edges[edge_index]
         count = 0
         for robot in self.robots:

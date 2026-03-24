@@ -259,10 +259,10 @@ def draw_robots(screen, env, bounds, width, height, font):
         if not robot.telemetry:
             continue
 
-        if robot.telemetry.current_node_index is not None:
+        if robot.telemetry.current_node_index is not None and 0 <= robot.telemetry.current_node_index < len(env.graph_state.nodes):
             node = env.graph_state.nodes[robot.telemetry.current_node_index]
             wx, wy = _get_node_center(node)
-        elif robot.telemetry.current_edge_index is not None:
+        elif robot.telemetry.current_edge_index is not None and 0 <= robot.telemetry.current_edge_index < len(env.graph_state.edges):
             edge = env.graph_state.edges[robot.telemetry.current_edge_index]
             from_node = node_map.get(edge.from_node)
             to_node = node_map.get(edge.to_node)
