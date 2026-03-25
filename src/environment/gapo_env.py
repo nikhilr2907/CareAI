@@ -14,6 +14,7 @@ from .tasks.task_generator import (
 from ..multi_agent_ppo.task_creation_actor import TaskCreationActor
 from .graph_helpers import dijkstra_shortest_path
 from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
+from ..reliability.telemetry_effects import TelemetryEffectsManager
 
 
 class GAPOTaskAssignmentEnv:
@@ -97,6 +98,11 @@ class GAPOTaskAssignmentEnv:
         self.emergency_tasks: list = []
         self._last_battery_penalty = 0.0
 
+        # Phase 1: Telemetry noise injection (realistic sensor characteristics)
+        self.telemetry_noise_manager = TelemetryEffectsManager(enable=True, graph_bounds=None)
+        self.robot_reset_times = []  # Track when each robot was initialized
+        self.graph_bounds = None  # Will be set in reset()
+
     def reset(self):
         # Initialize graph (use custom graph if provided, otherwise use config)
         if hasattr(self, '_custom_graph_state') and self._custom_graph_state is not None:
@@ -115,9 +121,23 @@ class GAPOTaskAssignmentEnv:
             # Create new graph from hospital_config or default
             self.graph_state = GraphState(config=self.hospital_config)
 
+        # Calculate graph bounds for position validation
+        if self.graph_state and self.graph_state.nodes:
+            x_coords = [node.x for node in self.graph_state.nodes]
+            y_coords = [node.y for node in self.graph_state.nodes]
+            padding = 5.0  # Allow 5m buffer beyond node positions
+            self.graph_bounds = (
+                min(x_coords) - padding,
+                max(x_coords) + padding,
+                min(y_coords) - padding,
+                max(y_coords) + padding
+            )
+            self.telemetry_noise_manager.graph_bounds = self.graph_bounds
+
         # Initialize robots
         self.robots = []
         self.robot_simulators = []
+        self.robot_reset_times = [self.current_time] * self.num_robots
 
         for i in range(self.num_robots):
             initial_node = np.random.randint(0, self.num_nodes)
@@ -510,6 +530,18 @@ class GAPOTaskAssignmentEnv:
             telemetry = simulator.update(dt)
             telemetry.timestamp = self.current_time
 
+            # Phase 1: Apply realistic telemetry noise and validation
+            robot_id = simulator.robot_id
+            elapsed_minutes = (self.current_time - self.robot_reset_times[robot_id]) / 60.0
+            num_nodes = len(self.graph_state.nodes) if self.graph_state else 0
+            num_edges = len(self.graph_state.edges) if self.graph_state else 0
+            telemetry = self.telemetry_noise_manager.apply_noise(
+                telemetry,
+                elapsed_minutes,
+                num_nodes=num_nodes,
+                num_edges=num_edges
+            )
+
             # Stamp exit time on any traversal that just completed
             if prev_edge_idx is not None and simulator.current_edge_index != prev_edge_idx:
                 simulator.finalize_current_traversal(self.current_time)
@@ -520,6 +552,9 @@ class GAPOTaskAssignmentEnv:
 
             # Update robot telemetry
             robot.update_telemetry(telemetry)
+
+            # Mid-task battery interrupt: override path with charge trip if battery too low
+            self._interrupt_mid_task_for_charging(simulator.robot_id, robot, simulator)
 
             # If robot is idle but has queued tasks, plan the next valid task
             if (not simulator.path_queue and simulator.current_target_node is None and
@@ -1161,6 +1196,32 @@ class GAPOTaskAssignmentEnv:
         min_dist = min(estimate_travel_distance(robot, h, self.graph_state) for h in hub_indices)
         battery_needed = min_dist * simulator.battery_drain_rate * self.battery_safety_margin
         return simulator.battery_level <= battery_needed
+
+    def _interrupt_mid_task_for_charging(self, robot_id: int, robot, simulator) -> bool:
+        """
+        If a robot is mid-task and battery drops below charging threshold,
+        override its path with a charge trip. Tasks remain in queue and
+        auto-resume after charging completes.
+
+        Returns True if an interrupt was triggered.
+        """
+        if robot_id in self._offline_robots:
+            return False
+        if robot_id in self._robots_routing_to_charge:
+            return False
+        if simulator.is_charging:
+            return False
+        # Only active real tasks (active_task_id == -1 means already on a charge run)
+        if simulator.active_task_id is None or simulator.active_task_id == -1:
+            return False
+        if not self._should_robot_charge(robot_id):
+            return False
+
+        # Interrupt: _send_robot_to_charge overwrites simulator path_queue and
+        # sets active_task_id = -1. Tasks stay in robot.task_queue so they
+        # auto-resume once the charge trip completes.
+        self._send_robot_to_charge(robot_id)
+        return True
 
     def _nearest_hub_index(self, robot_id: int) -> int:
         """Find index of nearest hub node to robot."""
