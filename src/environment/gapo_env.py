@@ -4,8 +4,6 @@ GAPO-compatible environment for hospital robot task allocation.
 Returns graph-structured states (dict) instead of flat vectors.
 Compatible with GNN-based GAPO policy network.
 """
-# import gym
-# from gym import spaces
 import numpy as np
 from typing import List, Dict, Optional
 
@@ -24,7 +22,7 @@ from .graph_helpers import dijkstra_shortest_path
 from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
 
 
-class GAPOTaskAssignmentEnv:#(gym.Env):
+class GAPOTaskAssignmentEnv:
     """
     GAPO-compatible environment with graph-structured states.
 
