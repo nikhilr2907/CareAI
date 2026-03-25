@@ -9,15 +9,6 @@ if TYPE_CHECKING:
 
 @dataclass
 class RobotState:
-    """
-    Represents the state of an individual robot combining task assignments and telemetry.
-    Telemetry can come from simulator or real robot sensors.
-
-    Supports multi-capacity task queuing:
-    - Robots can carry up to 12 items
-    - Can accept multiple tasks if capacity allows
-    - Tasks queued by priority (high priority first)
-    """
     robot_id: int
     max_capacity: int = 12  # Maximum items robot can carry
 

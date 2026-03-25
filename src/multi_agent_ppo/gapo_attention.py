@@ -1,13 +1,9 @@
-"""Attention modules used by GAPO."""
-
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
 
 
 class TaskRobotAttention(nn.Module):
-    """Attend from a task embedding to robot embeddings."""
-
     def __init__(self, embed_dim=64, num_heads=4, dropout=0.0):
         super().__init__()
         self.multihead_attn = nn.MultiheadAttention(

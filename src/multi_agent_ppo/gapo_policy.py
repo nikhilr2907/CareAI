@@ -1,4 +1,3 @@
-"""GAPO policy network."""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,8 +10,6 @@ from .debiasing import ComprehensiveDebiasing
 
 
 class GAPOPolicyNetwork(nn.Module):
-    """Policy network with graph encoders, attention, and optional debiasing."""
-
     def __init__(
         self,
         node_continuous_dim=8,

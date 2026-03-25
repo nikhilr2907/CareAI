@@ -1,7 +1,3 @@
-"""
-Robot telemetry system for real-time position and state tracking.
-Designed to be compatible with real robot data feeds.
-"""
 from dataclasses import dataclass
 from typing import Optional
 import time
@@ -9,10 +5,6 @@ import time
 
 @dataclass
 class RobotTelemetry:
-    """
-    Real-time telemetry data broadcast by robot.
-    Can be populated from simulation or real robot sensors/ROS topics.
-    """
     timestamp: float  # When this telemetry was captured (Unix time or sim time)
     robot_id: int
 

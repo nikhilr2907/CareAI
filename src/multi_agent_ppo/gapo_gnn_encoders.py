@@ -1,12 +1,3 @@
-"""
-Graph Neural Network encoders for GAPO (Graph Attention-Based Policy Optimization).
-
-Implements:
-- Hospital Graph Encoder (nodes + edges)
-- Robot Fleet Encoder (dynamic proximity graph)
-- Task Encoder
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,15 +9,6 @@ from torch_geometric.nn import GATConv, SAGEConv
 
 
 class HospitalGraphEncoder(nn.Module):
-    """
-    Encodes hospital graph structure using Graph Attention Networks with TWO-PASS encoding.
-
-    Pass 1: Encode nodes from continuous + categorical features
-    Pass 2: Augment edges with from/to node embeddings, then refine node embeddings
-
-    Input: Node features (continuous + categorical), edge features, edge-node connectivity
-    Output: Node embeddings + edge embeddings + global graph embedding
-    """
 
     def __init__(
         self,

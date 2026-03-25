@@ -1,7 +1,3 @@
-"""
-Robot simulator that generates telemetry data.
-Simulates physical robot movement and can be replaced with real robot interface.
-"""
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
@@ -12,7 +8,6 @@ from .robot_telemetry import RobotTelemetry
 
 @dataclass
 class EdgeTraversalRecord:
-    """Record of a single robot traversal of an edge, used to train edge cost model."""
     edge_index: int
     robot_id: int
 
@@ -72,14 +67,6 @@ class EdgeTraversalRecord:
         return float(np.mean(self.velocity_samples)) / self.max_v_ms
 
     def to_feature_vector(self) -> np.ndarray:
-        """Convert to feature vector for model input.
-
-        Note: same_direction_count, opposite_direction_count, and stop_count
-        are excluded — they are not available at inference time (direction is
-        unknown when predicting before traversal; stop_count accumulates during
-        traversal). Using them at training but not inference causes a mismatch.
-        num_robots_on_edge captures the total congestion signal instead.
-        """
         return np.array([
             self.distance_m,
             self.corridor_width,
@@ -94,11 +81,6 @@ class EdgeTraversalRecord:
 
 
 class RobotSimulator:
-    """
-    Simulates a physical robot and generates telemetry.
-    This class can be replaced with a real robot interface that reads from ROS topics/MQTT.
-    """
-
     def __init__(self, robot_id: int, graph_state, initial_node_index: int,
                  max_capacity: int = 12):
         self.robot_id = robot_id
@@ -141,14 +123,6 @@ class RobotSimulator:
         self._current_traversal: Optional[EdgeTraversalRecord] = None
 
     def set_path(self, path: List[int], task_id: int, num_items: int):
-        """
-        Command robot to follow a path (from task assignment).
-
-        Args:
-            path: List of node indices to visit (includes current node)
-            task_id: ID of task being executed
-            num_items: Number of items to load for this task
-        """
         if len(path) > 1:
             self.path_queue = path[1:]  # Exclude current node
             self.current_target_node = path[1]
@@ -166,7 +140,6 @@ class RobotSimulator:
             self.active_task_id = task_id
 
     def _start_edge_traversal(self, from_node_idx: int, to_node_idx: int):
-        """Begin traversing an edge."""
         self.current_node_index = from_node_idx
         self.current_edge_index = self._find_edge_index(from_node_idx, to_node_idx)
         if self.current_edge_index is None:
@@ -226,16 +199,6 @@ class RobotSimulator:
         )
 
     def update(self, time_delta: float) -> RobotTelemetry:
-        """
-        Simulate robot movement for time_delta seconds.
-        Returns updated telemetry.
-
-        Args:
-            time_delta: Time step in seconds
-
-        Returns:
-            RobotTelemetry object with current state
-        """
         # Handle charging
         if self.is_charging:
             self.battery_level = min(1.0, self.battery_level + self.charging_rate * time_delta)
@@ -305,7 +268,6 @@ class RobotSimulator:
         return self.get_telemetry()
 
     def _arrive_at_node(self, node_idx: int):
-        """Handle arrival at a node."""
         # Finalize traversal record before clearing edge state
         if self._current_traversal is not None:
             # exit_time is set by environment via finalize_traversal()
@@ -334,30 +296,22 @@ class RobotSimulator:
             # Note: active_task_id and capacity cleared by environment when task completes
 
     def complete_task(self, num_items: int):
-        """
-        Called by environment when task is completed.
-        Unloads items and clears active task.
-        """
         self.current_capacity -= num_items
         self.current_capacity = max(0, self.current_capacity)
         self.active_task_id = None
 
     def load_items(self, num_items: int):
-        """Load items onto the robot (pickup leg)."""
         self.current_capacity += num_items
         self.current_capacity = min(self.current_capacity, self.max_capacity)
 
     def start_charging(self):
-        """Start charging the robot at a charging dock."""
         self.is_charging = True
         self.velocity_ms = 0.0
 
     def stop_charging(self):
-        """Stop charging the robot."""
         self.is_charging = False
 
     def get_telemetry(self) -> RobotTelemetry:
-        """Generate current telemetry snapshot."""
         # Calculate ETA to next node
         eta = 0.0
         if self.current_edge_index is not None and 0 <= self.current_edge_index < len(self.graph_state.edges):
@@ -394,31 +348,26 @@ class RobotSimulator:
         )
 
     def set_traversal_entry_time(self, time: float):
-        """Called by environment to stamp entry time on current traversal."""
         if self._current_traversal is not None:
             self._current_traversal.entry_time = time
             self._current_traversal.time_of_day = (time % 86400.0) / 86400.0
 
     def set_traversal_approaching_count(self, count: int):
-        """Called by environment to set approaching robot count (needs global view)."""
         if self._current_traversal is not None:
             self._current_traversal.approaching_robot_count = count
 
     def finalize_current_traversal(self, exit_time: float):
-        """Called by environment to stamp exit time on most recent completed traversal."""
         if self.traversal_records:
             latest = self.traversal_records[-1]
             if latest.exit_time == 0.0:
                 latest.exit_time = exit_time
 
     def get_and_clear_traversal_records(self) -> List[EdgeTraversalRecord]:
-        """Retrieve all completed traversal records and clear buffer."""
         records = self.traversal_records
         self.traversal_records = []
         return records
 
     def _find_edge_index(self, from_idx: int, to_idx: int) -> Optional[int]:
-        """Find edge index connecting two nodes (bidirectional)."""
         from_node = self.graph_state.get_node_by_index(from_idx)
         to_node = self.graph_state.get_node_by_index(to_idx)
 
@@ -429,7 +378,6 @@ class RobotSimulator:
         return None
 
     def _find_nearest_node(self, x: float, y: float) -> int:
-        """Find nearest node to given coordinates."""
         min_dist = float('inf')
         nearest_idx = 0
 

@@ -1,9 +1,3 @@
-"""
-Real-time analytics collector for training and deployment.
-Consumes RobotState, RobotTelemetry, HospitalNode objects.
-Task completion data read from TaskLogger.cost_data.
-No data duplication - reads directly from environment objects.
-"""
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Optional

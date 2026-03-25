@@ -1,7 +1,3 @@
-"""
-Inventory-driven task generation for hospital logistics.
-Generates tasks based on stock levels and consumption rates.
-"""
 import numpy as np
 from typing import List, Optional, Set, Tuple, Dict
 from .task_state import Task, TaskQueue

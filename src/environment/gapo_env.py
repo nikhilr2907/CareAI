@@ -1,9 +1,3 @@
-"""
-GAPO-compatible environment for hospital robot task allocation.
-
-Returns graph-structured states (dict) instead of flat vectors.
-Compatible with GNN-based GAPO policy network.
-"""
 import numpy as np
 from typing import List, Dict, Optional
 
@@ -23,16 +17,6 @@ from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
 
 
 class GAPOTaskAssignmentEnv:
-    """
-    GAPO-compatible environment with graph-structured states.
-
-    Key differences from V2:
-    - Returns state as dictionary (not flat vector)
-    - Includes graph connectivity (edge_index)
-    - Provides robot positions explicitly
-    - Compatible with GNN encoders
-    """
-
     def __init__(
         self,
         num_robots=5,
@@ -127,7 +111,6 @@ class GAPOTaskAssignmentEnv:
         self._last_battery_penalty = 0.0
 
     def reset(self):
-        """Reset environment and return initial state dict."""
         # Initialize graph (use custom graph if provided, otherwise use config)
         if hasattr(self, '_custom_graph_state') and self._custom_graph_state is not None:
             # Use the custom graph state (from config file)
@@ -222,21 +205,6 @@ class GAPOTaskAssignmentEnv:
         return self._get_state_dict()
 
     def step(self, dt: float = None):
-        """
-        Advance simulation by dt seconds (continuous operation).
-
-        This is the NEW continuous step function. Policy assigns tasks externally
-        using assign_task_to_robot().
-
-        Args:
-            dt: Time step in seconds (default: self.timestep_seconds)
-
-        Returns:
-            state_dict: Current state
-            reward: Reward for this timestep
-            done: False (continuous) or True if max_time reached
-            info: Debug information
-        """
         if dt is None:
             dt = self.timestep_seconds
 
@@ -330,19 +298,16 @@ class GAPOTaskAssignmentEnv:
         self.pending_tasks = rank_tasks(task_queue, self.current_time)
 
     def _prune_stochastic_task_history(self):
-        """Keep only stochastic task timestamps within the last simulated hour."""
         cutoff = self.current_time - 3600.0
         self._stochastic_task_timestamps = [
             t for t in self._stochastic_task_timestamps if t >= cutoff
         ]
 
     def _remaining_stochastic_task_budget(self) -> int:
-        """Remaining stochastic tasks allowed in the rolling 1-hour window."""
         self._prune_stochastic_task_history()
         return max(0, self.max_stochastic_tasks_per_hour - len(self._stochastic_task_timestamps))
 
     def _record_stochastic_tasks(self, count: int):
-        """Record creation timestamps for stochastic tasks."""
         if count <= 0:
             return
         self._stochastic_task_timestamps.extend([self.current_time] * count)
@@ -1039,14 +1004,12 @@ class GAPOTaskAssignmentEnv:
             return np.array([[i, i] for i in range(self.num_nodes)], dtype=np.int64).T
 
     def _find_node_index(self, node_id: str) -> Optional[int]:
-        """Find node index by ID."""
         for i, node in enumerate(self.graph_state.nodes):
             if node.node_id == node_id:
                 return i
         return None
 
     def _update_edge_congestion(self):
-        """Update edge and node occupancy from current telemetry."""
         for edge in self.graph_state.edges:
             edge.active_robot_ids.clear()
             edge.active_robot_progress.clear()
@@ -1081,7 +1044,6 @@ class GAPOTaskAssignmentEnv:
             edge.approaching_robot_count = self._count_approaching_robots(edge_idx)
 
     def _find_nearest_node(self, x, y):
-        """Find nearest node."""
         min_dist = float('inf')
         nearest_idx = 0
 
@@ -1094,7 +1056,6 @@ class GAPOTaskAssignmentEnv:
         return nearest_idx
 
     def _collect_traversal_records(self):
-        """Collect completed traversal records from all simulators and feed to edge cost model."""
         all_records = []
         for simulator in self.robot_simulators:
             records = simulator.get_and_clear_traversal_records()

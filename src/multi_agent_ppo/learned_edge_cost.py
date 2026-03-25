@@ -1,15 +1,3 @@
-"""
-Learned Edge Cost Model for graph-based path planning.
-
-Predicts edge traversal time (mean + variance) from real-time congestion features.
-Trained supervised from completed edge traversal records, NOT from RL rewards.
-
-The model replaces the hardcoded current_weight heuristic in HospitalEdge
-with data-driven predictions that capture complex interactions between
-congestion factors.
-
-Training signal: Gaussian NLL on (predicted_mean, predicted_var) vs actual_time.
-"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

@@ -1,7 +1,3 @@
-"""
-Utility helpers for GAPO training entrypoints.
-Keeps run_training.py lightweight without changing behavior.
-"""
 import argparse
 import json
 import logging
