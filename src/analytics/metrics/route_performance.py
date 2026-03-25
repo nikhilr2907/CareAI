@@ -17,9 +17,18 @@ class RoutePerformanceMetric(BaseMetric):
 
         Returns:
             {
-                'SW→SE': {'mean': float, 'p95': float, 'count': int},
+                'NW→NE': {'mean': float, 'p95': float, 'count': int},
+                'NW→SE': {...},
+                'NW→SW': {...},
+                'NE→NW': {...},
+                'NE→SW': {...},
+                'NE→SE': {...},
+                'SE→NW': {...},
+                'SE→NE': {...},
+                'SE→SW': {...},
+                'SW→NW': {...},
                 'SW→NE': {...},
-                ...
+                'SW→SE': {...}
             }
         """
         if not self._validate():

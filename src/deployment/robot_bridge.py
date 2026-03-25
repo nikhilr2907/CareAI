@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
 import numpy as np
 import logging
 import asyncio
@@ -31,27 +32,27 @@ class RobotTelemetryData:
     eta_to_next_node: float
 
 
-class RobotBridge:
+class RobotBridge(ABC):
     """
     Abstract interface for robot communication.
     Subclasses implement specific backends (mock, ROS, MQTT).
     """
 
+    @abstractmethod
     def get_telemetry(self, robot_id: int) -> RobotTelemetryData:
         """Get current telemetry from a robot."""
-        raise NotImplementedError
 
+    @abstractmethod
     def get_all_telemetry(self) -> List[RobotTelemetryData]:
         """Get telemetry from all robots."""
-        raise NotImplementedError
 
+    @abstractmethod
     def send_path_command(self, robot_id: int, path: List[int], task_id: int, num_items: int):
         """Command robot to follow a path for a task."""
-        raise NotImplementedError
 
+    @abstractmethod
     def get_num_robots(self) -> int:
         """Get number of robots in fleet."""
-        raise NotImplementedError
 
 
 class MockRobotBridge(RobotBridge):

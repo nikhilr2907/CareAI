@@ -17,14 +17,15 @@ class EfficiencyComparisonMetric(BaseMetric):
 
         Returns:
             {
-                'SW': {
+                'NW': {
                     'percent_loss': float,       # % slower than fastest
                     'absolute_loss_s': float,    # seconds slower
                     'mean_latency_s': float,     # actual mean latency
                     'is_baseline': bool,         # True if fastest
                 },
-                'SE': {...},
-                ...
+                'NE': {...},
+                'SW': {...},
+                'SE': {...}
             }
         """
         if not self._validate():

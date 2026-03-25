@@ -38,19 +38,6 @@ class GAPOTaskAssignmentEnv:
         self.timestep_seconds = timestep_seconds
         self.hospital_config = hospital_config  # Optional custom config
 
-        # Action space
-        # self.action_space = spaces.Discrete(num_robots)
-
-        # Observation space (dict-based)
-        # self.observation_space = spaces.Dict({
-        #     'task_features': spaces.Box(-np.inf, np.inf, (12,), np.float32),
-        #     'node_features': spaces.Box(-np.inf, np.inf, (num_nodes, 5), np.float32),
-        #     'edge_features': spaces.Box(-np.inf, np.inf, (20, 3), np.float32),
-        #     'robot_features': spaces.Box(-np.inf, np.inf, (num_robots, 12), np.float32),
-        #     'robot_positions': spaces.Box(-np.inf, np.inf, (num_robots, 2), np.float32),
-        #     'queue_features': spaces.Box(-np.inf, np.inf, (5,), np.float32),
-        # })
-
         # Environment components
         self.graph_state = None
         self.robots = []

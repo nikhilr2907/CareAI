@@ -1,7 +1,10 @@
 """Parser for the extended hospital config format."""
 import json
+import logging
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -182,38 +185,38 @@ class ExtendedConfigParser:
         return item.temperature_sensitive if item else False
 
     def summarize(self):
-        print(f"\n{'='*60}")
-        print(f"Config: {self.name}")
-        print(f"{'='*60}")
+        logger.debug(f"\n{'='*60}")
+        logger.debug(f"Config: {self.name}")
+        logger.debug(f"{'='*60}")
 
-        print(f"\nMetadata:")
+        logger.debug(f"\nMetadata:")
         for key, value in self.metadata.items():
-            print(f"  {key}: {value}")
+            logger.debug(f"  {key}: {value}")
 
-        print(f"\nNodes ({len(self.nodes)}):")
+        logger.debug(f"\nNodes ({len(self.nodes)}):")
         for node in self.nodes:
-            print(f"\n  {node.node_id}: {node.name} ({node.node_type})")
-            print(f"    Position: {node.pos}, Size: {node.size}")
+            logger.debug(f"\n  {node.node_id}: {node.name} ({node.node_type})")
+            logger.debug(f"    Position: {node.pos}, Size: {node.size}")
 
             if node.construction:
-                print(f"    Equipment: {len(node.construction.equipment)} items")
+                logger.debug(f"    Equipment: {len(node.construction.equipment)} items")
                 if node.construction.num_beds > 0:
-                    print(f"    Beds: {node.construction.num_beds}")
+                    logger.debug(f"    Beds: {node.construction.num_beds}")
 
             if node.inventory_categories:
-                print(f"    Inventory categories: {len(node.inventory_categories)}")
+                logger.debug(f"    Inventory categories: {len(node.inventory_categories)}")
                 for cat_name, cat in node.inventory_categories.items():
-                    print(f"      - {cat_name}: {cat.stock_level}/{cat.max_stock} "
+                    logger.debug(f"      - {cat_name}: {cat.stock_level}/{cat.max_stock} "
                           f"(consumption: {cat.consumption_rate}/hr)")
 
             if node.patient_info:
                 spec = node.patient_info.get('specialization', 'N/A')
-                print(f"    Specialization: {spec}")
+                logger.debug(f"    Specialization: {spec}")
 
-        print(f"\nItem Database: {len(self.item_database)} items")
+        logger.debug(f"\nItem Database: {len(self.item_database)} items")
         controlled = self.get_controlled_substances()
         if controlled:
-            print(f"  Controlled substances: {len(controlled)}")
+            logger.debug(f"  Controlled substances: {len(controlled)}")
 
-        print(f"\nEdges: {len(self.edges)}")
-        print(f"{'='*60}\n")
+        logger.debug(f"\nEdges: {len(self.edges)}")
+        logger.debug(f"{'='*60}\n")

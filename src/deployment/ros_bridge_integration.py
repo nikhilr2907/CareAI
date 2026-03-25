@@ -113,9 +113,7 @@ class ROSBridgeIntegration:
                 )
                 return
 
-            # MULTI_ROBOT_TODO: Extract robot_id from telemetry once bridge includes it
-            # For now, we assume single robot (robot_id=0)
-            robot_id = 0
+            robot_id = telemetry.robot_id
 
             if robot_id not in self.robot_states:
                 logger.warning(f"Robot {robot_id} not in robot_states")

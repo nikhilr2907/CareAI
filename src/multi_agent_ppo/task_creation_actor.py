@@ -199,10 +199,10 @@ def build_candidate_universe(
     Build the eligible SKU candidate universe from graph_state inventory.
 
     Eligibility (all conditions must hold):
-        stock > reorder_point  — not urgently low (urgent = deterministic replenishment)
-        stock < max            — has room to receive delivery
-        rate > 0               — node actually consumes this SKU
-        not already covered    — no pending task already targets (to_node, sku_id)
+        stock > reorder_point - not urgently low (urgent = deterministic replenishment)
+        stock < max - has room to receive delivery
+        rate > 0 - node actually consumes this SKU
+        not already covered - no pending task already targets (to_node, sku_id)
 
     Supports both per-SKU inventory (node.sku_inventory dict) and node-level
     fallback (node.stock_level / node.max_stock).

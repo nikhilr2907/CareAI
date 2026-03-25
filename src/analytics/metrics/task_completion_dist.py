@@ -18,12 +18,13 @@ class TaskCompletionDistributionMetric(BaseMetric):
 
         Returns:
             {
-                'SW': {
+                'NW': {
                     'p50': float, 'p95': float, 'p99': float, 'std': float,
                     'min': float, 'max': float, 'mean': float, 'count': int
                 },
+                'NE': {...},
                 'SE': {...},
-                ...
+                'SW': {...}
             }
         """
         if not self._validate():

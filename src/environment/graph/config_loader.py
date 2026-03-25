@@ -2,10 +2,13 @@
 from pathlib import Path
 from typing import List, Tuple, Dict
 import json
+import logging
 
 from .node import HospitalNode
 from .mock_config_parser import MockConfigParser
 from .extended_config_parser import ExtendedConfigParser
+
+logger = logging.getLogger(__name__)
 
 
 def load_config_from_file(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[int, int]], Dict]:
@@ -20,20 +23,20 @@ def load_config_from_file(config_path: str) -> Tuple[List[HospitalNode], List[Tu
     version = raw_data.get('metadata', {}).get('version', '')
 
     if '3.0' in version and 'item_database' in raw_data and 'shelves' in raw_data:
-        print(f"Detected v3 config format (version: {version})")
+        logger.info(f"Detected v3 config format (version: {version})")
         return _load_v3_config(raw_data)
 
     if 'consumables' in version or 'item_database' in raw_data:
-        print(f"Detected mock config format (version: {version})")
+        logger.info(f"Detected mock config format (version: {version})")
         nodes, edges = _load_mock_config(config_path)
         return nodes, edges, {}
 
     if 'item_database' in raw_data or 'extended' in version:
-        print(f"Detected extended config format (version: {version})")
+        logger.info(f"Detected extended config format (version: {version})")
         nodes, edges = _load_extended_config(config_path)
         return nodes, edges, {}
 
-    print("Detected legacy simple config format")
+    logger.info("Detected legacy simple config format")
     nodes, edges = _load_simple_config(config_path)
     return nodes, edges, {}
 

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RobotTelemetryData:
     """Current robot state from bridge."""
+    robot_id: int
     timestamp: float
     position: tuple  # (x, y, z)
     orientation: Dict[str, float]  # quaternion {x, y, z, w}
@@ -167,6 +168,7 @@ class ROSBridgeClient:
         """Handle robot telemetry update."""
         try:
             telemetry = RobotTelemetryData(
+                robot_id=data.get('robot_id', 0),
                 timestamp=data.get('timestamp', 0.0),
                 position=(
                     data['position']['x'],
@@ -253,6 +255,7 @@ class ROSBridgeClient:
             robot_telemetry = None
             if robot_data:
                 robot_telemetry = RobotTelemetryData(
+                    robot_id=robot_data.get('robot_id', 0),
                     timestamp=data.get('timestamp', 0.0),
                     position=(
                         robot_data['position']['x'],
