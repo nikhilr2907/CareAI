@@ -66,3 +66,4 @@ wheel==0.45.1
 xxhash==3.6.0
 yarl==1.22.0
 torch-geometric
+websockets>=12.0

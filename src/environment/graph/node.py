@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 @dataclass
 class HospitalNode:
@@ -49,9 +49,16 @@ class HospitalNode:
     # Example: {'IV_Therapy': {'stock': 50, 'max': 100, 'num_skus': 12, 'rate': 5.0}}
 
     # Operational location and shelf info (from extended configs)
-    location_id: Optional[str] = None  # e.g., "L00001"
+    location_id: Optional[str] = None  # e.g., "L00001" (legacy)
+    location_ids: List[str] = field(default_factory=list)  # v3 supports multiple locations per node
     shelf_ids: List[str] = field(default_factory=list)  # e.g., ["SH000001", "SH000002"]
     floor: int = 1  # Floor number in hospital
+    department_tag: Optional[str] = None  # e.g., "medical_high"
+    served_beds: int = 0  # Used for demand scaling
+    consumption_enabled: bool = True  # Point-of-use locations only
+
+    # SKU-level inventory: sku_id -> {stock, par, reorder, max, category, area_multiplier}
+    sku_inventory: Dict[str, Dict] = field(default_factory=dict)
 
     def __post_init__(self):
         """Initialize backwards compatibility fields."""
@@ -112,6 +119,12 @@ class HospitalNode:
     @property
     def time_to_stockout(self) -> float:
         """Calculate hours until stock runs out at current consumption rate."""
+        if self.sku_inventory:
+            rate = self.consumption_rate
+            if rate <= 0:
+                return float('inf')
+            total_stock = self.stock_level
+            return total_stock / rate if rate > 0 else float('inf')
         if self.consumption_rate <= 0:
             return float('inf')
         return self.stock_level / self.consumption_rate
@@ -124,6 +137,11 @@ class HospitalNode:
     @property
     def is_stockout(self) -> bool:
         """Check if location has run out of stock."""
+        if self.sku_inventory:
+            for sku_data in self.sku_inventory.values():
+                if sku_data.get('stock', 0.0) <= 0:
+                    return True
+            return False
         return self.stock_level <= 0
 
     @property
@@ -160,6 +178,58 @@ class HospitalNode:
     def restock(self, amount: float):
         """Add stock to this location (called when delivery completes)."""
         self.stock_level = min(self.max_stock, self.stock_level + amount)
+
+    # ========================================================================
+    # SKU-Level Inventory Methods (v3)
+    # ========================================================================
+
+    def get_sku_stock(self, sku_id: str) -> float:
+        if sku_id in self.sku_inventory:
+            return float(self.sku_inventory[sku_id].get('stock', 0.0))
+        return 0.0
+
+    def get_sku_reorder_point(self, sku_id: str) -> float:
+        if sku_id in self.sku_inventory:
+            return float(self.sku_inventory[sku_id].get('reorder', 0.0))
+        return 0.0
+
+    def get_sku_par_level(self, sku_id: str) -> float:
+        if sku_id in self.sku_inventory:
+            return float(self.sku_inventory[sku_id].get('par', 0.0))
+        return 0.0
+
+    def get_sku_max_level(self, sku_id: str) -> float:
+        if sku_id in self.sku_inventory:
+            return float(self.sku_inventory[sku_id].get('max', 0.0))
+        return 0.0
+
+    def consume_sku(self, sku_id: str, amount: float):
+        if sku_id in self.sku_inventory:
+            current = float(self.sku_inventory[sku_id].get('stock', 0.0))
+            self.sku_inventory[sku_id]['stock'] = max(0.0, current - amount)
+
+    def restock_sku(self, sku_id: str, amount: float):
+        if sku_id in self.sku_inventory:
+            current = float(self.sku_inventory[sku_id].get('stock', 0.0))
+            max_level = float(self.sku_inventory[sku_id].get('max', current + amount))
+            self.sku_inventory[sku_id]['stock'] = min(max_level, current + amount)
+
+    def recalc_category_inventory(self):
+        """Recompute category inventory aggregates from sku inventory."""
+        if not self.sku_inventory:
+            return
+        aggregates = {}
+        for sku_id, data in self.sku_inventory.items():
+            category = data.get('category')
+            if category is None:
+                continue
+            if category not in aggregates:
+                aggregates[category] = {'stock': 0.0, 'max': 0.0, 'num_skus': 0, 'rate': 0.0}
+            aggregates[category]['stock'] += float(data.get('stock', 0.0))
+            aggregates[category]['max'] += float(data.get('max', 0.0))
+        for category, agg in aggregates.items():
+            agg['num_skus'] = int(sum(1 for sku_id, data in self.sku_inventory.items() if data.get('category') == category))
+        self.category_inventory = aggregates
 
     def enable_variable_consumption(self, pattern_id: Optional[str] = None):
         """

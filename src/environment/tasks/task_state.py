@@ -23,6 +23,13 @@ class Task:
     # Inventory context
     source_stock_level: float = 0.0  # Stock level at destination when task created
     time_to_stockout: float = 999.0  # Hours until stockout when task created
+    sku_id: Optional[str] = None
+    category_key: Optional[str] = None
+    category_id: float = -1.0
+    sku_stock_level: float = 0.0
+    sku_max_level: float = 0.0
+    reorder_point: float = 0.0
+    par_level: float = 0.0
 
     # Computed fields (set by ranking or environment)
     urgency_score: float = 0.0  # Computed by rank_tasks()
@@ -35,6 +42,9 @@ class Task:
     parent_task_id: Optional[int] = None
     estimated_completion_time: Optional[float] = None
     learned_score: float = 0.0
+
+    # Task source tracking
+    source: str = "unknown"  # 'deterministic', 'factoriser', 'random_adhoc', 'random_adhoc_fallback'
 
     # Intra-room coordinates (for precise positioning within nodes)
     from_coordinates: Optional[tuple] = None  # (x, y) exact pickup point in meters
@@ -54,11 +64,14 @@ class Task:
         Extract task features for ML model (NO manual_priority - handled by ranking).
 
         Returns features: [from_idx, to_idx, duration, age, time_to_deadline,
-                          queue_position, num_items, time_to_stockout, task_type_flags(4)]
-        Total: 12 features
+                          queue_position, num_items, time_to_stockout, task_type_flags(4),
+                          category_id, sku_stock_ratio, sku_reorder_ratio]
+        Total: 15 features
         """
         age = self.get_age(current_time)
         time_to_deadline = self.get_time_to_deadline(current_time)
+        stock_ratio = (self.sku_stock_level / self.sku_max_level) if self.sku_max_level > 0 else 0.0
+        reorder_ratio = (self.reorder_point / self.sku_max_level) if self.sku_max_level > 0 else 0.0
 
         return np.array([
             float(self.from_location_index),
@@ -74,6 +87,9 @@ class Task:
             float(self.task_type == 'returns'),
             float(self.task_type == 'ad_hoc'),
             float(self.task_type == 'emergency'),
+            float(self.category_id),
+            stock_ratio,
+            reorder_ratio,
         ], dtype=np.float32)
 
 
