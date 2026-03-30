@@ -30,12 +30,14 @@ class RobotTelemetryData:
     is_available: bool
     active_task_id: Optional[int]
     eta_to_next_node: float
+ 
 
-
-class RobotBridge(ABC):
+class RobotBackend(ABC):
     """
-    Abstract interface for robot communication.
-    Subclasses implement specific backends (mock, ROS, MQTT).
+    Abstract backend interface for robot communication.
+
+    This is the CareRobotics-side adapter contract, not the ROS bridge node.
+    Subclasses implement specific backends (mock, WebSocket bridge, MQTT, ...).
     """
 
     @abstractmethod
@@ -55,11 +57,11 @@ class RobotBridge(ABC):
         """Get number of robots in fleet."""
 
 
-class MockRobotBridge(RobotBridge):
+class MockRobotBackend(RobotBackend):
     """
-    Mock bridge using simulator for testing.
+    Simulator-backed robot backend for testing.
 
-    In deployment, replace this with ROSRobotBridge or MQTTRobotBridge.
+    In deployment, replace this with ROSBridgeRobotBackend or another real backend.
     """
 
     def __init__(self, robot_simulators: List):
@@ -124,10 +126,10 @@ class MockRobotBridge(RobotBridge):
 
 class _BridgeTaskProxy:
     """
-    Duck-type Task proxy for ROSBridgeTaskSubmitter.
+    Duck-type Task proxy for RobotBridgeTaskDispatcher.
 
     Minimal adapter so the task submitter can work with path data from send_path_command.
-    Private to robot_bridge.py.
+    Private to robot_backend.py.
     """
 
     def __init__(self, task_id: int, planned_path: List[int], num_items: int, graph_state: Any = None):
@@ -140,9 +142,9 @@ class _BridgeTaskProxy:
         self.to_location_index = planned_path[-1] if planned_path else None
 
 
-class ROSRobotBridge(RobotBridge):
+class ROSBridgeRobotBackend(RobotBackend):
     """
-    Bridge to real robots via ROS 2 WebSocket bridge.
+    Robot backend that talks to the external ROS bridge over WebSocket.
 
     Connects to a ROS 2 bridge node running on a configurable URL (default: ws://localhost:8765).
     The bridge node handles Nav2 integration and publishes telemetry/status updates.
@@ -159,30 +161,94 @@ class ROSRobotBridge(RobotBridge):
             num_robots: Number of robots in the fleet (default: 1)
 
         Note:
-            ROSBridgeClient is imported lazily to avoid ImportError during training
+            RobotBridgeWebSocketClient is imported lazily to avoid ImportError
             if websockets is not installed.
         """
         # Deferred import — avoids ImportError during training if websockets not installed
-        from .ros_bridge_client import ROSBridgeClient as _ROSBridgeClient
-        from .ros_bridge_integration import ROSBridgeTaskSubmitter as _Submitter
+        from .robot_bridge_websocket_client import RobotBridgeWebSocketClient as _WebSocketClient
+        from .robot_bridge_state_sync import RobotBridgeTaskDispatcher as _Dispatcher
 
         self._num_robots = num_robots
         self._bridge_url = bridge_url
-        self._clients: Dict[int, Any] = {}       # robot_id -> ROSBridgeClient
-        self._submitters: Dict[int, Any] = {}    # robot_id -> ROSBridgeTaskSubmitter
+        self._clients: Dict[int, Any] = {}       # robot_id -> RobotBridgeWebSocketClient
+        self._submitters: Dict[int, Any] = {}    # robot_id -> RobotBridgeTaskDispatcher
+        self._listen_tasks: Dict[int, Any] = {}  # robot_id -> asyncio.Task
+        self._running = False
         self._graph_state = None
         self._logger = logging.getLogger(__name__)
 
-        # Create one client and submitter per robot
+        # Create one WebSocket client and dispatcher per robot.
         for robot_id in range(num_robots):
-            client = _ROSBridgeClient(bridge_url=bridge_url)
+            client = _WebSocketClient(bridge_url=bridge_url)
             self._clients[robot_id] = client
-            self._submitters[robot_id] = _Submitter(client, graph_state=None)
+            self._submitters[robot_id] = _Dispatcher(client, graph_state=None)
 
         self._logger.info(
-            f"ROSRobotBridge initialized: {num_robots} robot(s), "
+            f"ROSBridgeRobotBackend initialized: {num_robots} robot(s), "
             f"bridge_url={bridge_url}"
         )
+
+    async def start(self) -> None:
+        """
+        Connect all robot clients and start listening for telemetry.
+
+        Must be called before get_telemetry() or send_path_command().
+        Runs a reconnecting listen loop per robot as a background asyncio task.
+        """
+        self._running = True
+        for robot_id, client in self._clients.items():
+            task = asyncio.create_task(self._listen_with_reconnect(robot_id, client))
+            self._listen_tasks[robot_id] = task
+        self._logger.info(f"ROSBridgeRobotBackend started: {self._num_robots} robot(s)")
+
+    async def stop(self) -> None:
+        """
+        Cancel listen tasks and disconnect all robot clients.
+        """
+        self._running = False
+        for task in self._listen_tasks.values():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        for client in self._clients.values():
+            await client.disconnect()
+        self._listen_tasks.clear()
+        self._logger.info("ROSBridgeRobotBackend stopped")
+
+    async def _listen_with_reconnect(self, robot_id: int, client: Any) -> None:
+        """
+        Connect and listen for a single robot client with exponential backoff reconnection.
+
+        Runs until stop() is called.
+        """
+        backoff = 1.0
+        while self._running:
+            try:
+                if not client.is_connected:
+                    connected = await client.connect()
+                    if not connected:
+                        self._logger.warning(
+                            f"Robot {robot_id}: bridge connection failed, "
+                            f"retrying in {backoff:.1f}s..."
+                        )
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2.0, 30.0)
+                        continue
+
+                backoff = 1.0
+                await client.listen()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.error(
+                    f"Robot {robot_id}: listener error: {e}. "
+                    f"Retrying in {backoff:.1f}s..."
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
 
     def set_graph_state(self, graph_state: Any) -> None:
         """
@@ -239,7 +305,7 @@ class ROSRobotBridge(RobotBridge):
         Command a robot to follow a path (list of node indices).
 
         Schedules the WebSocket task send asynchronously. This method is synchronous
-        to match the RobotBridge interface, but internally uses asyncio.ensure_future()
+        to match the RobotBackend interface, but internally uses asyncio.ensure_future()
         if an event loop is running, or asyncio.run_until_complete() otherwise.
 
         Args:
@@ -320,7 +386,7 @@ class ROSRobotBridge(RobotBridge):
 
         Args:
             robot_id: Robot identifier
-            raw: Raw telemetry from ROSBridgeClient.get_robot_state()
+            raw: Raw telemetry from RobotBridgeWebSocketClient.get_robot_state()
 
         Returns:
             RobotTelemetryData in environment format
@@ -358,3 +424,4 @@ class ROSRobotBridge(RobotBridge):
             active_task_id=raw.active_task_id,
             eta_to_next_node=0.0,  # Not available from Nav2 bridge
         )
+

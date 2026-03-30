@@ -14,10 +14,10 @@ import asyncio
 import logging
 import math
 import time
-from typing import Optional, Dict, Callable
+from typing import Optional, Dict, Callable, Set
 from datetime import datetime
 
-from .ros_bridge_client import RobotBridgeWebSocketClient, RobotTelemetryData
+from .robot_bridge_websocket_client import RobotBridgeWebSocketClient, RobotTelemetryData
 from ..environment.robot.robot_state import RobotState
 from ..environment.robot.robot_telemetry import RobotTelemetry
 from ..environment.graph.graph_state import GraphState
@@ -56,6 +56,7 @@ class RobotBridgeStateSync:
         # Lifecycle and validation state
         self._running = False
         self._listen_task: Optional[asyncio.Task] = None
+        self._known_task_ids: Set[str] = set()  # Track which tasks we've submitted
         self.robot_states: Dict[int, any] = {}
 
         # Register handlers with client
@@ -76,6 +77,7 @@ class RobotBridgeStateSync:
         """
         self.robot_states = robot_states
         self._running = True
+        self._known_task_ids = set()  # Reset task tracking
 
         # Start listening with reconnection logic
         self._listen_task = asyncio.create_task(self._listen_with_reconnect())
@@ -179,6 +181,12 @@ class RobotBridgeStateSync:
         try:
             task_id = data.get("task_id")
             status = data.get("status")
+
+            # Warn if task_id was not previously registered
+            if task_id not in self._known_task_ids:
+                logger.debug(
+                    f"task_status for unknown task_id={task_id} — may be stale or orphaned"
+                )
 
             if status == "completed":
                 logger.info(f"Task {task_id} completed on bridge")
@@ -499,7 +507,3 @@ class RobotBridgeTaskDispatcher:
         """Cancel a task on the robot."""
         return await self.client.send_task_cancel(task_id)
 
-
-# Backward-compatible aliases.
-ROSBridgeIntegration = RobotBridgeStateSync
-ROSBridgeTaskSubmitter = RobotBridgeTaskDispatcher
