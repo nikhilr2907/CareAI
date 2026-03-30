@@ -1,14 +1,10 @@
 """
 Deployment module - interfaces and implementations for robot communication.
 
-This module provides abstract and concrete implementations for communicating with robots:
 - MockRobotBackend: Uses local RobotSimulator (for training/testing)
 - ROSBridgeRobotBackend: Connects to the external ROS bridge via WebSocket (for deployment)
-
-Also includes:
 - RobotBridgeWebSocketClient: Low-level WebSocket client for bridge communication
-- RobotBridgeStateSync: Integration layer syncing bridge data into CareRobotics
-- RobotBridgeTaskDispatcher: Converts CareRobotics tasks to bridge format
+- RobotBridgeTaskDispatcher: Converts CareRobotics tasks to bridge wire format
 """
 
 from .robot_backend import (
@@ -18,10 +14,7 @@ from .robot_backend import (
     RobotTelemetryData,
 )
 from .robot_bridge_websocket_client import RobotBridgeWebSocketClient
-from .robot_bridge_state_sync import (
-    RobotBridgeStateSync,
-    RobotBridgeTaskDispatcher,
-)
+from .robot_bridge_state_sync import RobotBridgeTaskDispatcher
 
 __all__ = [
     "RobotBackend",
@@ -29,6 +22,5 @@ __all__ = [
     "ROSBridgeRobotBackend",
     "RobotTelemetryData",
     "RobotBridgeWebSocketClient",
-    "RobotBridgeStateSync",
     "RobotBridgeTaskDispatcher",
 ]

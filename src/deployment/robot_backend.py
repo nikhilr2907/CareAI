@@ -1,7 +1,6 @@
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
-import numpy as np
 import logging
 import asyncio
 import math
@@ -132,7 +131,7 @@ class _BridgeTaskProxy:
     Private to robot_backend.py.
     """
 
-    def __init__(self, task_id: int, planned_path: List[int], num_items: int, graph_state: Any = None):
+    def __init__(self, task_id: int, planned_path: List[int], num_items: int):
         self.task_id = task_id
         self.planned_path = planned_path  # List[int] — node indices
         self.num_items = num_items
@@ -177,6 +176,10 @@ class ROSBridgeRobotBackend(RobotBackend):
         self._graph_state = None
         self._logger = logging.getLogger(__name__)
 
+        # Task completion callbacks — set by the training/deployment loop
+        self.on_task_completed: Optional[Any] = None  # Callable(robot_id, task_id)
+        self.on_task_failed: Optional[Any] = None     # Callable(robot_id, task_id, error)
+
         # Create one WebSocket client and dispatcher per robot.
         for robot_id in range(num_robots):
             client = _WebSocketClient(bridge_url=bridge_url)
@@ -197,6 +200,12 @@ class ROSBridgeRobotBackend(RobotBackend):
         """
         self._running = True
         for robot_id, client in self._clients.items():
+            # Capture robot_id in closure
+            def make_task_status_handler(rid):
+                async def handler(data):
+                    await self._handle_task_status(rid, data)
+                return handler
+            client.on_task_status = make_task_status_handler(robot_id)
             task = asyncio.create_task(self._listen_with_reconnect(robot_id, client))
             self._listen_tasks[robot_id] = task
         self._logger.info(f"ROSBridgeRobotBackend started: {self._num_robots} robot(s)")
@@ -249,6 +258,38 @@ class ROSBridgeRobotBackend(RobotBackend):
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, 30.0)
+
+    async def _handle_task_status(self, robot_id: int, data: Dict) -> None:
+        """Route task_status messages from the bridge to registered callbacks."""
+        task_id = data.get("task_id")
+        status = data.get("status")
+
+        if status == "completed":
+            self._logger.info(f"Robot {robot_id}: task {task_id} completed")
+            # Optimistically mark robot available in cached telemetry
+            client = self._clients.get(robot_id)
+            if client and client.robot_telemetry:
+                client.robot_telemetry.active_task_id = None
+            if self.on_task_completed:
+                if asyncio.iscoroutinefunction(self.on_task_completed):
+                    await self.on_task_completed(robot_id, task_id)
+                else:
+                    self.on_task_completed(robot_id, task_id)
+
+        elif status == "failed":
+            error = data.get("error")
+            self._logger.error(f"Robot {robot_id}: task {task_id} failed: {error}")
+            if self.on_task_failed:
+                if asyncio.iscoroutinefunction(self.on_task_failed):
+                    await self.on_task_failed(robot_id, task_id, error)
+                else:
+                    self.on_task_failed(robot_id, task_id, error)
+
+        elif status == "in_progress":
+            self._logger.debug(
+                f"Robot {robot_id}: task {task_id} in progress "
+                f"{data.get('progress_percent', 0):.1f}%"
+            )
 
     def set_graph_state(self, graph_state: Any) -> None:
         """
@@ -358,7 +399,6 @@ class ROSBridgeRobotBackend(RobotBackend):
                 task_id=task_id,
                 planned_path=path,
                 num_items=num_items,
-                graph_state=self._graph_state,
             )
             result = await submitter.submit_task(proxy, robot_id=robot_id)
             return result

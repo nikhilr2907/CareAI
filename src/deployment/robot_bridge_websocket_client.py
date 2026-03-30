@@ -28,7 +28,7 @@ class RobotTelemetryData:
     timestamp: float
     position: tuple  # (x, y, z)
     orientation: Dict[str, float]  # quaternion {x, y, z, w}
-    velocity: Dict[str, float]  # {linear_x, linear_y, angular_z}
+    velocity: Dict[str, float]  # {linear_x, angular_z}
     battery_level: float  # 0.0-1.0
     current_capacity: int
     max_capacity: int
@@ -161,7 +161,7 @@ class RobotBridgeWebSocketClient:
                     data['position'].get('z', 0.0)
                 ),
                 orientation=data.get('orientation_quat', {'x': 0, 'y': 0, 'z': 0, 'w': 1}),
-                velocity=data.get('velocity', {'linear_x': 0, 'linear_y': 0, 'angular_z': 0}),
+                velocity=data.get('velocity', {'linear_x': 0, 'angular_z': 0}),
                 battery_level=data.get('battery_level', 0.0),
                 current_capacity=data.get('current_capacity', 0),
                 max_capacity=data.get('max_capacity', 12),
@@ -224,7 +224,7 @@ class RobotBridgeWebSocketClient:
                         robot_data['position'].get('z', 0.0)
                     ),
                     orientation=robot_data.get('orientation_quat', {'x': 0, 'y': 0, 'z': 0, 'w': 1}),
-                    velocity=robot_data.get('velocity', {'linear_x': 0, 'linear_y': 0, 'angular_z': 0}),
+                    velocity=robot_data.get('velocity', {'linear_x': 0, 'angular_z': 0}),
                     battery_level=robot_data.get('battery_level', 0.0),
                     current_capacity=robot_data.get('current_capacity', 0),
                     max_capacity=robot_data.get('max_capacity', 12),
