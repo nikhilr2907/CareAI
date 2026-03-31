@@ -129,10 +129,10 @@ class LearnedEdgeCostModel(nn.Module):
         """
         delay_factor, log_var = self.forward(features)
 
-        # Convert delay factor back to seconds: time = delay_factor * (distance / max_v)
-        # max_v_ms = 1.0 m/s throughout the simulation, so base_time = distance_m
+        # Convert delay factor back to seconds: time = delay_factor * (distance / max_v).
+        # Current simulator/config convention uses 0.5 m/s uniformly across edges.
         distance = features[:, 0]
-        base_time = distance  # distance_m / 1.0 m/s
+        base_time = distance / 0.5
 
         if risk_sensitivity > 0.0:
             # Risk-adjusted: penalise edges with high variance in delay
@@ -200,7 +200,8 @@ class HeuristicEdgeCostModel:
         clutter = features_np[:, 4]
         approaching = features_np[:, 5]
 
-        base_time = distance / 1.0  # Assume 1 m/s
+        # Match the simulator/config baseline corridor speed used elsewhere.
+        base_time = distance / 0.5
 
         # Simple additive penalties
         congestion = (num_robots + approaching) * 1.5

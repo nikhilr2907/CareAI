@@ -5,6 +5,7 @@ from collections import deque
 import logging
 import asyncio
 import math
+import os
 
 
 @dataclass
@@ -146,18 +147,20 @@ class ROSBridgeRobotBackend(RobotBackend):
     """
     Robot backend that talks to the external ROS bridge over WebSocket.
 
-    Connects to a ROS 2 bridge node running on a configurable URL (default: ws://localhost:8765).
+    Connects to a ROS 2 bridge node running on a configurable URL (read from ROS_BRIDGE_URL in .env).
     The bridge node handles Nav2 integration and publishes telemetry/status updates.
 
     One client per robot, with automatic reconnection and comprehensive error handling.
     """
 
-    def __init__(self, bridge_url: str = "ws://localhost:8765", num_robots: int = 1):
+    def __init__(self, bridge_url: Optional[str] = None, num_robots: int = 1):
         """
         Initialize ROS bridge.
 
         Args:
-            bridge_url: WebSocket URL to the ROS bridge node (default: ws://localhost:8765)
+            bridge_url: WebSocket URL to the ROS bridge node. If None, reads
+                        ROS_BRIDGE_URL from the environment (set in .env).
+                        Falls back to ws://localhost:9090 if neither is set.
             num_robots: Number of robots in the fleet (default: 1)
 
         Note:
@@ -167,6 +170,10 @@ class ROSBridgeRobotBackend(RobotBackend):
         # Deferred import — avoids ImportError during training if websockets not installed
         from .robot_bridge_websocket_client import RobotBridgeWebSocketClient as _WebSocketClient
         from .robot_bridge_state_sync import RobotBridgeTaskDispatcher as _Dispatcher
+
+        # Resolve URL: explicit arg → ROS_BRIDGE_URL env var → hardcoded fallback
+        if bridge_url is None:
+            bridge_url = os.getenv("ROS_BRIDGE_URL", "ws://localhost:9090")
 
         self._num_robots = num_robots
         self._bridge_url = bridge_url

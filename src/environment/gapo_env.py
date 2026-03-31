@@ -44,7 +44,7 @@ class GAPOTaskAssignmentEnv:
         self.graph_state = None
         self.robots = []
         self.robot_simulators = []
-        self.next_task_id = 0
+        self.next_task_id = 1
 
         # Task management (continuous operation)
         self.pending_tasks = []  # Tasks waiting for assignment
@@ -155,7 +155,7 @@ class GAPOTaskAssignmentEnv:
         # Generate initial tasks
         self.pending_tasks = []
         self.completed_tasks = []
-        self.next_task_id = 0
+        self.next_task_id = 1
         self.current_time = 0.0
         self.last_inventory_check = 0.0
         self.graph_state.current_time = self.current_time
