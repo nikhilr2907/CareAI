@@ -178,7 +178,7 @@ class ROSBridgeRobotBackend(RobotBackend):
                 load_dotenv()
             except ImportError:
                 pass
-            bridge_url = os.getenv("ROS_BRIDGE_URL", "ws://localhost:9090")
+            bridge_url = os.getenv("ROS_BRIDGE_URL", "ws://localhost:8765")
 
         self._num_robots = num_robots
         self._bridge_url = bridge_url

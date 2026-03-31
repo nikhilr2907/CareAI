@@ -11,6 +11,7 @@ between simulation and real deployment:
   _collect_traversal_records — no-op (RealTraversalTracker is future work)
   _should_robot_charge     — use telemetry battery level, no simulator reference
   _send_robot_to_charge    — send_path_command() instead of simulator.set_path()
+  _find_nearest_edge       — project (x,y) onto planned path edges → (edge_idx, progress)
 
 All reward, state-dict, task-generation, Dijkstra, and GNN logic is inherited
 unchanged from the base class. Sim training is not affected.
@@ -292,15 +293,35 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         Convert RobotTelemetryData (backend) to RobotTelemetry (env).
 
         Nav2 does not expose graph topology, so graph-aware fields are
-        inferred or defaulted:
+        inferred from (x, y) coordinates:
           current_node_index — nearest-node snap from (x, y)
-          current_edge_index — None (robot always treated as at a node)
-          edge_progress      — 0.0
+          current_edge_index — projected from (x, y) onto planned path edges
+          edge_progress      — scalar progress along that edge (0→1)
           remaining_path     — robot.planned_path (full path, not trimmed)
         """
         node_idx = raw.current_node_index
         if node_idx is None:
             node_idx = self._find_nearest_node(raw.x, raw.y)
+
+        # Project onto planned path edges to recover edge/progress state
+        path = robot.planned_path
+        if len(path) >= 2:
+            edge_idx, edge_prog = self._find_nearest_edge(
+                raw.x, raw.y,
+                candidate_node_pairs=list(zip(path, path[1:]))
+            )
+        else:
+            edge_idx, edge_prog = None, 0.0
+
+        # If robot is on an edge, current_node_index is the from-node of that edge
+        if edge_idx is not None:
+            edge = self.graph_state.edges[edge_idx]
+            nodes = self.graph_state.nodes
+            # find which end of the edge is the from-node (lower progress end)
+            for i, node in enumerate(nodes):
+                if node.node_id == edge.from_node:
+                    node_idx = i
+                    break
 
         return RobotTelemetry(
             timestamp=raw.timestamp,
@@ -309,16 +330,88 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
             y=raw.y,
             heading=raw.heading,
             current_node_index=node_idx,
-            current_edge_index=None,       # Nav2 doesn't expose graph topology
-            edge_progress=0.0,
+            current_edge_index=edge_idx,
+            edge_progress=edge_prog,
             velocity_ms=raw.velocity_ms,
             is_moving=raw.velocity_ms > 0.01,
             battery_level=raw.battery_level,
             current_capacity=raw.current_capacity,
             is_available=raw.is_available,
             active_task_id=raw.active_task_id,
-            remaining_path=list(robot.planned_path),  # best proxy available
+            remaining_path=list(path),
             eta_to_next_node=raw.eta_to_next_node,
-            is_charging=False,             # not reported by Nav2 bridge
+            is_charging=False,
             needs_charging=False,
         )
+
+    def _find_nearest_edge(self, x: float, y: float, candidate_node_pairs=None):
+        """
+        Project (x, y) onto graph edges and return the closest match.
+
+        Args:
+            x, y: Robot position in map frame.
+            candidate_node_pairs: list of (from_node_idx, to_node_idx) integer
+                pairs taken from planned_path. Only these edges are checked.
+                If None, all graph edges are searched.
+
+        Returns:
+            (edge_index, progress) where edge_index is the position in
+            graph_state.edges and progress is 0→1 along that edge.
+            Returns (None, 0.0) if the robot is close enough to a node to
+            be treated as at-node rather than mid-edge.
+        """
+        AT_NODE_THRESHOLD_M = 0.5   # within this distance of an endpoint → at-node
+        ON_EDGE_TOLERANCE_M = 1.5   # max perpendicular distance to count as on-edge
+
+        nodes = self.graph_state.nodes
+        edges = self.graph_state.edges
+
+        # Build the set of edge indices to check
+        if candidate_node_pairs is not None:
+            check_indices = []
+            for from_idx, to_idx in candidate_node_pairs:
+                from_id = nodes[from_idx].node_id
+                to_id = nodes[to_idx].node_id
+                for i, edge in enumerate(edges):
+                    if ((edge.from_node == from_id and edge.to_node == to_id) or
+                            (edge.from_node == to_id and edge.to_node == from_id)):
+                        check_indices.append(i)
+        else:
+            check_indices = range(len(edges))
+
+        best_edge_idx = None
+        best_progress = 0.0
+        best_dist = float('inf')
+
+        for edge_idx in check_indices:
+            edge = edges[edge_idx]
+            if edge.entry_point is None or edge.exit_point is None:
+                continue
+            if not edge.is_point_on_corridor(x, y, tolerance=ON_EDGE_TOLERANCE_M):
+                continue
+
+            progress = edge.compute_progress(x, y)
+
+            # Distance from (x,y) to the closest point on the segment
+            sx, sy = edge.entry_point
+            ex, ey = edge.exit_point
+            cx = sx + progress * (ex - sx)
+            cy = sy + progress * (ey - sy)
+            dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+
+            if dist < best_dist:
+                best_dist = dist
+                best_edge_idx = edge_idx
+                best_progress = progress
+
+        if best_edge_idx is None:
+            return None, 0.0
+
+        # If within AT_NODE_THRESHOLD of either endpoint, treat as at-node
+        edge = edges[best_edge_idx]
+        if edge.distance_m > 0:
+            at_node_progress = AT_NODE_THRESHOLD_M / edge.distance_m
+            if best_progress < at_node_progress or best_progress > 1.0 - at_node_progress:
+                return None, 0.0
+
+        return best_edge_idx, best_progress

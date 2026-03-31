@@ -65,7 +65,8 @@ class RobotBridgeWebSocketClient:
         Initialize client (but don't connect yet).
 
         Args:
-            bridge_url: WebSocket URL of ROS bridge (default: localhost:8765)
+            bridge_url: Base WebSocket URL of ROS bridge (default: localhost:8765).
+                        The /ws path is appended automatically on connect.
         """
         self.bridge_url = bridge_url
         self.websocket = None
@@ -95,10 +96,12 @@ class RobotBridgeWebSocketClient:
         """
         try:
             import websockets
-            self.websocket = await websockets.connect(self.bridge_url)
+            # Bridge serves the WebSocket endpoint at /ws (FastAPI route)
+            url = self.bridge_url.rstrip("/") + "/ws"
+            self.websocket = await websockets.connect(url)
             self.is_connected = True
             self.is_running = True
-            logger.info(f"Connected to ROS bridge at {self.bridge_url}")
+            logger.info(f"Connected to ROS bridge at {url}")
             return True
         except Exception as e:
             logger.error(f"Failed to connect to ROS bridge: {e}")
