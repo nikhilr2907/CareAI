@@ -171,8 +171,13 @@ class ROSBridgeRobotBackend(RobotBackend):
         from .robot_bridge_websocket_client import RobotBridgeWebSocketClient as _WebSocketClient
         from .robot_bridge_state_sync import RobotBridgeTaskDispatcher as _Dispatcher
 
-        # Resolve URL: explicit arg → ROS_BRIDGE_URL env var → hardcoded fallback
+        # Resolve URL: explicit arg → ROS_BRIDGE_URL in .env → hardcoded fallback
         if bridge_url is None:
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+            except ImportError:
+                pass
             bridge_url = os.getenv("ROS_BRIDGE_URL", "ws://localhost:9090")
 
         self._num_robots = num_robots
