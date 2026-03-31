@@ -1,6 +1,7 @@
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from collections import deque
 import logging
 import asyncio
 import math
@@ -180,6 +181,9 @@ class ROSBridgeRobotBackend(RobotBackend):
         self.on_task_completed: Optional[Any] = None  # Callable(robot_id, task_id)
         self.on_task_failed: Optional[Any] = None     # Callable(robot_id, task_id, error)
 
+        # Per-robot completion queue — drained each step by gapo_env_real
+        self._completed_task_queue: Dict[int, Any] = {i: deque() for i in range(num_robots)}
+
         # Create one WebSocket client and dispatcher per robot.
         for robot_id in range(num_robots):
             client = _WebSocketClient(bridge_url=bridge_url)
@@ -270,6 +274,9 @@ class ROSBridgeRobotBackend(RobotBackend):
             client = self._clients.get(robot_id)
             if client and client.robot_telemetry:
                 client.robot_telemetry.active_task_id = None
+            # Buffer for gapo_env_real to drain synchronously each step
+            if task_id is not None:
+                self._completed_task_queue[robot_id].append(task_id)
             if self.on_task_completed:
                 if asyncio.iscoroutinefunction(self.on_task_completed):
                     await self.on_task_completed(robot_id, task_id)
@@ -412,6 +419,39 @@ class ROSBridgeRobotBackend(RobotBackend):
     def get_num_robots(self) -> int:
         """Get the number of robots in this bridge."""
         return self._num_robots
+
+    def get_location_inventories(self) -> Dict[str, Any]:
+        """
+        Get latest location inventories received from the bridge.
+
+        Inventory is broadcast in system_state messages (1 Hz) and is
+        shared across all robots. Client 0 is used as the source.
+
+        Returns:
+            Dict[location_id, LocationInventoryData] — empty if no data yet
+        """
+        client = self._clients.get(0)
+        if client is None:
+            return {}
+        return client.get_all_inventories()
+
+    def pop_completed_tasks(self, robot_id: int) -> List[int]:
+        """
+        Drain and return all task IDs completed since the last call for this robot.
+
+        Called once per step by gapo_env_real._check_task_completions().
+        The queue accumulates bridge completion events between steps and is
+        cleared on each call — not a persistent history.
+
+        Returns:
+            List of completed task IDs (empty if none since last call)
+        """
+        q = self._completed_task_queue.get(robot_id)
+        if not q:
+            return []
+        result = list(q)
+        q.clear()
+        return result
 
     def _convert_telemetry(
         self, robot_id: int, raw: Any

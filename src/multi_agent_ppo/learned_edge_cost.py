@@ -243,96 +243,47 @@ class EdgeCostTrainer:
         self.total_train_steps = 0
         self.recent_losses: List[float] = []
 
-    def add_traversal_record(self, record) -> None:
-        """
-        Add a completed traversal record to the replay buffer.
-
-        Args:
-            record: EdgeTraversalRecord with valid entry_time and exit_time
-
-        The target stored is delay_factor (actual_time / base_time), not raw seconds.
-        This makes the loss scale-invariant across corridors of different lengths.
-        """
-        if record.actual_traversal_time <= 0 or record.base_traversal_time <= 0:
-            return  # Invalid record
-
-        delay_factor = record.delay_factor  # actual_time / base_time, >= 1.0
-        features = record.to_feature_vector()
-        self.buffer.append((features, delay_factor))
-        self.total_records_added += 1
-
-        # Evict oldest if buffer full
-        if len(self.buffer) > self.max_buffer_size:
-            self.buffer.pop(0)
-
     def add_records_batch(self, records: list) -> int:
-        """Add multiple records at once. Returns count of valid records added."""
+        """Add completed traversal records to the replay buffer. Returns count added."""
         count = 0
         for record in records:
-            if record.actual_traversal_time > 0:
-                self.add_traversal_record(record)
-                count += 1
+            if record.actual_traversal_time <= 0 or record.base_traversal_time <= 0:
+                continue
+            self.buffer.append((record.to_feature_vector(), record.delay_factor))
+            self.total_records_added += 1
+            count += 1
+            if len(self.buffer) > self.max_buffer_size:
+                self.buffer.pop(0)
         return count
 
-    def train_step(self, batch_size: int = 64) -> Optional[float]:
-        """
-        Train one step on a random batch from the replay buffer.
-
-        Returns:
-            Loss value, or None if not enough data
-        """
-        if len(self.buffer) < self.min_train_samples:
-            return None
-
-        # Sample batch
-        batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
-
-        features_list = [b[0] for b in batch]
-        targets_list = [b[1] for b in batch]
-
-        features = torch.tensor(np.array(features_list), dtype=torch.float32)
-        targets = torch.tensor(targets_list, dtype=torch.float32)
-
-        # Forward pass — model outputs delay_factor, log_var
-        delay_factor, log_var = self.model(features)
-
-        # Gaussian NLL loss on delay_factor (dimensionless, scale-invariant)
-        # NLL = 0.5 * (log_var + (target - predicted)^2 / exp(log_var))
-        variance = torch.exp(log_var)
-        nll = 0.5 * (log_var + (targets - delay_factor) ** 2 / variance)
-        loss = nll.mean()
-
-        # Backward pass
-        self.optimizer.zero_grad()
-        loss.backward()
-
-        # Gradient clipping for stability
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-        self.optimizer.step()
-
-        self.total_train_steps += 1
-        loss_val = loss.item()
-        self.recent_losses.append(loss_val)
-        if len(self.recent_losses) > 100:
-            self.recent_losses.pop(0)
-
-        return loss_val
-
     def train_epoch(self, batch_size: int = 64, num_steps: int = 10) -> Optional[float]:
-        """
-        Train multiple steps. Returns average loss or None if not enough data.
-        """
+        """Train multiple steps. Returns average loss or None if not enough data."""
         if len(self.buffer) < self.min_train_samples:
             return None
 
         losses = []
         for _ in range(num_steps):
-            loss = self.train_step(batch_size)
-            if loss is not None:
-                losses.append(loss)
+            batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
+            features = torch.tensor(np.array([b[0] for b in batch]), dtype=torch.float32)
+            targets = torch.tensor([b[1] for b in batch], dtype=torch.float32)
 
-        return np.mean(losses) if losses else None
+            delay_factor, log_var = self.model(features)
+            variance = torch.exp(log_var)
+            loss = (0.5 * (log_var + (targets - delay_factor) ** 2 / variance)).mean()
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
+
+            self.total_train_steps += 1
+            loss_val = loss.item()
+            self.recent_losses.append(loss_val)
+            if len(self.recent_losses) > 100:
+                self.recent_losses.pop(0)
+            losses.append(loss_val)
+
+        return float(np.mean(losses))
 
     @property
     def is_ready(self) -> bool:

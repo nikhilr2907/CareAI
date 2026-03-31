@@ -10,3 +10,4 @@ checkpoints/
 .claude/**
 outputs/**
 utilities/**
+.env

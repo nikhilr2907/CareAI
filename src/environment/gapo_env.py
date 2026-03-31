@@ -15,6 +15,7 @@ from ..multi_agent_ppo.task_creation_actor import TaskCreationActor
 from .graph_helpers import dijkstra_shortest_path
 from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
 from ..reliability.telemetry_effects import TelemetryEffectsManager
+from ..deployment.robot_backend import RobotBackend
 
 
 class GAPOTaskAssignmentEnv:
@@ -218,7 +219,7 @@ class GAPOTaskAssignmentEnv:
         # 1. Update inventory levels (consumption)
         time_delta_hours = dt / 3600.0
         self.graph_state.current_time = self.current_time
-        update_inventory_levels(self.graph_state, time_delta_hours)
+        self._update_inventory(time_delta_hours)
 
         # 2. Generate tasks from low-stock nodes
         if self.current_time - self.last_inventory_check >= self.inventory_check_interval:
@@ -289,6 +290,10 @@ class GAPOTaskAssignmentEnv:
         }
 
         return state_dict, reward, done, info
+
+    def _update_inventory(self, time_delta_hours: float):
+        """Hook for inventory update each step. Override in subclasses for real deployment."""
+        update_inventory_levels(self.graph_state, time_delta_hours)
 
     def _apply_fallback_pending_rank(self):
         """
