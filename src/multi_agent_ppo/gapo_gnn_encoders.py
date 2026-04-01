@@ -25,28 +25,26 @@ class HospitalGraphEncoder(nn.Module):
         day_type_embedding_dim=4
     ):
         """
-        Initialize Hospital Graph Encoder with FINE-GRAINED categorical embeddings.
+        Initialize Graph Encoder with FINE-GRAINED categorical embeddings.
 
         Args:
-            node_continuous_dim: Continuous node features (default 8)
-                [center_x, center_y, width, height, area, clearance_m, max_reach_height,
-                 unit_height, has_wash_basin, is_cluttered, stock_level, consumption_rate,
-                 time_to_stockout, occupancy_count, urgency_level]
+            node_continuous_dim: Continuous node features
+                [center_x, center_y, width, height, area, stock_level, consumption_rate,
+                 time_to_stockout, occupancy_count, urgency_level, num_skus, num_categories,
+                 foot_traffic_weight]
             num_node_types: Number of node type categories (default 4)
                 [storage, corridor, recovery, hub]
-            num_departments: Number of hospital departments (default 10)
-                [e.g., ICU, Emergency, Surgery, etc.]
-            num_shift_periods: Number of shift periods (default 4)
-                [night, morning, afternoon, evening]
+            num_departments: Number of location tag categories (derived from config)
+            num_shift_periods: Number of school periods (derived from config)
             num_day_types: Number of day types (default 2)
                 [weekday, weekend]
-            edge_feat_dim: Edge continuous features (default 12)
+            edge_feat_dim: Edge continuous features
                 [distance_m, corridor_width, max_v_ms, entry_x, entry_y, exit_x, exit_y,
                  clutter_level, num_active_robots, has_patient_bed, current_weight, base_cost]
             hidden_dim: Hidden embedding dimension (default 64)
             node_type_embedding_dim: Dimension for node_type embeddings (default 8)
-            department_embedding_dim: Dimension for department embeddings (default 16)
-            shift_embedding_dim: Dimension for shift period embeddings (default 4)
+            department_embedding_dim: Dimension for location tag embeddings (default 16)
+            shift_embedding_dim: Dimension for school period embeddings (default 4)
             day_type_embedding_dim: Dimension for day type embeddings (default 4)
         """
         super().__init__()
@@ -121,8 +119,8 @@ class HospitalGraphEncoder(nn.Module):
             node_continuous: [num_nodes, 24] - continuous node features (UPDATED with temporal)
             node_categorical: [num_nodes, 4] - categorical IDs:
                 [:, 0] = node_type_id (0-3)
-                [:, 1] = department_id (0-9 or -1 for unknown)
-                [:, 2] = shift_period_id (0-3)
+                [:, 1] = location_tag_id (0-N or -1 for unknown)
+                [:, 2] = school_period_id (0-N)
                 [:, 3] = day_type_id (0-1)
             edge_features: [num_edges, 21] - continuous edge features
             edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx) for each edge
@@ -412,8 +410,8 @@ def test_encoders():
     node_continuous = torch.randn(10, 24)  # 10 nodes, 24 continuous features (UPDATED)
     node_categorical = torch.randint(0, 4, (10, 4))  # 10 nodes, 4 categorical IDs (UPDATED)
     # node_categorical[:, 0] = node_type (0-3)
-    # node_categorical[:, 1] = dept_id (0-9, or -1)
-    # node_categorical[:, 2] = shift_period (0-3)
+    # node_categorical[:, 1] = location_tag_id (0-N, or -1)
+    # node_categorical[:, 2] = school_period_id (0-N)
     # node_categorical[:, 3] = day_type (0-1)
     edge_features = torch.randn(20, 21)  # 20 edges, 21 continuous features
     edge_node_indices = torch.randint(0, 10, (20, 2))  # Edge-node connectivity

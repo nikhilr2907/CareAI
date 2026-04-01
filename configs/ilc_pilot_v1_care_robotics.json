@@ -1,0 +1,500 @@
+{
+  "name": "ilc_pilot_v1",
+  "metadata": {
+    "config_name": "ilc_pilot_v1",
+    "environment_type": "ilc_open_space",
+    "num_nodes": 3,
+    "num_storage": 1,
+    "num_shelves": 2,
+    "num_skus": 4,
+    "num_robots": 1,
+    "episode_duration_s": 28800,
+    "pilot_location": "Independent Learning Centre, Sixth Form",
+    "pilot_dates": "June 6–19 2026",
+    "_comment": "Episode duration is 08:30–16:30 (8 hours). The pilot date window spans weekends, but weekend operation is disabled in school_schedule.operating_days.",
+    "generated_for": "CareRobotics ILC Pilot Trial"
+  },
+  "school_schedule": {
+    "timezone": "Europe/London",
+    "operating_days": [
+      "Mon",
+      "Tue",
+      "Wed",
+      "Thu",
+      "Fri"
+    ],
+    "_comment": "Break windows are intentionally short and demand-heavy; reward shaping should favour restocking completion at least 15 minutes before a break so the robot remains stationary during the busiest periods.",
+    "periods": [
+      {
+        "name": "arrival",
+        "start_time": "08:30",
+        "end_time": "09:00",
+        "period_type": "transition",
+        "student_density_estimate": 0.4,
+        "robot_speed_limit": "normal",
+        "demand_multiplier_override": null,
+        "_comment": "Students are entering and settling, so movement is present but sustained grabbing from shelves is still limited."
+      },
+      {
+        "name": "morning_lesson_1",
+        "start_time": "09:00",
+        "end_time": "10:30",
+        "period_type": "lesson",
+        "student_density_estimate": 0.68,
+        "robot_speed_limit": "normal",
+        "demand_multiplier_override": null,
+        "_comment": "Occupancy is high enough to matter for navigation, but students are seated and demand is near-zero."
+      },
+      {
+        "name": "morning_break",
+        "start_time": "10:30",
+        "end_time": "10:50",
+        "period_type": "break",
+        "student_density_estimate": 0.95,
+        "robot_speed_limit": "congested",
+        "demand_multiplier_override": null,
+        "_comment": "Highest early-day congestion and the sharpest demand spike; pre-break restocking matters most here."
+      },
+      {
+        "name": "morning_lesson_2",
+        "start_time": "10:50",
+        "end_time": "12:30",
+        "period_type": "lesson",
+        "student_density_estimate": 0.7,
+        "robot_speed_limit": "normal",
+        "demand_multiplier_override": null
+      },
+      {
+        "name": "lunch",
+        "start_time": "12:30",
+        "end_time": "13:30",
+        "period_type": "break",
+        "student_density_estimate": 0.25,
+        "robot_speed_limit": "normal",
+        "demand_multiplier_override": null,
+        "_comment": "Many students leave the ILC at lunch, so demand remains meaningful but floor congestion is usually lower than the short breaks."
+      },
+      {
+        "name": "afternoon_lesson",
+        "start_time": "13:30",
+        "end_time": "15:00",
+        "period_type": "lesson",
+        "student_density_estimate": 0.55,
+        "robot_speed_limit": "normal",
+        "demand_multiplier_override": null
+      },
+      {
+        "name": "afternoon_break",
+        "start_time": "15:00",
+        "end_time": "15:15",
+        "period_type": "break",
+        "student_density_estimate": 0.85,
+        "robot_speed_limit": "congested",
+        "demand_multiplier_override": null,
+        "_comment": "Short, intense window with enough movement to justify keeping the robot stationary once the break starts."
+      },
+      {
+        "name": "end_of_day",
+        "start_time": "15:15",
+        "end_time": "16:30",
+        "period_type": "transition",
+        "student_density_estimate": 0.3,
+        "robot_speed_limit": "normal",
+        "demand_multiplier_override": null,
+        "_comment": "Students leave gradually, so residual demand tapers rather than stopping abruptly."
+      }
+    ],
+    "break_periods": [
+      "morning_break",
+      "lunch",
+      "afternoon_break"
+    ],
+    "proactive_restock_lead_time_s": 900
+  },
+  "demand_profiles": {
+    "location_demand_weights": {
+      "shelf_a": {
+        "fruit": 0.8,
+        "snack": 0.75,
+        "drink": 0.7
+      },
+      "shelf_b": {
+        "fruit": 0.4,
+        "snack": 0.45,
+        "drink": 0.35
+      }
+    },
+    "_comment": "Location weights are relative demand strengths. To preserve each SKU daily_distribution.mean as a site-wide total across both shelves, these weights should be normalised within category when allocating demand between enabled shelves.",
+    "area_scaling_rule": "shelf_daily_demand = sku_daily_mean * location_demand_weight * school_period_multiplier * weekday_multiplier",
+    "notes": "Shelf A is near main seating cluster and receives ~2x the foot traffic of Shelf B. Demand multipliers are relative weights, not additive."
+  },
+  "nodes": [
+    {
+      "id": 0,
+      "type": "storage",
+      "name": "Restocking Station",
+      "pos": [
+        1.0,
+        1.0
+      ],
+      "size": [
+        2.0,
+        1.5
+      ],
+      "foot_traffic_weight": 0.0,
+      "consumption_enabled": false,
+      "floor": 0,
+      "location_tag": "home_base",
+      "_comment": "Bulk pickup point in a protected corner. Student access is excluded, so natural consumption is disabled and stock acts as a local back-room buffer for the two-week pilot.",
+      "inventory": {
+        "SKU_ILC_001": {
+          "initial_stock": 100,
+          "par_level": 100,
+          "reorder_point": 20,
+          "max_capacity": 200,
+          "_comment": "High buffer avoids simulated external replenishment during the short pilot while still leaving room for future scaling."
+        },
+        "SKU_ILC_002": {
+          "initial_stock": 100,
+          "par_level": 100,
+          "reorder_point": 20,
+          "max_capacity": 200,
+          "_comment": "High buffer avoids simulated external replenishment during the short pilot while still leaving room for future scaling."
+        },
+        "SKU_ILC_003": {
+          "initial_stock": 100,
+          "par_level": 100,
+          "reorder_point": 20,
+          "max_capacity": 200,
+          "_comment": "High buffer avoids simulated external replenishment during the short pilot while still leaving room for future scaling."
+        },
+        "SKU_ILC_004": {
+          "initial_stock": 100,
+          "par_level": 100,
+          "reorder_point": 20,
+          "max_capacity": 200,
+          "_comment": "High buffer avoids simulated external replenishment during the short pilot while still leaving room for future scaling."
+        }
+      }
+    },
+    {
+      "id": 1,
+      "type": "recovery",
+      "name": "CareShelf A",
+      "pos": [
+        12.0,
+        10.0
+      ],
+      "size": [
+        1.5,
+        1.0
+      ],
+      "foot_traffic_weight": 0.8,
+      "consumption_enabled": true,
+      "floor": 0,
+      "location_tag": "seating_area",
+      "_comment": "Primary student-facing shelf near the main seating cluster. It is intentionally stocked slightly below max to leave headroom for short proactive replenishment runs.",
+      "inventory": {
+        "SKU_ILC_001": {
+          "initial_stock": 7,
+          "par_level": 8,
+          "reorder_point": 3,
+          "max_capacity": 10,
+          "_comment": "Bananas are popular but perishable, so the shelf aims for an 8-unit par rather than topping out continuously."
+        },
+        "SKU_ILC_002": {
+          "initial_stock": 7,
+          "par_level": 8,
+          "reorder_point": 3,
+          "max_capacity": 10,
+          "_comment": "Satsumas track bananas closely in popularity and fit the same shelf operating envelope."
+        },
+        "SKU_ILC_003": {
+          "initial_stock": 6,
+          "par_level": 7,
+          "reorder_point": 3,
+          "max_capacity": 10,
+          "_comment": "Bars move slightly slower than fruit, so a 7-unit par reduces unnecessary handling while keeping availability high."
+        },
+        "SKU_ILC_004": {
+          "initial_stock": 5,
+          "par_level": 6,
+          "reorder_point": 3,
+          "max_capacity": 10,
+          "_comment": "Water is heavier and slower-moving than fruit, so the shelf carries fewer units while still testing robot payload constraints."
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "recovery",
+      "name": "CareShelf B",
+      "pos": [
+        13.0,
+        4.0
+      ],
+      "size": [
+        1.5,
+        1.0
+      ],
+      "foot_traffic_weight": 0.35,
+      "consumption_enabled": true,
+      "floor": 0,
+      "location_tag": "far_side",
+      "_comment": "Secondary shelf away from the densest seating. Lower footfall justifies a smaller par level, but it still contributes useful low-demand signal to policy learning.",
+      "inventory": {
+        "SKU_ILC_001": {
+          "initial_stock": 5,
+          "par_level": 6,
+          "reorder_point": 2,
+          "max_capacity": 8,
+          "_comment": "Lower-traffic banana shelf with a smaller working stock than Shelf A."
+        },
+        "SKU_ILC_002": {
+          "initial_stock": 5,
+          "par_level": 6,
+          "reorder_point": 2,
+          "max_capacity": 8,
+          "_comment": "Satsumas follow the same shelf logic as bananas on Shelf B."
+        },
+        "SKU_ILC_003": {
+          "initial_stock": 4,
+          "par_level": 5,
+          "reorder_point": 2,
+          "max_capacity": 8,
+          "_comment": "Snack bars are kept lean here because relative demand is lower and shelf space is limited."
+        },
+        "SKU_ILC_004": {
+          "initial_stock": 4,
+          "par_level": 4,
+          "reorder_point": 2,
+          "max_capacity": 8,
+          "_comment": "Water is the slowest mover on the lower-traffic shelf, so par is set to 4 to reduce needless carry weight."
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": 0,
+      "to": 1,
+      "distance_m": 15.0,
+      "mode": "open_space",
+      "corridor_width": 2.8,
+      "max_v_ms_normal": 2.2,
+      "max_v_ms_congested": 0.5,
+      "clutter_baseline": 0.2,
+      "travel_time_model": "effective_speed_mps = min((period in ['morning_break','afternoon_break']) ? max_v_ms_congested : max_v_ms_normal, max(0.35, walk_speed_mps~Normal(mean=1.35,sd=0.18) / congestion_factor)); congestion_factor=1.0 lessons,1.15 arrival/end_of_day,1.10 lunch,1.80 short_breaks; obstacle_delay_s~LogNormal(meanlog=-1.20,sdlog=0.35)",
+      "constraints": "open_space; furniture_obstacles; student_foot_traffic; bag_clutter",
+      "_comment": "Geometric straight-line distance is 14.2 m; 15.0 m allows a mild detour around desks and seated students while remaining within the ±20% consistency target."
+    },
+    {
+      "from": 0,
+      "to": 2,
+      "distance_m": 12.5,
+      "mode": "open_space",
+      "corridor_width": 3.0,
+      "max_v_ms_normal": 2.2,
+      "max_v_ms_congested": 0.5,
+      "clutter_baseline": 0.2,
+      "travel_time_model": "effective_speed_mps = min((period in ['morning_break','afternoon_break']) ? max_v_ms_congested : max_v_ms_normal, max(0.35, walk_speed_mps~Normal(mean=1.35,sd=0.18) / congestion_factor)); congestion_factor=1.0 lessons,1.15 arrival/end_of_day,1.10 lunch,1.80 short_breaks; obstacle_delay_s~LogNormal(meanlog=-1.20,sdlog=0.35)",
+      "constraints": "open_space; furniture_obstacles; student_foot_traffic; bag_clutter",
+      "_comment": "Geometric straight-line distance is 12.4 m; the wider effective path on this route makes the realised travel distance close to straight-line."
+    },
+    {
+      "from": 1,
+      "to": 2,
+      "distance_m": 7.1,
+      "mode": "open_space",
+      "corridor_width": 2.5,
+      "max_v_ms_normal": 2.2,
+      "max_v_ms_congested": 0.5,
+      "clutter_baseline": 0.2,
+      "travel_time_model": "effective_speed_mps = min((period in ['morning_break','afternoon_break']) ? max_v_ms_congested : max_v_ms_normal, max(0.35, walk_speed_mps~Normal(mean=1.35,sd=0.18) / congestion_factor)); congestion_factor=1.0 lessons,1.15 arrival/end_of_day,1.10 lunch,1.80 short_breaks; obstacle_delay_s~LogNormal(meanlog=-1.20,sdlog=0.35)",
+      "constraints": "open_space; furniture_obstacles; student_foot_traffic; bag_clutter",
+      "_comment": "Geometric straight-line distance is 6.1 m; 7.1 m reflects a realistic weave between tables and bags and keeps the edge consistent with the supplied coordinates, which imply a shorter route than the rough 9 m brief estimate."
+    }
+  ],
+  "sku_database": [
+    {
+      "sku_id": "SKU_ILC_001",
+      "name": "Bananas",
+      "category": "fruit",
+      "unit": "each",
+      "weight_kg": 0.12,
+      "consumption_model": {
+        "daily_distribution": {
+          "mean": 15.0,
+          "std": 3.0,
+          "_comment": "Mean is the expected total demand across both shelves combined on an operating weekday before the location split is applied."
+        },
+        "school_period_profile": {
+          "arrival": 0.08,
+          "morning_lesson_1": 0.02,
+          "morning_break": 0.37,
+          "morning_lesson_2": 0.02,
+          "lunch": 0.19,
+          "afternoon_lesson": 0.02,
+          "afternoon_break": 0.24,
+          "end_of_day": 0.06,
+          "_comment": "Values sum to 1.0. Combined short-break share is intentionally dominant so the learned policy is rewarded for pre-break replenishment."
+        },
+        "weekday_multiplier": {
+          "Mon": 1.0,
+          "Tue": 1.0,
+          "Wed": 1.0,
+          "Thu": 1.0,
+          "Fri": 0.9,
+          "Sat": 0.0,
+          "Sun": 0.0,
+          "_comment": "Friday is slightly softer and weekends are fully disabled because the pilot only runs Monday to Friday."
+        }
+      },
+      "par_levels": {
+        "shelf_a": 8,
+        "shelf_b": 6
+      },
+      "perishable": true,
+      "allergen_notes": "None",
+      "_comment": "Fastest-moving fruit. At the primary shelf this demand profile is strong enough to push stock close to reorder after a busy break without forcing constant overstock of a perishable item."
+    },
+    {
+      "sku_id": "SKU_ILC_002",
+      "name": "Satsumas / Clementines",
+      "category": "fruit",
+      "unit": "each",
+      "weight_kg": 0.1,
+      "consumption_model": {
+        "daily_distribution": {
+          "mean": 13.0,
+          "std": 2.5,
+          "_comment": "Mean is the expected total demand across both shelves combined on an operating weekday before the location split is applied."
+        },
+        "school_period_profile": {
+          "arrival": 0.08,
+          "morning_lesson_1": 0.02,
+          "morning_break": 0.36,
+          "morning_lesson_2": 0.02,
+          "lunch": 0.2,
+          "afternoon_lesson": 0.02,
+          "afternoon_break": 0.24,
+          "end_of_day": 0.06,
+          "_comment": "Values sum to 1.0. Combined short-break share is intentionally dominant so the learned policy is rewarded for pre-break replenishment."
+        },
+        "weekday_multiplier": {
+          "Mon": 1.0,
+          "Tue": 1.0,
+          "Wed": 1.0,
+          "Thu": 1.0,
+          "Fri": 0.9,
+          "Sat": 0.0,
+          "Sun": 0.0,
+          "_comment": "Friday is slightly softer and weekends are fully disabled because the pilot only runs Monday to Friday."
+        }
+      },
+      "par_levels": {
+        "shelf_a": 8,
+        "shelf_b": 6
+      },
+      "perishable": true,
+      "allergen_notes": "None",
+      "_comment": "Very close to bananas in popularity, but slightly smoother because citrus tends to keep longer and is less prone to same-day spoilage concerns."
+    },
+    {
+      "sku_id": "SKU_ILC_003",
+      "name": "Cereal / Granola Bars",
+      "category": "snack",
+      "unit": "each",
+      "weight_kg": 0.04,
+      "consumption_model": {
+        "daily_distribution": {
+          "mean": 9.0,
+          "std": 2.0,
+          "_comment": "Mean is the expected total demand across both shelves combined on an operating weekday before the location split is applied."
+        },
+        "school_period_profile": {
+          "arrival": 0.08,
+          "morning_lesson_1": 0.02,
+          "morning_break": 0.38,
+          "morning_lesson_2": 0.02,
+          "lunch": 0.18,
+          "afternoon_lesson": 0.02,
+          "afternoon_break": 0.23,
+          "end_of_day": 0.07,
+          "_comment": "Values sum to 1.0. Combined short-break share is intentionally dominant so the learned policy is rewarded for pre-break replenishment."
+        },
+        "weekday_multiplier": {
+          "Mon": 1.0,
+          "Tue": 1.0,
+          "Wed": 1.0,
+          "Thu": 1.0,
+          "Fri": 0.9,
+          "Sat": 0.0,
+          "Sun": 0.0,
+          "_comment": "Friday is slightly softer and weekends are fully disabled because the pilot only runs Monday to Friday."
+        }
+      },
+      "par_levels": {
+        "shelf_a": 7,
+        "shelf_b": 5
+      },
+      "perishable": false,
+      "allergen_notes": "Contains: wheat, oats; may contain milk and nuts depending on brand.",
+      "_comment": "Wrapped bars have long shelf life and lower perishability, so they provide a stable signal even when fruit demand fluctuates with freshness or weather."
+    },
+    {
+      "sku_id": "SKU_ILC_004",
+      "name": "Small Water Bottles (500ml)",
+      "category": "drink",
+      "unit": "each",
+      "weight_kg": 0.53,
+      "consumption_model": {
+        "daily_distribution": {
+          "mean": 7.0,
+          "std": 1.5,
+          "_comment": "Mean is the expected total demand across both shelves combined on an operating weekday before the location split is applied."
+        },
+        "school_period_profile": {
+          "arrival": 0.07,
+          "morning_lesson_1": 0.02,
+          "morning_break": 0.33,
+          "morning_lesson_2": 0.02,
+          "lunch": 0.2,
+          "afternoon_lesson": 0.02,
+          "afternoon_break": 0.26,
+          "end_of_day": 0.08,
+          "_comment": "Values sum to 1.0. Combined short-break share is intentionally dominant so the learned policy is rewarded for pre-break replenishment."
+        },
+        "weekday_multiplier": {
+          "Mon": 1.0,
+          "Tue": 1.0,
+          "Wed": 1.0,
+          "Thu": 1.0,
+          "Fri": 0.9,
+          "Sat": 0.0,
+          "Sun": 0.0,
+          "_comment": "Friday is slightly softer and weekends are fully disabled because the pilot only runs Monday to Friday."
+        }
+      },
+      "par_levels": {
+        "shelf_a": 6,
+        "shelf_b": 4
+      },
+      "perishable": false,
+      "allergen_notes": "None",
+      "_comment": "Water is slower-moving than food but materially heavier, making it useful for testing load-aware routing and replenishment decisions."
+    }
+  ],
+  "sku_index_by_category": {
+    "fruit": [
+      "SKU_ILC_001",
+      "SKU_ILC_002"
+    ],
+    "snack": [
+      "SKU_ILC_003"
+    ],
+    "drink": [
+      "SKU_ILC_004"
+    ]
+  }
+}

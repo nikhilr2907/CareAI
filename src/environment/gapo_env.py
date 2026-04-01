@@ -99,6 +99,12 @@ class GAPOTaskAssignmentEnv:
         self.emergency_tasks: list = []
         self._last_battery_penalty = 0.0
 
+        # ILC schedule-aware reward shaping (no-ops when school_schedule is absent)
+        # proactive_restock_lead_time_s is overridden from config in reset() if present.
+        self.proactive_restock_lead_time_s = 900.0   # seconds before break that earns bonus
+        self.break_movement_penalty = 0.1            # per-step cost for moving during a break
+        self.episode_break_stockouts = 0             # metric: SKU stockouts that occur in breaks
+
         # Phase 1: Telemetry noise injection (realistic sensor characteristics)
         self.telemetry_noise_manager = TelemetryEffectsManager(enable=True, graph_bounds=None)
         self.robot_reset_times = []  # Track when each robot was initialized
@@ -134,6 +140,14 @@ class GAPOTaskAssignmentEnv:
                 max(y_coords) + padding
             )
             self.telemetry_noise_manager.graph_bounds = self.graph_bounds
+
+        # Pull ILC schedule settings from config (no-op for hospital configs)
+        schedule = getattr(self.graph_state, "school_schedule", None)
+        if schedule:
+            self.proactive_restock_lead_time_s = float(
+                schedule.get("proactive_restock_lead_time_s", self.proactive_restock_lead_time_s)
+            )
+        self.episode_break_stockouts = 0
 
         # Initialize robots
         self.robots = []
@@ -281,6 +295,7 @@ class GAPOTaskAssignmentEnv:
             'task_completion_credits': self._last_per_task_credits,
             # Ambient monitoring stats (not in reward, just for logging).
             'episode_stockouts': self.episode_stockouts,
+            'episode_break_stockouts': self.episode_break_stockouts,
             'episode_collisions': self.episode_collisions,
             # Battery management info
             'battery_penalty': self._last_battery_penalty,
@@ -671,6 +686,47 @@ class GAPOTaskAssignmentEnv:
 
         return completed_tasks
 
+    def _break_state(self):
+        """Return (is_break: bool, secs_to_next_break: float) from the school schedule.
+
+        is_break           – True when the simulation clock is inside a period whose
+                             name appears in school_schedule["break_periods"].
+        secs_to_next_break – Seconds until the next break period starts.
+                             0.0 if already in a break; inf if no schedule or no more breaks.
+
+        Returns (False, inf) for hospital configs where school_schedule is absent.
+        """
+        schedule = getattr(self.graph_state, "school_schedule", None)
+        if not schedule:
+            return False, float('inf')
+        periods = schedule.get("periods", [])
+        break_set = set(schedule.get("break_periods", []))
+        if not periods:
+            return False, float('inf')
+
+        # Anchor simulation clock to first period's wall-clock start (e.g. 08:30 = 8.5h)
+        first_start = periods[0]["start_time"]
+        hh, mm = first_start.split(":")
+        episode_start_h = int(hh) + int(mm) / 60.0
+        t_sim = self.current_time % 86400  # seconds within the current simulated day
+
+        is_break = False
+        secs_to_next = float('inf')
+
+        for period in periods:
+            s_hh, s_mm = period["start_time"].split(":")
+            e_hh, e_mm = period["end_time"].split(":")
+            p_start_s = (int(s_hh) + int(s_mm) / 60.0 - episode_start_h) * 3600.0
+            p_end_s   = (int(e_hh) + int(e_mm) / 60.0 - episode_start_h) * 3600.0
+
+            if p_start_s <= t_sim < p_end_s and period["name"] in break_set:
+                is_break = True
+                secs_to_next = 0.0
+            elif p_start_s > t_sim and period["name"] in break_set:
+                secs_to_next = min(secs_to_next, p_start_s - t_sim)
+
+        return is_break, secs_to_next
+
     def _compute_timestep_reward(self, completed_tasks: List[Task]) -> float:
         """
         Compute reward combining inventory health + task completion + utilization.
@@ -724,6 +780,15 @@ class GAPOTaskAssignmentEnv:
                     pre_ratio = 0.0
                 task_reward += 10.0 * pre_ratio
 
+                # C+: ILC proactive break bonus
+                # Extra +8.0 when the dropoff lands inside the proactive window before a
+                # break (i.e. 0 < secs_to_next_break <= proactive_restock_lead_time_s).
+                # This directly shapes "restock before breaks, not during them" behaviour.
+                # No-op for hospital configs because _break_state() returns inf.
+                is_break, secs_to_break = self._break_state()
+                if not is_break and 0 < secs_to_break <= self.proactive_restock_lead_time_s:
+                    task_reward += 8.0
+
             # A: Ad-hoc task completion bonus
             if task.task_type == 'ad_hoc' and task.leg_type == 'dropoff':
                 task_reward += 1.0
@@ -762,6 +827,12 @@ class GAPOTaskAssignmentEnv:
                     stockout_count += 1
         self.episode_stockouts = stockout_count
 
+        # ILC metric: track SKU stockouts that occur specifically during break periods.
+        # Not added to reward — used for pilot evaluation reporting only.
+        is_break_now, _ = self._break_state()
+        if is_break_now:
+            self.episode_break_stockouts += stockout_count
+
         # Track collisions for episode metrics / info dict only.
         collision_distance_m = 0.5
         collision_count = 0
@@ -789,6 +860,40 @@ class GAPOTaskAssignmentEnv:
                 battery_penalty -= self.battery_low_step_penalty
         self._last_battery_penalty = battery_penalty
         total_reward += battery_penalty
+
+        # G: ILC movement-during-break penalty
+        # Penalises the robot for traversing an edge during a break period.
+        # Shapes "stay stationary during congested breaks" behaviour described in the
+        # pilot proposal. No-op for hospital configs (_break_state returns False).
+        #
+        # OPTION B (future): gate the penalty on shelf health so reactive recovery
+        # runs are not charged when stock is critically depleted. To switch, comment
+        # out the unconditional block below and uncomment the gated block.
+        #
+        # -- OPTION B (gated) --
+        # if is_break_now:
+        #     any_critical_stockout = any(
+        #         float(sku.get("stock", 0)) <= float(sku.get("reorder", 0))
+        #         for node in self.graph_state.nodes
+        #         if node.consumption_enabled and node.sku_inventory
+        #         for sku in node.sku_inventory.values()
+        #     )
+        #     if not any_critical_stockout:
+        #         for rid in range(len(self.robots)):
+        #             if rid in self._offline_robots:
+        #                 continue
+        #             sim = self.robot_simulators[rid]
+        #             if sim.current_edge_index is not None:
+        #                 total_reward -= self.break_movement_penalty
+        #
+        # -- OPTION A (unconditional, active) --
+        if is_break_now:
+            for rid in range(len(self.robots)):
+                if rid in self._offline_robots:
+                    continue
+                sim = self.robot_simulators[rid]
+                if sim.current_edge_index is not None:
+                    total_reward -= self.break_movement_penalty
 
         return total_reward
 

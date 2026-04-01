@@ -10,26 +10,6 @@ def _parse_time_hhmm(t: str) -> float:
     return int(hh) + int(mm) / 60.0
 
 
-def _intraday_weight(intraday_profile: Dict[str, float], current_time_seconds: float) -> Tuple[float, float]:
-    """Return (weight, bin_hours) for current time of day."""
-    if not intraday_profile:
-        return 1.0, 24.0
-    t_hours = (current_time_seconds % 86400) / 3600.0
-    for window, weight in intraday_profile.items():
-        start, end = window.split("-")
-        start_h = _parse_time_hhmm(start)
-        end_h = _parse_time_hhmm(end)
-        if end_h < start_h:
-            in_bin = t_hours >= start_h or t_hours < end_h
-            bin_hours = (24.0 - start_h) + end_h
-        else:
-            in_bin = start_h <= t_hours < end_h
-            bin_hours = end_h - start_h
-        if in_bin:
-            return float(weight), max(bin_hours, 1e-3)
-    return 1.0, 24.0
-
-
 def _weekday_multiplier(weekday_multipliers: Dict[str, float], current_time_seconds: float, start_day: int = 0) -> float:
     if not weekday_multipliers:
         return 1.0
@@ -38,8 +18,62 @@ def _weekday_multiplier(weekday_multipliers: Dict[str, float], current_time_seco
     return float(weekday_multipliers.get(day_name, 1.0))
 
 
+def _get_current_school_period(school_schedule: dict, current_time_seconds: float) -> Optional[dict]:
+    """Return the active school period dict for current_time_seconds, or None if outside schedule.
+
+    current_time_seconds is the simulation clock (0 = episode start). The episode is
+    anchored to the first period's start_time (e.g. 08:30), so we offset by that
+    amount before comparing against each period's wall-clock window.
+    """
+    if not school_schedule:
+        return None
+    periods = school_schedule.get("periods", [])
+    if not periods:
+        return None
+    episode_start_h = _parse_time_hhmm(periods[0]["start_time"])
+    wall_clock_h = (episode_start_h + (current_time_seconds % 86400) / 3600.0) % 24.0
+    for period in periods:
+        start_h = _parse_time_hhmm(period["start_time"])
+        end_h = _parse_time_hhmm(period["end_time"])
+        if start_h <= wall_clock_h < end_h:
+            return period
+    return None
+
+
+def _school_period_weight(
+    period_profile: dict,
+    school_schedule: dict,
+    current_time_seconds: float,
+) -> Tuple[float, float]:
+    """Return (weight, period_hours) for the currently active school period.
+
+    weight        – the fraction of the SKU's daily demand that falls in this period,
+                    taken directly from school_period_profile in the SKU's consumption_model.
+    period_hours  – duration of the period in hours, used to convert the daily demand
+                    fraction into an instantaneous hourly rate.
+
+    Returns (0.0, 1.0) when the simulation clock is outside all defined periods so
+    that consumption falls to zero between the end of one period and the start of the
+    next (e.g. before 08:30 or after 16:30).
+    """
+    period = _get_current_school_period(school_schedule, current_time_seconds)
+    if period is None:
+        return 0.0, 1.0
+    weight = float(period_profile.get(period["name"], 0.0))
+    period_hours = max(
+        _parse_time_hhmm(period["end_time"]) - _parse_time_hhmm(period["start_time"]),
+        1e-3,
+    )
+    return weight, period_hours
+
+
 def _compute_sku_rate(node, sku_id: str, graph_state, current_time_seconds: float) -> float:
-    """Compute expected hourly consumption rate for a SKU."""
+    """Compute expected hourly consumption rate for a SKU at a given node (ILC mode).
+
+    ILC mode: consumption_model contains 'school_period_profile' (named period keys).
+    Demand is scaled by node.foot_traffic_weight (0–1). The active school period is
+    resolved from graph_state.school_schedule.
+    """
     if not node.consumption_enabled:
         return 0.0
     sku_db = getattr(graph_state, "sku_database", None)
@@ -49,31 +83,19 @@ def _compute_sku_rate(node, sku_id: str, graph_state, current_time_seconds: floa
     consumption = sku_data.get("consumption_model", {})
     daily_dist = consumption.get("daily_distribution", {})
     daily_mean = float(daily_dist.get("mean", 0.0))
-    intraday_profile = consumption.get("intraday_profile", {})
     weekday_multipliers = consumption.get("weekday_multiplier", {})
-
-    weight, bin_hours = _intraday_weight(intraday_profile, current_time_seconds)
     weekday_mult = _weekday_multiplier(weekday_multipliers, current_time_seconds)
-
-    # Demand scaling
-    served_beds = max(0, int(getattr(node, "served_beds", 0)))
-    scale = served_beds / 10.0
-    if scale <= 0:
-        return 0.0
-
-    category_key = node.sku_inventory.get(sku_id, {}).get("category")
-    area_mult = node.sku_inventory.get(sku_id, {}).get("area_multiplier", 1.0)
-
-    demand_profiles = getattr(graph_state, "demand_profiles", {}) or {}
-    dept_multipliers = demand_profiles.get("department_category_multipliers_normalized", {})
-    dept_tag = getattr(node, "department_tag", None) or consumption.get("base_context", {}).get("baseline_department_tag")
-    dept_cat_mult = 1.0
-    if dept_tag and dept_tag in dept_multipliers:
-        dept_cat_mult = float(dept_multipliers[dept_tag].get(category_key, dept_multipliers[dept_tag].get("*", 1.0)))
-
     scale_factor = float(getattr(graph_state, "consumption_scale", 1.0))
-    hourly_rate = (daily_mean * weight / bin_hours) * scale * dept_cat_mult * float(area_mult) * weekday_mult
-    hourly_rate *= scale_factor
+
+    foot_traffic_weight = float(getattr(node, "foot_traffic_weight", 0.0))
+    if foot_traffic_weight <= 0:
+        return 0.0
+    school_period_profile = consumption.get("school_period_profile", {})
+    school_schedule = getattr(graph_state, "school_schedule", None)
+    weight, period_hours = _school_period_weight(
+        school_period_profile, school_schedule, current_time_seconds
+    )
+    hourly_rate = (daily_mean * weight / period_hours) * foot_traffic_weight * weekday_mult * scale_factor
     return max(0.0, hourly_rate)
 
 
@@ -187,7 +209,7 @@ def generate_inventory_tasks(
                 if key in seen_keys:
                     continue
 
-                target_stock = dest_node.buffer_time * dest_node.consumption_rate
+                target_stock = 2.0 * dest_node.consumption_rate
                 delivery_amount = min(
                     dest_node.max_stock - dest_node.stock_level,
                     target_stock

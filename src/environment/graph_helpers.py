@@ -243,8 +243,8 @@ def compute_graph_metrics(graph_state, current_task) -> np.ndarray:
     return np.array([
         mean_congestion,
         max_congestion,
-        float(start_node.is_cluttered),
-        float(end_node.is_cluttered),
+        0.0,  # node-level clutter removed; edge clutter_level used instead
+        0.0,
         start_congestion,
         end_congestion
     ], dtype=np.float32)

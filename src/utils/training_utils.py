@@ -75,8 +75,8 @@ def parse_args():
                         help='Number of robots (default: read from config or 5)')
     parser.add_argument('--max-episode-time', type=float, default=28800.0,
                         help='Max episode time in seconds (default: 28800 = 8 hours)')
-    parser.add_argument('--stochastic-tasks-per-hour', type=float, default=2.0,
-                        help='Expected stochastic ad-hoc task generation rate per simulated hour (default: 2.0)')
+    parser.add_argument('--stochastic-tasks-per-hour', type=float, default=0.0,
+                        help='Expected stochastic ad-hoc task generation rate per simulated hour (default: 0.0 for ILC)')
     parser.add_argument('--stochastic-task-cap-per-hour', type=int, default=2,
                         help='Hard cap on stochastic ad-hoc tasks created in any rolling simulated hour (default: 2)')
     parser.add_argument('--initial-stochastic-tasks', type=int, default=0,
@@ -205,7 +205,9 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
     graph_state.sku_database = meta.get("sku_database")
     graph_state.demand_profiles = meta.get("demand_profiles")
     graph_state.category_order = meta.get("category_order")
-    graph_state.department_order = meta.get("department_order")
+    graph_state.department_order = meta.get("department_order", [])
+    graph_state.location_tag_order = meta.get("location_tag_order", [])
+    graph_state.school_schedule = meta.get("school_schedule")
 
     return env, num_nodes
 
@@ -278,7 +280,9 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
     graph_state.sku_database = meta.get("sku_database")
     graph_state.demand_profiles = meta.get("demand_profiles")
     graph_state.category_order = meta.get("category_order")
-    graph_state.department_order = meta.get("department_order")
+    graph_state.department_order = meta.get("department_order", [])
+    graph_state.location_tag_order = meta.get("location_tag_order", [])
+    graph_state.school_schedule = meta.get("school_schedule")
 
     return env, num_nodes
 

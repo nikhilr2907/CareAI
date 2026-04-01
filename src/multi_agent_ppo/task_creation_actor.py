@@ -267,7 +267,7 @@ def build_candidate_universe(
             stock = node.stock_level
             max_stock = node.max_stock
             rate = node.consumption_rate
-            reorder = rate * getattr(node, 'buffer_time', 2.0)
+            reorder = rate * 2.0  # 2-hour buffer default (buffer_time field removed)
 
             if stock <= reorder or rate <= 0 or max_stock <= 0 or stock >= max_stock:
                 continue

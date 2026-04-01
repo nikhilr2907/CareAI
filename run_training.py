@@ -70,7 +70,7 @@ def main():
     use_curriculum = args.curriculum != 'none'
 
     if not args.config and not args.config_list and not args.configs_dir:
-        default_config = Path("configs") / "revised_hospital_config_v3_consumption_reduced.json"
+        default_config = Path("configs") / "ilc_pilot_v1_care_robotics.json"
         args.config = str(default_config)
 
     if args.config:
@@ -163,7 +163,7 @@ def main():
     checkpoint_dir = output_dir / "checkpoints"
 
     logger.info("\n" + "=" * 80)
-    logger.info("GAPO TRAINING - Hospital Robot Task Assignment")
+    logger.info("GAPO TRAINING - ILC Pilot Robot Task Assignment")
     logger.info("=" * 80)
     logger.info(f"Device: {device}")
     logger.info(f"De-biasing Enabled: {use_debiasing}")
@@ -263,15 +263,17 @@ def main():
     sku_embed_dim = 16
     node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
 
-    # Determine number of departments (if category stats are available)
-    num_departments = len(env.graph_state.department_order) if hasattr(env.graph_state, 'department_order') and env.graph_state.department_order else 10
+    # Determine number of location tags and school periods from loaded config
+    num_location_tags = len(env.graph_state.location_tag_order) if getattr(env.graph_state, 'location_tag_order', None) else 3
+    schedule = getattr(env.graph_state, 'school_schedule', None) or {}
+    num_school_periods = len(schedule.get('periods', [])) or 8
 
     # Create GAPO PPO with fine-grained categorical embeddings
     ppo = GAPOPPO(
         node_continuous_dim=node_continuous_dim,
         num_node_types=4,
-        num_departments=num_departments,
-        num_shift_periods=4,
+        num_departments=num_location_tags,
+        num_shift_periods=num_school_periods,
         num_day_types=2,
         edge_feat_dim=edge_feat_dim,
         node_type_embedding_dim=8,

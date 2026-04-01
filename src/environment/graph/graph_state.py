@@ -18,6 +18,7 @@ class GraphState:
     department_order: Optional[List[str]] = None
     current_time: float = 0.0
     consumption_scale: float = 1.0
+    school_schedule: Optional[dict] = None
 
     def __post_init__(self):
         """Create hospital graph from config, or use default if none provided."""
@@ -174,91 +175,65 @@ class GraphState:
             np.array(categorical_features, dtype=np.int64)
         )
 
-    def _get_shift_period_id(self, time_seconds: float) -> int:
-        """
-        Compute shift period ID from time of day.
-
-        Args:
-            time_seconds: Current time in seconds
-
-        Returns:
-            shift_period_id:
-                0 = night (00:00-06:00)
-                1 = morning (06:00-12:00)
-                2 = afternoon (12:00-18:00)
-                3 = evening (18:00-24:00)
-        """
-        hour_of_day = (time_seconds % 86400) / 3600.0  # 86400 seconds in a day
-
-        if hour_of_day < 6.0:
-            return 0  # night
-        elif hour_of_day < 12.0:
-            return 1  # morning
-        elif hour_of_day < 18.0:
-            return 2  # afternoon
-        else:
-            return 3  # evening
+    def _get_school_period_id(self, time_seconds: float) -> int:
+        """Return index (0-N) of the active school period, or -1 if outside schedule."""
+        schedule = self.school_schedule
+        if not schedule:
+            return -1
+        periods = schedule.get("periods", [])
+        if not periods:
+            return -1
+        first_start = periods[0]["start_time"]
+        hh, mm = first_start.split(":")
+        episode_start_h = int(hh) + int(mm) / 60.0
+        wall_h = (episode_start_h + (time_seconds % 86400) / 3600.0) % 24.0
+        for idx, period in enumerate(periods):
+            s_hh, s_mm = period["start_time"].split(":")
+            e_hh, e_mm = period["end_time"].split(":")
+            s = int(s_hh) + int(s_mm) / 60.0
+            e = int(e_hh) + int(e_mm) / 60.0
+            if s <= wall_h < e:
+                return idx
+        return -1
 
     def _get_day_type_id(self, time_seconds: float) -> int:
-        """
-        Compute day type ID from time.
+        """0 = weekday (Mon-Fri), 1 = weekend (Sat-Sun)."""
+        day_of_week = int((time_seconds / 86400.0) % 7)
+        return 1 if day_of_week >= 5 else 0
 
-        Args:
-            time_seconds: Current time in seconds
-
-        Returns:
-            day_type_id:
-                0 = weekday (Mon-Fri)
-                1 = weekend (Sat-Sun)
-        """
-        # Assuming time_seconds starts from Monday midnight
-        day_of_week = int((time_seconds / 86400.0) % 7)  # 0=Monday, 6=Sunday
-
-        if day_of_week >= 5:  # Saturday or Sunday
-            return 1  # weekend
-        else:
-            return 0  # weekday
-
-    def _get_intraday_weight(self, time_seconds: float) -> float:
-        """
-        Compute intraday consumption weight from time of day.
-        Matches the pattern from task_generator._intraday_weight()
-
-        Returns value in range [0.068, 0.259] based on time of day.
-        """
-        hour_of_day = (time_seconds % 86400) / 3600.0
-        
-        # Demand profile: low at night, high in morning/afternoon
-        if hour_of_day < 6.0:  # Night (00:00-06:00)
-            return 0.068
-        elif hour_of_day < 12.0:  # Morning (06:00-12:00)
-            return 0.259
-        elif hour_of_day < 18.0:  # Afternoon (12:00-18:00)
-            return 0.239
-        else:  # Evening (18:00-24:00)
-            return 0.183
-
-    def _get_weekday_multiplier(self, time_seconds: float) -> float:
-        """
-        Compute weekday consumption multiplier.
-        Matches the pattern from task_generator._weekday_multiplier()
-
-        Returns value in range [0.95, 1.03] based on day of week.
-        """
-        day_of_week = int((time_seconds / 86400.0) % 7)  # 0=Monday, 6=Sunday
-
-        # Tuesday/Wednesday highest, weekend lowest
-        weekday_multipliers = {
-            0: 1.01,  # Monday
-            1: 1.03,  # Tuesday
-            2: 1.02,  # Wednesday
-            3: 1.00,  # Thursday
-            4: 0.98,  # Friday
-            5: 0.95,  # Saturday
-            6: 0.96   # Sunday
-        }
-
-        return weekday_multipliers.get(day_of_week, 1.0)
+    def _get_period_demand_weight(self, time_seconds: float) -> float:
+        """Fraction of daily demand in the current school period (0–1). 0 outside schedule."""
+        schedule = self.school_schedule
+        if not schedule:
+            return 0.0
+        periods = schedule.get("periods", [])
+        if not periods:
+            return 0.0
+        first_start = periods[0]["start_time"]
+        hh, mm = first_start.split(":")
+        episode_start_h = int(hh) + int(mm) / 60.0
+        wall_h = (episode_start_h + (time_seconds % 86400) / 3600.0) % 24.0
+        for period in periods:
+            s_hh, s_mm = period["start_time"].split(":")
+            e_hh, e_mm = period["end_time"].split(":")
+            s = int(s_hh) + int(s_mm) / 60.0
+            e = int(e_hh) + int(e_mm) / 60.0
+            if s <= wall_h < e:
+                # Look up the weight from the first SKU that has a school_period_profile
+                # as a proxy for the current demand intensity
+                period_name = period["name"]
+                for node in self.nodes:
+                    if not node.sku_inventory:
+                        continue
+                    sku_db = self.sku_database or {}
+                    for sku_id in node.sku_inventory:
+                        profile = sku_db.get(sku_id, {}).get(
+                            "consumption_model", {}
+                        ).get("school_period_profile")
+                        if profile and period_name in profile:
+                            return float(profile[period_name])
+                return 0.0
+        return 0.0
 
     def get_node_features_with_category_stats(self) -> tuple:
         """
@@ -298,16 +273,18 @@ class GraphState:
         category_order = self.category_order or []
         department_order = self.department_order or []
 
-        shift_period_id = self._get_shift_period_id(self.current_time)
+        school_period_id = self._get_school_period_id(self.current_time)
         day_type_id = self._get_day_type_id(self.current_time)
-        intraday_weight = self._get_intraday_weight(self.current_time)
-        weekday_multiplier = self._get_weekday_multiplier(self.current_time)
+        period_demand_weight = self._get_period_demand_weight(self.current_time)
+
+        # location_tag → integer index for categorical embedding
+        location_tag_order = getattr(self, 'location_tag_order', []) or []
 
         continuous_features = []
         categorical_features = []
 
         for node in self.nodes:
-            dept_id = department_order.index(node.department_tag) if (node.department_tag in department_order) else -1
+            loc_tag_id = location_tag_order.index(node.location_tag) if node.location_tag in location_tag_order else -1
 
             base = [
                 node.center_x,
@@ -318,18 +295,15 @@ class GraphState:
                 node.stock_level,
                 node.consumption_rate,
                 min(node.time_to_stockout, 999.0),
-                float(node.served_beds),
+                float(node.foot_traffic_weight),
                 float(node.floor),
-                float(len(node.location_ids)),
-                float(len(node.shelf_ids)),
                 float(node.get_total_num_skus()),
                 float(len(node.category_inventory)),
                 float(1.0 if node.consumption_enabled else 0.0),
             ]
 
             temporal_features = [
-                intraday_weight,
-                weekday_multiplier,
+                period_demand_weight,
             ]
 
             cat_feats = []
@@ -344,8 +318,8 @@ class GraphState:
             node_type_id = node_type_to_id.get(node.node_type, 0)
             categorical_features.append([
                 node_type_id,
-                dept_id,
-                shift_period_id,
+                loc_tag_id,
+                school_period_id,
                 day_type_id
             ])
 
@@ -554,7 +528,6 @@ class GraphState:
         }
 
         # Initialize arrays
-        num_nodes = len(self.nodes)
         node_continuous = []
         node_categorical = []
         category_features = []
@@ -576,9 +549,9 @@ class GraphState:
                 min(node.time_to_stockout, 999.0),
                 float(node.occupancy_count),
                 float(node.urgency_level),
-                float(node.get_total_num_skus()),  # NEW
-                float(len(node.category_inventory)),  # NEW: num categories
-                float(len(node.shelf_ids))  # NEW: num shelves
+                float(node.get_total_num_skus()),
+                float(len(node.category_inventory)),
+                float(node.foot_traffic_weight)
             ]
             node_continuous.append(node_cont)
 
@@ -620,12 +593,8 @@ class GraphState:
             category_ids.append(node_cat_ids)
 
             # ===== Location and floor IDs =====
-            # Location ID: if node.location_id exists, map to index (or use -1)
-            # For simplicity, we'll use a hash or assign sequential IDs
-            # In practice, you'd maintain a global location_id → index mapping
-            if node.location_id:
-                # Simple hash to int (replace with proper mapping in production)
-                loc_idx = hash(node.location_id) % 1000
+            if node.location_tag:
+                loc_idx = hash(node.location_tag) % 1000
             else:
                 loc_idx = -1
             location_ids.append(loc_idx)

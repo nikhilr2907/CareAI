@@ -219,17 +219,14 @@ class HospitalConfig:
         if node_type == 'recovery':
             stock_level = np.random.uniform(50.0, 150.0)
             consumption_rate = np.random.uniform(5.0, 15.0)
-            buffer_time = 2.0
             max_stock = 200.0
         elif node_type == 'storage':
             stock_level = 1000.0
             consumption_rate = 0.0
-            buffer_time = 999.0
             max_stock = 1000.0
         else:
             stock_level = 0.0
             consumption_rate = 0.0
-            buffer_time = 999.0
             max_stock = 0.0
 
         return {
@@ -239,14 +236,8 @@ class HospitalConfig:
             'center_y': pos[1],
             'width': size[0],
             'height': size[1],
-            'clearance_m': 0.9,
-            'max_reach_height': 1.35,
-            'unit_height': 2.1,
-            'has_wash_basin': False,
-            'is_cluttered': np.random.random() < 0.2,
             'stock_level': stock_level,
             'consumption_rate': consumption_rate,
-            'buffer_time': buffer_time,
             'max_stock': max_stock
         }
 

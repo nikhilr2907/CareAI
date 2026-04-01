@@ -26,7 +26,6 @@ import numpy as np
 import torch
 import pygame
 
-from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO
 from src.utils.training_utils import (
     create_env_from_config_file,
@@ -48,14 +47,14 @@ from src.utils.deployment_utils import (
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments matching training script structure."""
     parser = argparse.ArgumentParser(
-        description="Hospital robot task allocation deployment (inference-only)"
+        description="ILC pilot robot task allocation deployment (inference-only)"
     )
 
     # Config selection (same as training)
     parser.add_argument(
         "--config", type=str,
-        default="configs/revised_hospital_config_v3_consumption_reduced.json",
-        help="Path to hospital config JSON file"
+        default="configs/ilc_pilot_v1_care_robotics.json",
+        help="Path to ILC config JSON file"
     )
 
     # Policy/Model
@@ -83,8 +82,8 @@ def parse_args() -> argparse.Namespace:
         help="Max episode time for environment (default: 28800 = 8 hours)"
     )
     parser.add_argument(
-        "--stochastic-tasks-per-hour", type=float, default=2.0,
-        help="Ad-hoc task generation rate (default: 2.0)"
+        "--stochastic-tasks-per-hour", type=float, default=0.0,
+        help="Ad-hoc task generation rate (default: 0.0 for ILC)"
     )
     parser.add_argument(
         "--stochastic-task-cap-per-hour", type=int, default=2,
@@ -219,62 +218,47 @@ def main():
 
     # ============ Environment Setup ============
     logger.info("\n" + "=" * 80)
-    logger.info("GAPO DEPLOYMENT - Hospital Robot Task Assignment (Inference)")
+    logger.info("GAPO DEPLOYMENT - ILC Pilot Robot Task Assignment (Inference)")
     logger.info("=" * 80)
 
-    # Config resolution: explicit --config > HOSPITAL_CONFIG_NAME env var
+    # Config resolution: explicit --config > ILC_CONFIG_NAME env var
     config_path = None
-    config_name_override = os.environ.get("HOSPITAL_CONFIG_NAME")
+    config_name_override = os.environ.get("ILC_CONFIG_NAME")
     if config_name_override:
         config_path = Path("configs") / config_name_override
-        logger.info(f"Using config from env var HOSPITAL_CONFIG_NAME: {config_path}")
+        logger.info(f"Using config from env var ILC_CONFIG_NAME: {config_path}")
     elif args.config:
         config_path = Path(args.config)
 
-    if config_path and config_path.exists():
-        logger.info(f"Loading hospital config: {config_path}")
-        env, num_nodes = create_env_from_config_file(
-            str(config_path),
-            num_robots=args.num_robots,
-            max_episode_time=args.max_episode_time,
-            timestep_seconds=args.cycle_time,
-            stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
-            stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
-            initial_stochastic_tasks=args.initial_stochastic_tasks
+    if not config_path or not config_path.exists():
+        raise FileNotFoundError(
+            f"ILC config not found at '{config_path}'. "
+            f"Pass --config configs/ilc_pilot_v1_care_robotics.json or set ILC_CONFIG_NAME."
         )
-        env.reset()
-        apply_floorplan_layout(env.graph_state)
 
-        logger.info(f"  Nodes: {num_nodes}")
-        logger.info(f"  Robots: {env.num_robots}")
-        logger.info(f"  Edges: {len(env.graph_state.edges)}")
+    logger.info(f"Loading ILC config: {config_path}")
+    env, num_nodes = create_env_from_config_file(
+        str(config_path),
+        num_robots=args.num_robots,
+        max_episode_time=args.max_episode_time,
+        timestep_seconds=args.cycle_time,
+        stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
+        stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
+        initial_stochastic_tasks=args.initial_stochastic_tasks
+    )
+    env.reset()
+    apply_floorplan_layout(env.graph_state)
 
-        # Log category info if available
-        total_categories = set()
-        for node in env.graph_state.nodes:
-            if hasattr(node, 'get_all_categories'):
-                total_categories.update(node.get_all_categories())
-        if total_categories:
-            logger.info(f"  Categories: {len(total_categories)}")
-    else:
-        logger.warning(
-            f"Config not found at '{config_path}', using procedural environment"
-        )
-        num_robots = args.num_robots or 5
-        num_nodes = 10
-        env = GAPOTaskAssignmentEnv(
-            num_robots=num_robots,
-            num_nodes=num_nodes,
-            max_episode_time=args.max_episode_time,
-            timestep_seconds=args.cycle_time,
-            stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
-            max_stochastic_tasks_per_hour=args.stochastic_task_cap_per_hour,
-            initial_stochastic_tasks=args.initial_stochastic_tasks
-        )
-        env.reset()
-        apply_floorplan_layout(env.graph_state)
+    logger.info(f"  Nodes: {num_nodes}")
+    logger.info(f"  Robots: {env.num_robots}")
+    logger.info(f"  Edges: {len(env.graph_state.edges)}")
 
-        logger.info(f"  Procedural environment: {num_nodes} nodes, {num_robots} robots")
+    total_categories = set()
+    for node in env.graph_state.nodes:
+        if hasattr(node, 'get_all_categories'):
+            total_categories.update(node.get_all_categories())
+    if total_categories:
+        logger.info(f"  Categories: {len(total_categories)}")
 
     # ============ Policy Setup ============
     ppo = None
@@ -301,11 +285,15 @@ def main():
         logger.info(f"  Edge feature dim: {edge_feat_dim}")
         logger.info(f"  SKU feature dim: {sku_feat_dim}")
 
+        num_location_tags = len(env.graph_state.location_tag_order) if getattr(env.graph_state, 'location_tag_order', None) else 3
+        schedule = getattr(env.graph_state, 'school_schedule', None) or {}
+        num_school_periods = len(schedule.get('periods', [])) or 8
+
         ppo = GAPOPPO(
             node_continuous_dim=node_continuous_dim,
             num_node_types=4,
-            num_departments=10,
-            num_shift_periods=4,
+            num_departments=num_location_tags,
+            num_shift_periods=num_school_periods,
             num_day_types=2,
             node_type_embedding_dim=8,
             department_embedding_dim=16,
@@ -346,7 +334,7 @@ def main():
     if not args.headless:
         pygame.init()
         screen = pygame.display.set_mode((args.width, args.height))
-        pygame.display.set_caption("Hospital Robot Simulation - GAPO Deployment")
+        pygame.display.set_caption("ILC Pilot Robot Simulation - GAPO Deployment")
         font = pygame.font.SysFont("Consolas", 14)
         bounds = compute_bounds(env.graph_state)
         clock = pygame.time.Clock()
