@@ -64,118 +64,6 @@ class GraphState:
             )
             self.edges.append(edge)
 
-    def _create_default_nodes(self):
-        """
-        Create 10 default hospital nodes as REGIONS (not points).
-        Each node has a bounding box with width and height.
-        """
-        # Define regions with (center_x, center_y, width, height, node_type)
-        # Layout: Grid with regions having realistic room sizes
-        regions = [
-            # Bottom row (y ~= 2.5)
-            (2.5, 2.5, 4.0, 4.0, 'storage'),      # node_0: Storage room (4×4 meters)
-            (10.0, 2.5, 3.0, 4.0, 'corridor'),    # node_1: Corridor section
-            (20.0, 2.5, 5.0, 4.0, 'recovery'),    # node_2: Ward/Recovery room
-            (30.0, 2.5, 4.0, 4.0, 'hub'),         # node_3: Hub area
-
-            # Top row (y ~= 12.5)
-            (2.5, 12.5, 4.0, 4.0, 'storage'),     # node_4: Storage room
-            (10.0, 12.5, 3.0, 4.0, 'corridor'),   # node_5: Corridor section
-            (20.0, 12.5, 5.0, 4.0, 'recovery'),   # node_6: Ward/Recovery room
-            (30.0, 12.5, 4.0, 4.0, 'hub'),        # node_7: Hub area
-
-            # Middle nodes
-            (6.0, 7.5, 2.0, 8.0, 'corridor'),     # node_8: Central corridor (narrow, tall)
-            (25.0, 7.5, 3.0, 6.0, 'storage'),     # node_9: Storage
-        ]
-
-        for i, (center_x, center_y, width, height, node_type) in enumerate(regions):
-            # Set inventory parameters based on node type
-            # Recovery nodes = wards that need supplies
-            # Storage nodes = central storage (infinite supply)
-            if node_type == 'recovery':
-                stock_level = np.random.uniform(50.0, 150.0)
-                consumption_rate = np.random.uniform(5.0, 15.0)  # items/hour
-                buffer_time = 2.0
-                max_stock = 200.0
-            elif node_type == 'storage':
-                stock_level = 1000.0  # Central storage has large capacity
-                consumption_rate = 0.0  # Storage doesn't consume
-                buffer_time = 999.0
-                max_stock = 1000.0
-            else:
-                # Corridors, hubs don't have inventory
-                stock_level = 0.0
-                consumption_rate = 0.0
-                buffer_time = 999.0
-                max_stock = 0.0
-
-            node = HospitalNode(
-                node_id=f"node_{i}",
-                node_type=node_type,
-                center_x=center_x,
-                center_y=center_y,
-                width=width,
-                height=height,
-                clearance_m=0.9,
-                max_reach_height=1.35,
-                unit_height=2.1,
-                has_wash_basin=False,
-                is_cluttered=np.random.random() < 0.2,  # 20% chance of clutter
-                stock_level=stock_level,
-                consumption_rate=consumption_rate,
-                buffer_time=buffer_time,
-                max_stock=max_stock
-            )
-            self.nodes.append(node)
-
-    def _create_default_edges(self):
-        """
-        Create 20 default edges connecting the nodes.
-        Edges now include entry/exit points based on region boundaries.
-        """
-        # Define edge connections (from_idx, to_idx)
-        connections = [
-            # Horizontal connections
-            (0, 1), (1, 2), (2, 3),
-            (4, 5), (5, 6), (6, 7),
-            # Vertical connections
-            (0, 4), (1, 5), (2, 6), (3, 7),
-            # Diagonal/cross connections
-            (0, 8), (1, 8), (4, 8), (5, 8),
-            (2, 9), (3, 9), (6, 9), (7, 9),
-            # Extra connections
-            (8, 9), (1, 6)
-        ]
-
-        for from_idx, to_idx in connections:
-            from_node = self.nodes[from_idx]
-            to_node = self.nodes[to_idx]
-
-            # Compute entry and exit points (simplified: use region centers)
-            # In a real system, these would be computed based on which edges of the
-            # bounding boxes face each other
-            entry_point = (from_node.center_x, from_node.center_y)
-            exit_point = (to_node.center_x, to_node.center_y)
-
-            # Calculate Euclidean distance between region centers
-            distance = np.sqrt((from_node.center_x - to_node.center_x)**2 +
-                             (from_node.center_y - to_node.center_y)**2)
-
-            edge = HospitalEdge(
-                from_node=from_node.node_id,
-                to_node=to_node.node_id,
-                distance_m=distance,
-                corridor_width=1.9,
-                entry_point=entry_point,
-                exit_point=exit_point,
-                max_v_ms=0.5,
-                clutter_level=np.random.random() * 0.3,  # Random clutter 0-0.3
-                active_robot_ids=[],
-                has_patient_bed=np.random.random() < 0.1  # 10% chance of bed
-            )
-            self.edges.append(edge)
-
     def get_node_features(self) -> np.ndarray:
         """
         Extract node features as numpy array (10 nodes × 8 features).
@@ -339,7 +227,7 @@ class GraphState:
         Returns value in range [0.068, 0.259] based on time of day.
         """
         hour_of_day = (time_seconds % 86400) / 3600.0
-
+        
         # Demand profile: low at night, high in morning/afternoon
         if hour_of_day < 6.0:  # Night (00:00-06:00)
             return 0.068

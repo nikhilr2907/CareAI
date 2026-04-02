@@ -1,11 +1,3 @@
-"""
-GAPO PPO Trainer with de-biasing.
-
-Implements PPO training for GAPO policy network with:
-- Graph-structured states
-- De-biasing loss
-- Attention visualization
-"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,8 +11,6 @@ from .task_creation_actor import TaskCreationActor
 
 
 class Memory:
-    """Memory buffer for PPO."""
-
     def __init__(self):
         self.state_dicts = []
         self.actions = []
@@ -43,10 +33,6 @@ class Memory:
 
 
 class GAPOPPO:
-    """
-    PPO trainer for GAPO policy network.
-    """
-
     def __init__(
         self,
         node_continuous_dim=8,

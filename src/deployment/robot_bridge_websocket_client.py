@@ -5,7 +5,6 @@ This module connects to the ROS2 bridge via WebSocket and receives:
 - Robot telemetry (position, velocity, battery)
 - Task status updates
 - Location inventory (SKU levels)
-- Consumption rates
 - System state aggregations
 
 Status: READY TO USE (not active until Nav2 is deployed)
@@ -25,10 +24,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RobotTelemetryData:
     """Current robot state from bridge."""
+    robot_id: int
     timestamp: float
     position: tuple  # (x, y, z)
     orientation: Dict[str, float]  # quaternion {x, y, z, w}
-    velocity: Dict[str, float]  # {linear_x, linear_y, angular_z}
+    velocity: Dict[str, float]  # {linear_x, angular_z}
     battery_level: float  # 0.0-1.0
     current_capacity: int
     max_capacity: int
@@ -45,27 +45,15 @@ class LocationInventoryData:
 
 
 @dataclass
-class LocationConsumptionData:
-    """Consumption rates at a specific location."""
-    location_id: str
-    location_name: str
-    consumption_rate: float  # items/hour
-    time_to_stockout_hours: float
-    urgency_level: int  # 1-5
-    category_rates: Dict[str, float] = field(default_factory=dict)  # category -> rate
-
-
-@dataclass
 class SystemState:
     """Full system state snapshot."""
     timestamp: float
     robot_telemetry: Optional[RobotTelemetryData] = None
     location_inventories: Dict[str, LocationInventoryData] = field(default_factory=dict)
-    consumption_rates: Dict[str, LocationConsumptionData] = field(default_factory=dict)
     last_update: str = ""
 
 
-class ROSBridgeClient:
+class RobotBridgeWebSocketClient:
     """
     Receives data from ROS2 Bridge via WebSocket.
 
@@ -77,7 +65,8 @@ class ROSBridgeClient:
         Initialize client (but don't connect yet).
 
         Args:
-            bridge_url: WebSocket URL of ROS bridge (default: localhost:8765)
+            bridge_url: Base WebSocket URL of ROS bridge (default: localhost:8765).
+                        The /ws path is appended automatically on connect.
         """
         self.bridge_url = bridge_url
         self.websocket = None
@@ -87,14 +76,12 @@ class ROSBridgeClient:
         # Local state (always available, even if bridge is down)
         self.robot_telemetry: Optional[RobotTelemetryData] = None
         self.location_inventories: Dict[str, LocationInventoryData] = {}
-        self.consumption_rates: Dict[str, LocationConsumptionData] = {}
         self.system_state = SystemState(timestamp=0.0)
 
         # Message callbacks (user can register handlers)
         self.on_robot_telemetry: Optional[Callable] = None
         self.on_task_status: Optional[Callable] = None
         self.on_location_inventory: Optional[Callable] = None
-        self.on_consumption_rates: Optional[Callable] = None
         self.on_system_state: Optional[Callable] = None
         self.on_connection_lost: Optional[Callable] = None
 
@@ -109,10 +96,12 @@ class ROSBridgeClient:
         """
         try:
             import websockets
-            self.websocket = await websockets.connect(self.bridge_url)
+            # Bridge serves the WebSocket endpoint at /ws (FastAPI route)
+            url = self.bridge_url.rstrip("/") + "/ws"
+            self.websocket = await websockets.connect(url)
             self.is_connected = True
             self.is_running = True
-            logger.info(f"Connected to ROS bridge at {self.bridge_url}")
+            logger.info(f"Connected to ROS bridge at {url}")
             return True
         except Exception as e:
             logger.error(f"Failed to connect to ROS bridge: {e}")
@@ -157,7 +146,7 @@ class ROSBridgeClient:
         elif msg_type == 'location_inventory':
             await self._handle_location_inventory(data)
         elif msg_type == 'consumption_rates':
-            await self._handle_consumption_rates(data)
+            logger.debug("Ignoring deprecated message type: consumption_rates")
         elif msg_type == 'system_state':
             await self._handle_system_state(data)
         else:
@@ -167,6 +156,7 @@ class ROSBridgeClient:
         """Handle robot telemetry update."""
         try:
             telemetry = RobotTelemetryData(
+                robot_id=data.get('robot_id', 0),
                 timestamp=data.get('timestamp', 0.0),
                 position=(
                     data['position']['x'],
@@ -174,7 +164,7 @@ class ROSBridgeClient:
                     data['position'].get('z', 0.0)
                 ),
                 orientation=data.get('orientation_quat', {'x': 0, 'y': 0, 'z': 0, 'w': 1}),
-                velocity=data.get('velocity', {'linear_x': 0, 'linear_y': 0, 'angular_z': 0}),
+                velocity=data.get('velocity', {'linear_x': 0, 'angular_z': 0}),
                 battery_level=data.get('battery_level', 0.0),
                 current_capacity=data.get('current_capacity', 0),
                 max_capacity=data.get('max_capacity', 12),
@@ -221,30 +211,6 @@ class ROSBridgeClient:
         except Exception as e:
             logger.error(f"Error parsing location inventory: {e}")
 
-    async def _handle_consumption_rates(self, data: Dict):
-        """Handle consumption rates update."""
-        try:
-            location_consumption = data.get('location_consumption', [])
-
-            for loc in location_consumption:
-                location_id = loc['location_id']
-                consumption = LocationConsumptionData(
-                    location_id=location_id,
-                    location_name=loc.get('location_name', location_id),
-                    consumption_rate=loc.get('consumption_rate', 0.0),
-                    time_to_stockout_hours=loc.get('time_to_stockout_hours', float('inf')),
-                    urgency_level=loc.get('urgency_level', 1),
-                    category_rates=loc.get('category_rates', {})
-                )
-                self.consumption_rates[location_id] = consumption
-
-            if self.on_consumption_rates:
-                await self._call_callback(self.on_consumption_rates, location_consumption)
-
-            logger.debug(f"Updated consumption rates for {len(location_consumption)} locations")
-        except Exception as e:
-            logger.error(f"Error parsing consumption rates: {e}")
-
     async def _handle_system_state(self, data: Dict):
         """Handle full system state snapshot."""
         try:
@@ -253,6 +219,7 @@ class ROSBridgeClient:
             robot_telemetry = None
             if robot_data:
                 robot_telemetry = RobotTelemetryData(
+                    robot_id=robot_data.get('robot_id', 0),
                     timestamp=data.get('timestamp', 0.0),
                     position=(
                         robot_data['position']['x'],
@@ -260,7 +227,7 @@ class ROSBridgeClient:
                         robot_data['position'].get('z', 0.0)
                     ),
                     orientation=robot_data.get('orientation_quat', {'x': 0, 'y': 0, 'z': 0, 'w': 1}),
-                    velocity=robot_data.get('velocity', {'linear_x': 0, 'linear_y': 0, 'angular_z': 0}),
+                    velocity=robot_data.get('velocity', {'linear_x': 0, 'angular_z': 0}),
                     battery_level=robot_data.get('battery_level', 0.0),
                     current_capacity=robot_data.get('current_capacity', 0),
                     max_capacity=robot_data.get('max_capacity', 12),
@@ -278,32 +245,18 @@ class ROSBridgeClient:
                     category_inventory=loc.get('category_inventory', {})
                 )
 
-            # Parse consumption from snapshot
-            consumptions = {}
-            for loc in data.get('consumption_rates', []):
-                location_id = loc['location_id']
-                consumptions[location_id] = LocationConsumptionData(
-                    location_id=location_id,
-                    location_name=loc.get('location_name', location_id),
-                    consumption_rate=loc.get('consumption_rate', 0.0),
-                    time_to_stockout_hours=loc.get('time_to_stockout_hours', float('inf')),
-                    urgency_level=loc.get('urgency_level', 1),
-                    category_rates=loc.get('category_rates', {})
-                )
-
             # Update system state
             self.system_state = SystemState(
                 timestamp=data.get('timestamp', 0.0),
                 robot_telemetry=robot_telemetry,
                 location_inventories=inventories,
-                consumption_rates=consumptions,
                 last_update=datetime.now().isoformat()
             )
 
             if self.on_system_state:
                 await self._call_callback(self.on_system_state, self.system_state)
 
-            logger.debug(f"System state updated: {len(inventories)} locations, {len(consumptions)} consumption rates")
+            logger.debug(f"System state updated: {len(inventories)} locations")
         except Exception as e:
             logger.error(f"Error parsing system state: {e}")
 
@@ -381,14 +334,7 @@ class ROSBridgeClient:
         """Get all location inventories."""
         return self.location_inventories.copy()
 
-    def get_consumption_rate(self, location_id: str) -> Optional[LocationConsumptionData]:
-        """Get consumption rate for a specific location."""
-        return self.consumption_rates.get(location_id)
-
-    def get_all_consumption_rates(self) -> Dict[str, LocationConsumptionData]:
-        """Get all consumption rates."""
-        return self.consumption_rates.copy()
-
     def get_system_state(self) -> SystemState:
         """Get last received system state snapshot."""
         return self.system_state
+

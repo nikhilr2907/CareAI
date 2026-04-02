@@ -32,7 +32,6 @@ class BaseMetric(ABC):
         Returns:
             Dict with metric results, or {} if data unavailable
         """
-        pass
 
     def _validate(self) -> bool:
         """Check if minimum data available to compute metric."""

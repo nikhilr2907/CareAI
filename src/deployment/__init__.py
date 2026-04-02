@@ -1,34 +1,26 @@
 """
 Deployment module - interfaces and implementations for robot communication.
 
-This module provides abstract and concrete implementations for communicating with robots:
-- MockRobotBridge: Uses local RobotSimulator (for training/testing)
-- ROSRobotBridge: Connects to real robots via ROS 2 WebSocket bridge (for deployment)
-
-Also includes:
-- ROSBridgeClient: Low-level WebSocket client for bridge communication
-- ROSBridgeIntegration: Integration layer syncing bridge data into CareRobotics
-- ROSBridgeTaskSubmitter: Converts CareRobotics tasks to bridge format
+- MockRobotBackend: Uses local RobotSimulator (for training/testing)
+- ROSBridgeRobotBackend: Connects to the external ROS bridge via WebSocket (for deployment)
+- RobotBridgeWebSocketClient: Low-level WebSocket client for bridge communication
+- RobotBridgeTaskDispatcher: Converts CareRobotics tasks to bridge wire format
 """
 
-from .robot_bridge import (
-    RobotBridge,
-    MockRobotBridge,
-    ROSRobotBridge,
+from .robot_backend import (
+    RobotBackend,
+    MockRobotBackend,
+    ROSBridgeRobotBackend,
     RobotTelemetryData,
 )
-from .ros_bridge_client import ROSBridgeClient
-from .ros_bridge_integration import (
-    ROSBridgeIntegration,
-    ROSBridgeTaskSubmitter,
-)
+from .robot_bridge_websocket_client import RobotBridgeWebSocketClient
+from .robot_bridge_state_sync import RobotBridgeTaskDispatcher
 
 __all__ = [
-    "RobotBridge",
-    "MockRobotBridge",
-    "ROSRobotBridge",
+    "RobotBackend",
+    "MockRobotBackend",
+    "ROSBridgeRobotBackend",
     "RobotTelemetryData",
-    "ROSBridgeClient",
-    "ROSBridgeIntegration",
-    "ROSBridgeTaskSubmitter",
+    "RobotBridgeWebSocketClient",
+    "RobotBridgeTaskDispatcher",
 ]

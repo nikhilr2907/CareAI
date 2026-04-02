@@ -1,9 +1,3 @@
-"""
-GAPO-compatible environment for hospital robot task allocation.
-
-Returns graph-structured states (dict) instead of flat vectors.
-Compatible with GNN-based GAPO policy network.
-"""
 import numpy as np
 from typing import List, Dict, Optional
 
@@ -20,19 +14,11 @@ from .tasks.task_generator import (
 from ..multi_agent_ppo.task_creation_actor import TaskCreationActor
 from .graph_helpers import dijkstra_shortest_path
 from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
+from ..reliability.telemetry_effects import TelemetryEffectsManager
+from ..deployment.robot_backend import RobotBackend
 
 
 class GAPOTaskAssignmentEnv:
-    """
-    GAPO-compatible environment with graph-structured states.
-
-    Key differences from V2:
-    - Returns state as dictionary (not flat vector)
-    - Includes graph connectivity (edge_index)
-    - Provides robot positions explicitly
-    - Compatible with GNN encoders
-    """
-
     def __init__(
         self,
         num_robots=5,
@@ -54,24 +40,11 @@ class GAPOTaskAssignmentEnv:
         self.timestep_seconds = timestep_seconds
         self.hospital_config = hospital_config  # Optional custom config
 
-        # Action space
-        # self.action_space = spaces.Discrete(num_robots)
-
-        # Observation space (dict-based)
-        # self.observation_space = spaces.Dict({
-        #     'task_features': spaces.Box(-np.inf, np.inf, (12,), np.float32),
-        #     'node_features': spaces.Box(-np.inf, np.inf, (num_nodes, 5), np.float32),
-        #     'edge_features': spaces.Box(-np.inf, np.inf, (20, 3), np.float32),
-        #     'robot_features': spaces.Box(-np.inf, np.inf, (num_robots, 12), np.float32),
-        #     'robot_positions': spaces.Box(-np.inf, np.inf, (num_robots, 2), np.float32),
-        #     'queue_features': spaces.Box(-np.inf, np.inf, (5,), np.float32),
-        # })
-
         # Environment components
         self.graph_state = None
         self.robots = []
         self.robot_simulators = []
-        self.next_task_id = 0
+        self.next_task_id = 1
 
         # Task management (continuous operation)
         self.pending_tasks = []  # Tasks waiting for assignment
@@ -126,8 +99,12 @@ class GAPOTaskAssignmentEnv:
         self.emergency_tasks: list = []
         self._last_battery_penalty = 0.0
 
+        # Phase 1: Telemetry noise injection (realistic sensor characteristics)
+        self.telemetry_noise_manager = TelemetryEffectsManager(enable=True, graph_bounds=None)
+        self.robot_reset_times = []  # Track when each robot was initialized
+        self.graph_bounds = None  # Will be set in reset()
+
     def reset(self):
-        """Reset environment and return initial state dict."""
         # Initialize graph (use custom graph if provided, otherwise use config)
         if hasattr(self, '_custom_graph_state') and self._custom_graph_state is not None:
             # Use the custom graph state (from config file)
@@ -145,9 +122,23 @@ class GAPOTaskAssignmentEnv:
             # Create new graph from hospital_config or default
             self.graph_state = GraphState(config=self.hospital_config)
 
+        # Calculate graph bounds for position validation
+        if self.graph_state and self.graph_state.nodes:
+            x_coords = [node.x for node in self.graph_state.nodes]
+            y_coords = [node.y for node in self.graph_state.nodes]
+            padding = 5.0  # Allow 5m buffer beyond node positions
+            self.graph_bounds = (
+                min(x_coords) - padding,
+                max(x_coords) + padding,
+                min(y_coords) - padding,
+                max(y_coords) + padding
+            )
+            self.telemetry_noise_manager.graph_bounds = self.graph_bounds
+
         # Initialize robots
         self.robots = []
         self.robot_simulators = []
+        self.robot_reset_times = [self.current_time] * self.num_robots
 
         for i in range(self.num_robots):
             initial_node = np.random.randint(0, self.num_nodes)
@@ -164,7 +155,7 @@ class GAPOTaskAssignmentEnv:
         # Generate initial tasks
         self.pending_tasks = []
         self.completed_tasks = []
-        self.next_task_id = 0
+        self.next_task_id = 1
         self.current_time = 0.0
         self.last_inventory_check = 0.0
         self.graph_state.current_time = self.current_time
@@ -222,28 +213,13 @@ class GAPOTaskAssignmentEnv:
         return self._get_state_dict()
 
     def step(self, dt: float = None):
-        """
-        Advance simulation by dt seconds (continuous operation).
-
-        This is the NEW continuous step function. Policy assigns tasks externally
-        using assign_task_to_robot().
-
-        Args:
-            dt: Time step in seconds (default: self.timestep_seconds)
-
-        Returns:
-            state_dict: Current state
-            reward: Reward for this timestep
-            done: False (continuous) or True if max_time reached
-            info: Debug information
-        """
         if dt is None:
             dt = self.timestep_seconds
 
         # 1. Update inventory levels (consumption)
         time_delta_hours = dt / 3600.0
         self.graph_state.current_time = self.current_time
-        update_inventory_levels(self.graph_state, time_delta_hours)
+        self._update_inventory(time_delta_hours)
 
         # 2. Generate tasks from low-stock nodes
         if self.current_time - self.last_inventory_check >= self.inventory_check_interval:
@@ -315,6 +291,10 @@ class GAPOTaskAssignmentEnv:
 
         return state_dict, reward, done, info
 
+    def _update_inventory(self, time_delta_hours: float):
+        """Hook for inventory update each step. Override in subclasses for real deployment."""
+        update_inventory_levels(self.graph_state, time_delta_hours)
+
     def _apply_fallback_pending_rank(self):
         """
         Optional heuristic ranking for pending queue.
@@ -330,19 +310,16 @@ class GAPOTaskAssignmentEnv:
         self.pending_tasks = rank_tasks(task_queue, self.current_time)
 
     def _prune_stochastic_task_history(self):
-        """Keep only stochastic task timestamps within the last simulated hour."""
         cutoff = self.current_time - 3600.0
         self._stochastic_task_timestamps = [
             t for t in self._stochastic_task_timestamps if t >= cutoff
         ]
 
     def _remaining_stochastic_task_budget(self) -> int:
-        """Remaining stochastic tasks allowed in the rolling 1-hour window."""
         self._prune_stochastic_task_history()
         return max(0, self.max_stochastic_tasks_per_hour - len(self._stochastic_task_timestamps))
 
     def _record_stochastic_tasks(self, count: int):
-        """Record creation timestamps for stochastic tasks."""
         if count <= 0:
             return
         self._stochastic_task_timestamps.extend([self.current_time] * count)
@@ -558,6 +535,18 @@ class GAPOTaskAssignmentEnv:
             telemetry = simulator.update(dt)
             telemetry.timestamp = self.current_time
 
+            # Phase 1: Apply realistic telemetry noise and validation
+            robot_id = simulator.robot_id
+            elapsed_minutes = (self.current_time - self.robot_reset_times[robot_id]) / 60.0
+            num_nodes = len(self.graph_state.nodes) if self.graph_state else 0
+            num_edges = len(self.graph_state.edges) if self.graph_state else 0
+            telemetry = self.telemetry_noise_manager.apply_noise(
+                telemetry,
+                elapsed_minutes,
+                num_nodes=num_nodes,
+                num_edges=num_edges
+            )
+
             # Stamp exit time on any traversal that just completed
             if prev_edge_idx is not None and simulator.current_edge_index != prev_edge_idx:
                 simulator.finalize_current_traversal(self.current_time)
@@ -568,6 +557,9 @@ class GAPOTaskAssignmentEnv:
 
             # Update robot telemetry
             robot.update_telemetry(telemetry)
+
+            # Mid-task battery interrupt: override path with charge trip if battery too low
+            self._interrupt_mid_task_for_charging(simulator.robot_id, robot, simulator)
 
             # If robot is idle but has queued tasks, plan the next valid task
             if (not simulator.path_queue and simulator.current_target_node is None and
@@ -1039,14 +1031,12 @@ class GAPOTaskAssignmentEnv:
             return np.array([[i, i] for i in range(self.num_nodes)], dtype=np.int64).T
 
     def _find_node_index(self, node_id: str) -> Optional[int]:
-        """Find node index by ID."""
         for i, node in enumerate(self.graph_state.nodes):
             if node.node_id == node_id:
                 return i
         return None
 
     def _update_edge_congestion(self):
-        """Update edge and node occupancy from current telemetry."""
         for edge in self.graph_state.edges:
             edge.active_robot_ids.clear()
             edge.active_robot_progress.clear()
@@ -1081,7 +1071,6 @@ class GAPOTaskAssignmentEnv:
             edge.approaching_robot_count = self._count_approaching_robots(edge_idx)
 
     def _find_nearest_node(self, x, y):
-        """Find nearest node."""
         min_dist = float('inf')
         nearest_idx = 0
 
@@ -1094,7 +1083,6 @@ class GAPOTaskAssignmentEnv:
         return nearest_idx
 
     def _collect_traversal_records(self):
-        """Collect completed traversal records from all simulators and feed to edge cost model."""
         all_records = []
         for simulator in self.robot_simulators:
             records = simulator.get_and_clear_traversal_records()
@@ -1213,6 +1201,32 @@ class GAPOTaskAssignmentEnv:
         min_dist = min(estimate_travel_distance(robot, h, self.graph_state) for h in hub_indices)
         battery_needed = min_dist * simulator.battery_drain_rate * self.battery_safety_margin
         return simulator.battery_level <= battery_needed
+
+    def _interrupt_mid_task_for_charging(self, robot_id: int, robot, simulator) -> bool:
+        """
+        If a robot is mid-task and battery drops below charging threshold,
+        override its path with a charge trip. Tasks remain in queue and
+        auto-resume after charging completes.
+
+        Returns True if an interrupt was triggered.
+        """
+        if robot_id in self._offline_robots:
+            return False
+        if robot_id in self._robots_routing_to_charge:
+            return False
+        if simulator.is_charging:
+            return False
+        # Only active real tasks (active_task_id == -1 means already on a charge run)
+        if simulator.active_task_id is None or simulator.active_task_id == -1:
+            return False
+        if not self._should_robot_charge(robot_id):
+            return False
+
+        # Interrupt: _send_robot_to_charge overwrites simulator path_queue and
+        # sets active_task_id = -1. Tasks stay in robot.task_queue so they
+        # auto-resume once the charge trip completes.
+        self._send_robot_to_charge(robot_id)
+        return True
 
     def _nearest_hub_index(self, robot_id: int) -> int:
         """Find index of nearest hub node to robot."""

@@ -58,6 +58,7 @@ threadpoolctl==3.6.0
 torch==2.9.0
 torch-geometric==2.7.0
 torchmetrics==1.8.2
+python-dotenv>=1.0.0
 tqdm==4.67.1
 typing_extensions==4.15.0
 tzdata==2025.2
@@ -65,5 +66,4 @@ urllib3==2.6.2
 wheel==0.45.1
 xxhash==3.6.0
 yarl==1.22.0
-torch-geometric
 websockets>=12.0

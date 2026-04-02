@@ -5,7 +5,6 @@ import numpy as np
 
 @dataclass
 class Task:
-    """Represents a single delivery task with urgency and temporal features."""
     task_id: int
     from_location_index: int  # Node index
     to_location_index: int  # Node index

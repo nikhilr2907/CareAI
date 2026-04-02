@@ -12,13 +12,11 @@ def _get_node_center(node) -> Tuple[float, float]:
         float(getattr(node, "viz_center_y", node.center_y)),
     )
 
-
 def _get_node_size(node) -> Tuple[float, float]:
     return (
         float(getattr(node, "viz_width", node.width)),
         float(getattr(node, "viz_height", node.height)),
     )
-
 
 def _node_label(node) -> str:
     display_name = getattr(node, "display_name", None)
@@ -26,13 +24,11 @@ def _node_label(node) -> str:
         return str(display_name)
     return str(node.node_id)
 
-
 def _short_label(text: str, max_len: int = 22) -> str:
     text = str(text).strip()
     if len(text) <= max_len:
         return text
     return text[: max_len - 1].rstrip() + "…"
-
 
 def apply_floorplan_layout(graph_state):
     """

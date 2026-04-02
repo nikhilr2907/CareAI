@@ -1,29 +1,3 @@
-"""
-Task-creation actor components.
-
-Bayesian factorizer and scorer for proactive SKU task creation.
-
-Two-stage pipeline:
-  Stage 1 - BayesianCandidateFactorizer (#7):
-      Given lightweight state summary s, samples weight vector w ~ N(mu(s), sigma(s)).
-      Scores each eligible SKU candidate: logit_i = phi_i @ w  (Thompson sampling).
-      Uses Gumbel top-k for temperature-controlled stochastic shortlisting.
-
-  Stage 2 - TaskCreationScorer (#8):
-      Scores the shortlisted k candidates deterministically given state context.
-      Picks exactly 1 to instantiate as a Task and add to pending_tasks.
-
-Candidate eligibility rules (enforced before any network sees the pool):
-  - stock > reorder_point  (urgently low stock handled by deterministic replenishment)
-  - stock < max            (room to receive delivery)
-  - consumption rate > 0   (node actually consumes this SKU)
-  - not already covered by a pending task for the same (to_node, sku_id) pair
-
-Quantity safeguard at instantiation time:
-  - Re-fetch live stock immediately before creating Task
-  - num_items = min(max - live_stock, room)
-  - Skip if room <= 0
-"""
 
 import torch
 import torch.nn as nn
@@ -224,10 +198,10 @@ def build_candidate_universe(
     Build the eligible SKU candidate universe from graph_state inventory.
 
     Eligibility (all conditions must hold):
-        stock > reorder_point  — not urgently low (urgent = deterministic replenishment)
-        stock < max            — has room to receive delivery
-        rate > 0               — node actually consumes this SKU
-        not already covered    — no pending task already targets (to_node, sku_id)
+        stock > reorder_point - not urgently low (urgent = deterministic replenishment)
+        stock < max - has room to receive delivery
+        rate > 0 - node actually consumes this SKU
+        not already covered - no pending task already targets (to_node, sku_id)
 
     Supports both per-SKU inventory (node.sku_inventory dict) and node-level
     fallback (node.stock_level / node.max_stock).

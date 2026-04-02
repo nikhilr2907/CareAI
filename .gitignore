@@ -9,3 +9,5 @@ checkpoints/
 *.md
 .claude/**
 outputs/**
+utilities/**
+.env

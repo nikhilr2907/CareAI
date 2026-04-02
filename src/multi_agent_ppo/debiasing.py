@@ -1,5 +1,3 @@
-"""De-biasing utilities for autoregressive task allocation."""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,8 +5,6 @@ from typing import List, Tuple
 
 
 class StateDeltaDebiasing(nn.Module):
-    """Penalize large state changes."""
-
     def __init__(self, lambda_debias=0.1):
         super().__init__()
         self.lambda_debias = lambda_debias
