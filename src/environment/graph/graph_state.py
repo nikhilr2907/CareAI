@@ -3,67 +3,20 @@ from typing import List, Optional
 import numpy as np
 from .node import HospitalNode
 from .edge import HospitalEdge
-from .hospital_config import HospitalConfig
 
 
 @dataclass
 class GraphState:
-    """Represents the hospital graph structure (nodes + edges)."""
+    """Represents the ILC pilot graph structure (nodes + edges)."""
     nodes: List[HospitalNode] = field(default_factory=list)
     edges: List[HospitalEdge] = field(default_factory=list)
-    config: Optional[HospitalConfig] = None
     sku_database: Optional[dict] = None
     demand_profiles: Optional[dict] = None
     category_order: Optional[List[str]] = None
-    department_order: Optional[List[str]] = None
+    location_tag_order: Optional[List[str]] = None
     current_time: float = 0.0
     consumption_scale: float = 1.0
     school_schedule: Optional[dict] = None
-
-    def __post_init__(self):
-        """Create hospital graph from config, or use default if none provided."""
-        if not self.nodes:
-            if self.config is None:
-                # Use default configuration
-                self.config = HospitalConfig()
-            self._create_nodes_from_config()
-        if not self.edges:
-            self._create_edges_from_config()
-
-    def _create_nodes_from_config(self):
-        """Create nodes from configuration."""
-        for node_config in self.config.nodes:
-            params = self.config.get_node_params(node_config)
-            node = HospitalNode(**params)
-            self.nodes.append(node)
-
-    def _create_edges_from_config(self):
-        """Create edges from configuration."""
-        for from_idx, to_idx in self.config.edges:
-            from_node = self.nodes[from_idx]
-            to_node = self.nodes[to_idx]
-
-            # Entry/exit points (simplified: use centers)
-            entry_point = (from_node.center_x, from_node.center_y)
-            exit_point = (to_node.center_x, to_node.center_y)
-
-            # Calculate distance
-            distance = np.sqrt((from_node.center_x - to_node.center_x)**2 +
-                             (from_node.center_y - to_node.center_y)**2)
-
-            edge = HospitalEdge(
-                from_node=from_node.node_id,
-                to_node=to_node.node_id,
-                distance_m=distance,
-                corridor_width=1.9,
-                entry_point=entry_point,
-                exit_point=exit_point,
-                max_v_ms=0.5,
-                clutter_level=np.random.random() * 0.3,
-                active_robot_ids=[],
-                has_patient_bed=np.random.random() < 0.1
-            )
-            self.edges.append(edge)
 
     def get_node_features(self) -> np.ndarray:
         """
@@ -248,19 +201,17 @@ class GraphState:
         Returns:
             (continuous_features, categorical_features)
 
-        Continuous features (17 + 3*num_categories):
+        Continuous features (per node):
             - Geometry: center_x, center_y, width, height, area
             - Inventory: stock_level, consumption_rate, time_to_stockout
-            - Context: served_beds
-            - Location: floor, num_locations, num_shelves, num_skus, num_categories
-            - Binary: consumption_enabled
-            - Temporal: current_intraday_weight, weekday_multiplier
-            - Per-category: stock_ratio, consumption_rate, time_to_stockout (?N categories)
+            - Context: foot_traffic_weight, num_skus, num_categories
+            - Temporal: period_demand_weight
+            - Per-category: stock_ratio, consumption_rate, time_to_stockout (N categories)
 
         Categorical features [num_nodes, 4]:
             - node_type_id: 0-3 (storage, corridor, recovery, hub)
-            - department_id: index in department_order list
-            - shift_period_id: 0-3 (night, morning, afternoon, evening)
+            - loc_tag_id: index in location_tag_order list (-1 if unknown)
+            - school_period_id: 0-N index into school_schedule periods
             - day_type_id: 0-1 (weekday, weekend)
         """
         node_type_to_id = {
@@ -271,14 +222,12 @@ class GraphState:
         }
 
         category_order = self.category_order or []
-        department_order = self.department_order or []
 
         school_period_id = self._get_school_period_id(self.current_time)
         day_type_id = self._get_day_type_id(self.current_time)
         period_demand_weight = self._get_period_demand_weight(self.current_time)
 
-        # location_tag → integer index for categorical embedding
-        location_tag_order = getattr(self, 'location_tag_order', []) or []
+        location_tag_order = self.location_tag_order or []
 
         continuous_features = []
         categorical_features = []

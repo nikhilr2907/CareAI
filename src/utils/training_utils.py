@@ -17,12 +17,12 @@ from src.environment.graph.config_loader import load_config_from_file, get_num_r
 
 def parse_args():
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='Train GAPO policy for hospital robot task assignment')
+    parser = argparse.ArgumentParser(description='Train GAPO policy for ILC pilot robot task assignment')
 
     # Config selection (mutually exclusive)
     config_group = parser.add_mutually_exclusive_group(required=False)
     config_group.add_argument('--config', type=str,
-                              help='Path to single hospital config JSON file')
+                              help='Path to ILC config JSON file')
     config_group.add_argument('--configs-dir', type=str, default=None,
                               help='Directory containing multiple config files for curriculum learning')
     config_group.add_argument('--config-list', type=str, nargs='+',
@@ -180,7 +180,7 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
             max_v_ms=0.5,
             clutter_level=np.random.random() * 0.3,
             active_robot_ids=[],
-            has_patient_bed=np.random.random() < 0.1,
+            has_patient_bed=False,
             edge_id=detail.get("edge_id") if detail else None,
             mode=detail.get("mode") if detail else None,
             floor_delta=int(detail.get("floor_delta", 0)) if detail else 0,
@@ -194,7 +194,6 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
         num_nodes=num_nodes,
         max_episode_time=max_episode_time,
         timestep_seconds=timestep_seconds,
-        hospital_config=None,
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks
@@ -205,7 +204,6 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
     graph_state.sku_database = meta.get("sku_database")
     graph_state.demand_profiles = meta.get("demand_profiles")
     graph_state.category_order = meta.get("category_order")
-    graph_state.department_order = meta.get("department_order", [])
     graph_state.location_tag_order = meta.get("location_tag_order", [])
     graph_state.school_schedule = meta.get("school_schedule")
 
@@ -254,7 +252,7 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
             max_v_ms=0.5,
             clutter_level=np.random.random() * 0.3,
             active_robot_ids=[],
-            has_patient_bed=np.random.random() < 0.1,
+            has_patient_bed=False,
             edge_id=detail.get("edge_id") if detail else None,
             mode=detail.get("mode") if detail else None,
             floor_delta=int(detail.get("floor_delta", 0)) if detail else 0,
@@ -269,7 +267,6 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
         num_nodes=num_nodes,
         max_episode_time=max_episode_time,
         timestep_seconds=timestep_seconds,
-        hospital_config=None,
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
@@ -280,7 +277,6 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
     graph_state.sku_database = meta.get("sku_database")
     graph_state.demand_profiles = meta.get("demand_profiles")
     graph_state.category_order = meta.get("category_order")
-    graph_state.department_order = meta.get("department_order", [])
     graph_state.location_tag_order = meta.get("location_tag_order", [])
     graph_state.school_schedule = meta.get("school_schedule")
 

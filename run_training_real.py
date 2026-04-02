@@ -1,7 +1,7 @@
 """
 GAPO Real-Robot Training Script.
 
-Trains the hospital robot task allocation policy against a live robot via
+Trains the ILC pilot robot task allocation policy against a live robot via
 ROS bridge. Identical PPO/memory/reward-routing logic to run_training.py
 with the following differences:
 
@@ -14,9 +14,9 @@ with the following differences:
   - No run_evaluation (no seeded reset on real hardware)
 
 Usage:
-    python run_training_real.py --config configs/hospital_3nodes_consumables.json
-    python run_training_real.py --config configs/... --bridge-url ws://192.168.1.50:8765
-    python run_training_real.py --config configs/... --checkpoint outputs/.../gapo_final.pth
+    python run_training_real.py --config configs/ilc_pilot_v1_care_robotics.json
+    python run_training_real.py --config configs/ilc_pilot_v1_care_robotics.json --bridge-url ws://192.168.1.50:8765
+    python run_training_real.py --config configs/ilc_pilot_v1_care_robotics.json --checkpoint outputs/.../gapo_final.pth
 """
 import asyncio
 import torch
@@ -42,9 +42,9 @@ from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 async def main():
     args = parse_args()
 
-    logger, output_dir, exp_name = setup_logging_and_output(args)
+    logger, output_dir, _ = setup_logging_and_output(args)
     task_logger = TaskLogger(output_dir / "logs")
-    analytics = RealtimeAnalyticsCollector(
+    RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
         mode='real',
         snapshot_frequency=50,
@@ -116,7 +116,7 @@ async def main():
     )
 
     logger.info("=" * 80)
-    logger.info("GAPO REAL-ROBOT TRAINING")
+    logger.info("GAPO REAL-ROBOT TRAINING - ILC Pilot")
     logger.info("=" * 80)
     logger.info(f"Config:      {config_path}")
     logger.info(f"Bridge URL:  {robot_backend._bridge_url}")
@@ -152,22 +152,20 @@ async def main():
     edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
     sku_embed_dim = 16
     node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
-    num_departments = (
-        len(env.graph_state.department_order)
-        if hasattr(env.graph_state, 'department_order') and env.graph_state.department_order
-        else 10
-    )
+    num_location_tags = len(env.graph_state.location_tag_order) if getattr(env.graph_state, 'location_tag_order', None) else 3
+    schedule = getattr(env.graph_state, 'school_schedule', None) or {}
+    num_school_periods = len(schedule.get('periods', [])) or 8
 
     ppo = GAPOPPO(
         node_continuous_dim=node_continuous_dim,
         num_node_types=4,
-        num_departments=num_departments,
-        num_shift_periods=4,
+        num_location_tags=num_location_tags,
+        num_school_periods=num_school_periods,
         num_day_types=2,
         edge_feat_dim=edge_feat_dim,
         node_type_embedding_dim=8,
-        department_embedding_dim=16,
-        shift_embedding_dim=4,
+        location_tag_embedding_dim=16,
+        school_period_embedding_dim=4,
         day_type_embedding_dim=4,
         robot_feat_dim=19,
         task_feat_dim=15,
@@ -334,7 +332,7 @@ async def main():
 
             # Env step
             prev_completed = len(env.completed_tasks)
-            state_dict, step_reward, done, info = env.step(dt=1.0)
+            state_dict, _, done, info = env.step(dt=1.0)
 
             newly_completed = env.completed_tasks[prev_completed:]
             for task in newly_completed:

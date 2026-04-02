@@ -116,7 +116,6 @@ def _load_ilc_config(raw_data: Dict) -> Tuple[List[HospitalNode], List[Tuple[int
         "sku_database":      sku_database,
         "demand_profiles":   raw_data.get("demand_profiles", {}),
         "category_order":    category_order,
-        "department_order":  [],
         "location_tag_order": location_tag_order,
         "school_schedule":   raw_data.get("school_schedule"),
         "edges_detailed":    raw_data.get("edges", []),

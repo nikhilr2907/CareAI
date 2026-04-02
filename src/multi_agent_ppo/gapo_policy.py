@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Dict, Tuple, Optional, List
 import numpy as np
 
-from .gapo_gnn_encoders import HospitalGraphEncoder, RobotFleetEncoder, TaskEncoder
+from .gapo_gnn_encoders import ILCGraphEncoder, RobotFleetEncoder, TaskEncoder
 from .gapo_attention import GAPOAttentionModule
 from .debiasing import ComprehensiveDebiasing
 
@@ -14,13 +14,13 @@ class GAPOPolicyNetwork(nn.Module):
         self,
         node_continuous_dim=8,
         num_node_types=4,
-        num_departments=10,
-        num_shift_periods=4,
+        num_location_tags=10,
+        num_school_periods=4,
         num_day_types=2,
         edge_feat_dim=21,
         node_type_embedding_dim=8,
-        department_embedding_dim=16,
-        shift_embedding_dim=4,
+        location_tag_embedding_dim=16,
+        school_period_embedding_dim=4,
         day_type_embedding_dim=4,
         robot_feat_dim=19,
         task_feat_dim=15,
@@ -41,17 +41,17 @@ class GAPOPolicyNetwork(nn.Module):
         self.sku_feat_dim = sku_feat_dim
 
         # ===== ENCODERS =====
-        self.hospital_encoder = HospitalGraphEncoder(
+        self.graph_encoder = ILCGraphEncoder(
             node_continuous_dim=node_continuous_dim,
             num_node_types=num_node_types,
-            num_departments=num_departments,
-            num_shift_periods=num_shift_periods,
+            num_location_tags=num_location_tags,
+            num_school_periods=num_school_periods,
             num_day_types=num_day_types,
             edge_feat_dim=edge_feat_dim,
             hidden_dim=hidden_dim,
             node_type_embedding_dim=node_type_embedding_dim,
-            department_embedding_dim=department_embedding_dim,
-            shift_embedding_dim=shift_embedding_dim,
+            location_tag_embedding_dim=location_tag_embedding_dim,
+            school_period_embedding_dim=school_period_embedding_dim,
             day_type_embedding_dim=day_type_embedding_dim
         )
 
@@ -155,7 +155,7 @@ class GAPOPolicyNetwork(nn.Module):
                 state_dict = dict(state_dict)
                 state_dict['node_continuous'] = torch.cat([state_dict['node_continuous'], pooled], dim=-1)
 
-        node_embeddings, edge_embeddings, graph_embedding = self.hospital_encoder(
+        node_embeddings, edge_embeddings, graph_embedding = self.graph_encoder(
             state_dict['node_continuous'],
             state_dict['node_categorical'],
             state_dict['edge_features'],
@@ -226,7 +226,7 @@ class GAPOPolicyNetwork(nn.Module):
                 state_dict = dict(state_dict)
                 state_dict['node_continuous'] = torch.cat([state_dict['node_continuous'], pooled], dim=-1)
 
-        node_embeddings, _, graph_embedding = self.hospital_encoder(
+        node_embeddings, _, graph_embedding = self.graph_encoder(
             state_dict['node_continuous'],
             state_dict['node_categorical'],
             state_dict['edge_features'],
@@ -469,7 +469,7 @@ class GAPOPolicyNetwork(nn.Module):
         edge_features = edge_features.view(batch_size * num_edges, -1)
 
         # Encode hospital graph
-        node_embeddings, _, _ = self.hospital_encoder(
+        node_embeddings, _, _ = self.graph_encoder(
             node_continuous,
             node_categorical,
             edge_features,

@@ -8,20 +8,20 @@ from typing import Tuple, Optional
 from torch_geometric.nn import GATConv, SAGEConv
 
 
-class HospitalGraphEncoder(nn.Module):
+class ILCGraphEncoder(nn.Module):
 
     def __init__(
         self,
         node_continuous_dim=8,
         num_node_types=4,
-        num_departments=10,
-        num_shift_periods=4,
+        num_location_tags=10,
+        num_school_periods=4,
         num_day_types=2,
         edge_feat_dim=21,
         hidden_dim=64,
         node_type_embedding_dim=8,
-        department_embedding_dim=16,
-        shift_embedding_dim=4,
+        location_tag_embedding_dim=16,
+        school_period_embedding_dim=4,
         day_type_embedding_dim=4
     ):
         """
@@ -51,8 +51,8 @@ class HospitalGraphEncoder(nn.Module):
 
         self.hidden_dim = hidden_dim
         self.node_type_embedding_dim = node_type_embedding_dim
-        self.department_embedding_dim = department_embedding_dim
-        self.shift_embedding_dim = shift_embedding_dim
+        self.location_tag_embedding_dim = location_tag_embedding_dim
+        self.school_period_embedding_dim = school_period_embedding_dim
         self.day_type_embedding_dim = day_type_embedding_dim
 
         # Input normalization for continuous features
@@ -61,15 +61,15 @@ class HospitalGraphEncoder(nn.Module):
 
         # Categorical embeddings for each feature
         self.node_type_embedding = nn.Embedding(num_node_types, node_type_embedding_dim)
-        self.department_embedding = nn.Embedding(num_departments + 1, department_embedding_dim)  # +1 for -1 (unknown)
-        self.shift_embedding = nn.Embedding(num_shift_periods, shift_embedding_dim)
+        self.location_tag_embedding = nn.Embedding(num_location_tags + 1, location_tag_embedding_dim)  # +1 for -1 (unknown)
+        self.school_period_embedding = nn.Embedding(num_school_periods, school_period_embedding_dim)
         self.day_type_embedding = nn.Embedding(num_day_types, day_type_embedding_dim)
 
         # Total node feature dimension after concatenating continuous + all embedded categoricals
         total_embedding_dim = (
             node_type_embedding_dim +      # 8
-            department_embedding_dim +      # 16
-            shift_embedding_dim +           # 4
+            location_tag_embedding_dim +    # 16
+            school_period_embedding_dim +   # 4
             day_type_embedding_dim          # 4
         )  # = 32
 
@@ -139,19 +139,19 @@ class HospitalGraphEncoder(nn.Module):
         node_type_embeds = self.node_type_embedding(node_categorical[:, 0])  # [num_nodes, 8]
 
         # Department embedding: map -1 (unknown) to last index
-        dept_ids = node_categorical[:, 1].clone()
-        dept_ids[dept_ids == -1] = self.department_embedding.num_embeddings - 1
-        dept_embeds = self.department_embedding(dept_ids)  # [num_nodes, 16]
+        loc_tag_ids = node_categorical[:, 1].clone()
+        loc_tag_ids[loc_tag_ids == -1] = self.location_tag_embedding.num_embeddings - 1
+        loc_tag_embeds = self.location_tag_embedding(loc_tag_ids)  # [num_nodes, 16]
 
-        shift_embeds = self.shift_embedding(node_categorical[:, 2])  # [num_nodes, 4]
+        school_period_embeds = self.school_period_embedding(node_categorical[:, 2])  # [num_nodes, 4]
         day_type_embeds = self.day_type_embedding(node_categorical[:, 3])  # [num_nodes, 4]
 
         # Concatenate continuous + all embedded categoricals
         node_features = torch.cat([
             node_continuous,      # [num_nodes, ?]
             node_type_embeds,     # [num_nodes, 8]
-            dept_embeds,          # [num_nodes, 16]
-            shift_embeds,         # [num_nodes, 4]
+            loc_tag_embeds,            # [num_nodes, 16]
+            school_period_embeds,      # [num_nodes, 4]
             day_type_embeds       # [num_nodes, 4]
         ], dim=-1)
 
@@ -391,19 +391,19 @@ def test_encoders():
     """Test GNN encoders with dummy data."""
     print("Testing GAPO GNN Encoders...")
 
-    # Test Hospital Graph Encoder (with complete features)
-    print("\n1. Hospital Graph Encoder (Two-Pass with Fine-Grained Categorical Embeddings)")
-    hospital_encoder = HospitalGraphEncoder(
+    # Test ILC Graph Encoder (with complete features)
+    print("\n1. ILC Graph Encoder (Two-Pass with Fine-Grained Categorical Embeddings)")
+    hospital_encoder = ILCGraphEncoder(
         node_continuous_dim=24,  # UPDATED: includes temporal features
         num_node_types=4,
-        num_departments=10,
-        num_shift_periods=4,
+        num_location_tags=3,
+        num_school_periods=8,
         num_day_types=2,
         edge_feat_dim=21,
         hidden_dim=64,
         node_type_embedding_dim=8,
-        department_embedding_dim=16,
-        shift_embedding_dim=4,
+        location_tag_embedding_dim=16,
+        school_period_embedding_dim=4,
         day_type_embedding_dim=4
     )
 

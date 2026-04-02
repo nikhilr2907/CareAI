@@ -1,7 +1,7 @@
 """
 GAPO Real-Robot Deployment Script.
 
-Runs a trained policy against live robots via ROS bridge — inference only,
+Runs a trained ILC pilot policy against a live robot via ROS bridge — inference only,
 no gradient updates. Intended for production use after a policy has been
 trained with run_training_real.py or run_training.py.
 
@@ -14,11 +14,11 @@ Differences from run_training_real.py:
   - No checkpoint saving
 
 Usage:
-    python run_real_deployment.py --config configs/hospital_3nodes_consumables.json \\
+    python run_real_deployment.py --config configs/ilc_pilot_v1_care_robotics.json \\
                                   --checkpoint outputs/.../gapo_real_final.pth
-    python run_real_deployment.py --config configs/... --checkpoint ... \\
+    python run_real_deployment.py --config configs/ilc_pilot_v1_care_robotics.json --checkpoint ... \\
                                   --bridge-url ws://192.168.1.50:9090
-    python run_real_deployment.py --config configs/... --checkpoint ... \\
+    python run_real_deployment.py --config configs/ilc_pilot_v1_care_robotics.json --checkpoint ... \\
                                   --max-steps 86400
 """
 import argparse
@@ -44,12 +44,12 @@ from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 
 def parse_deploy_args():
     parser = argparse.ArgumentParser(
-        description='Deploy trained GAPO policy on real hospital robots'
+        description='Deploy trained GAPO policy on real ILC pilot robot'
     )
 
     # Required
     parser.add_argument('--config', type=str, required=True,
-                        help='Path to hospital config JSON file')
+                        help='Path to ILC config JSON file')
     parser.add_argument('--checkpoint', type=str, required=True,
                         help='Path to trained policy checkpoint (.pth)')
 
@@ -62,8 +62,8 @@ def parse_deploy_args():
                         help='Number of robots (default: read from config)')
     parser.add_argument('--max-episode-time', type=float, default=28800.0,
                         help='Max episode time in seconds (default: 28800 = 8 hours)')
-    parser.add_argument('--stochastic-tasks-per-hour', type=float, default=2.0,
-                        help='Stochastic task generation rate per hour (default: 2.0)')
+    parser.add_argument('--stochastic-tasks-per-hour', type=float, default=0.0,
+                        help='Stochastic task generation rate per hour (default: 0.0 for ILC)')
     parser.add_argument('--stochastic-task-cap-per-hour', type=int, default=2,
                         help='Hard cap on stochastic tasks per rolling hour (default: 2)')
     parser.add_argument('--initial-stochastic-tasks', type=int, default=0,
@@ -135,7 +135,7 @@ async def main():
     )
 
     logger.info("=" * 80)
-    logger.info("GAPO REAL-ROBOT DEPLOYMENT")
+    logger.info("GAPO REAL-ROBOT DEPLOYMENT - ILC Pilot")
     logger.info("=" * 80)
     logger.info(f"Config:      {args.config}")
     logger.info(f"Checkpoint:  {args.checkpoint}")
@@ -170,22 +170,20 @@ async def main():
     edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
     sku_embed_dim = 16
     node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
-    num_departments = (
-        len(env.graph_state.department_order)
-        if hasattr(env.graph_state, 'department_order') and env.graph_state.department_order
-        else 10
-    )
+    num_location_tags = len(env.graph_state.location_tag_order) if getattr(env.graph_state, 'location_tag_order', None) else 3
+    schedule = getattr(env.graph_state, 'school_schedule', None) or {}
+    num_school_periods = len(schedule.get('periods', [])) or 8
 
     ppo = GAPOPPO(
         node_continuous_dim=node_continuous_dim,
         num_node_types=4,
-        num_departments=num_departments,
-        num_shift_periods=4,
+        num_location_tags=num_location_tags,
+        num_school_periods=num_school_periods,
         num_day_types=2,
         edge_feat_dim=edge_feat_dim,
         node_type_embedding_dim=8,
-        department_embedding_dim=16,
-        shift_embedding_dim=4,
+        location_tag_embedding_dim=16,
+        school_period_embedding_dim=4,
         day_type_embedding_dim=4,
         robot_feat_dim=19,
         task_feat_dim=15,
