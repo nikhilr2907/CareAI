@@ -25,7 +25,6 @@ class HospitalEdge:
     # Dynamic States (The 'State' part)
     clutter_level: float = 0.0  # 0.0 (clear) to 1.0 (blocked)
     active_robot_ids: list = field(default_factory=list)  # Robot IDs currently traversing this corridor
-    has_patient_bed: bool = False  # True if a bed is currently passing [cite: 421]
     people_count: int = 0  # Estimated number of people in corridor
     approaching_robot_count: int = 0  # Robots with this edge in their planned path
     active_robot_progress: dict = field(default_factory=dict)  # robot_id -> (progress, from_idx, to_idx)

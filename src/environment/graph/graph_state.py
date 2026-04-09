@@ -46,13 +46,12 @@ class GraphState:
 
     def get_edge_features(self) -> np.ndarray:
         """
-        Extract edge features as numpy array (20 edges × 5 features).
+        Extract edge features as numpy array (num_edges × 4 features).
 
         Features per edge:
         - distance_m: Physical corridor length
         - corridor_width: Corridor width (affects capacity)
         - current_weight: Dynamic cost (includes congestion)
-        - has_patient_bed: Boolean (bed obstacle)
         - clutter_level: Static clutter (0-1)
         """
         features = []
@@ -61,7 +60,6 @@ class GraphState:
                 edge.distance_m,
                 edge.corridor_width,
                 edge.current_weight,
-                float(edge.has_patient_bed),
                 edge.clutter_level
             ]
             features.append(edge_features)
@@ -285,7 +283,7 @@ class GraphState:
 
         Returns:
             (continuous_features, node_indices) where:
-            - continuous_features: [num_edges, 21] numpy array
+            - continuous_features: [num_edges, 20] numpy array
             - node_indices: [num_edges, 2] numpy array (from_node_idx, to_node_idx)
 
         Continuous features per edge (21 total):
@@ -298,18 +296,17 @@ class GraphState:
         7. exit_point_y: Exit coordinate Y
         8. clutter_level: Static clutter (0-1)
         9. num_active_robots: Count of robots on corridor
-        10. has_patient_bed: Bed obstacle flag (0/1)
-        11. current_weight: Dynamic cost (base + congestion)
-        12. base_cost: Base travel time (distance / max_v_ms)
-        13. floor_delta: Floor change for edge (signed)
-        14. mode_id: Encoded travel mode (0=unknown, 1=walk, 2=lift, 3=stairs)
-        15. same_direction_robots: Robots moving along edge direction
-        16. opposite_direction_robots: Robots moving opposite edge direction
-        17. approaching_robots: Robots planning to enter this edge
-        18. people_count: Estimated people in corridor
-        19. congestion_factor: num_active / corridor_capacity
-        20. corridor_capacity: width / 0.6 (assumes 60cm per robot)
-        21. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
+        10. current_weight: Dynamic cost (base + congestion)
+        11. base_cost: Base travel time (distance / max_v_ms)
+        12. floor_delta: Floor change for edge (signed)
+        13. mode_id: Encoded travel mode (0=unknown, 1=walk, 2=lift, 3=stairs)
+        14. same_direction_robots: Robots moving along edge direction
+        15. opposite_direction_robots: Robots moving opposite edge direction
+        16. approaching_robots: Robots planning to enter this edge
+        17. people_count: Estimated people in corridor
+        18. congestion_factor: num_active / corridor_capacity
+        19. corridor_capacity: width / 0.6 (assumes 60cm per robot)
+        20. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
 
         Node connectivity (2 indices):
         1. from_node_idx: Source node index (0-9)
@@ -367,7 +364,6 @@ class GraphState:
                 exit_y,
                 edge.clutter_level,
                 num_active,
-                float(edge.has_patient_bed),
                 edge.current_weight,  # Dynamic weight (includes congestion)
                 base_cost,  # Base travel time without congestion
                 float(getattr(edge, "floor_delta", 0)),
@@ -388,7 +384,7 @@ class GraphState:
             node_indices.append([from_idx, to_idx])
 
         return (
-            np.array(continuous_features, dtype=np.float32),  # [num_edges, 21]
+            np.array(continuous_features, dtype=np.float32),  # [num_edges, 20]
             np.array(node_indices, dtype=np.int64)            # [num_edges, 2]
         )
 
@@ -620,7 +616,6 @@ class GraphState:
                 exit_y,
                 edge.clutter_level,
                 float(num_active),
-                float(edge.has_patient_bed),
                 edge.current_weight,
                 base_cost,
                 float(getattr(edge, "floor_delta", 0)),
@@ -635,12 +630,8 @@ class GraphState:
             is_bidirectional = 1  # All hospital corridors are bidirectional
 
             # Obstacle type encoding
-            if edge.has_patient_bed and edge.clutter_level > 0.5:
-                obstacle_type = 3  # Both bed and clutter
-            elif edge.has_patient_bed:
-                obstacle_type = 1  # Patient bed
-            elif edge.clutter_level > 0.5:
-                obstacle_type = 2  # Clutter
+            if edge.clutter_level > 0.5:
+                obstacle_type = 1  # Clutter
             else:
                 obstacle_type = 0  # No obstacles
 
@@ -712,18 +703,18 @@ class GraphState:
                 demand_mean = float(daily_dist.get('mean', 0.0))
                 demand_k = float(daily_dist.get('dispersion_k', 0.0))
                 intraday = consumption.get('intraday_profile', {}) or {}
-                if intraday:
-                    weights = list(intraday.values())
-                    intraday_peak = float(max(weights))
-                    intraday_offpeak = float(min(weights))
+                intraday_numeric = [float(v) for v in intraday.values() if isinstance(v, (int, float))]
+                if intraday_numeric:
+                    intraday_peak = float(max(intraday_numeric))
+                    intraday_offpeak = float(min(intraday_numeric))
                 else:
                     intraday_peak = 0.0
                     intraday_offpeak = 0.0
                 weekday = consumption.get('weekday_multiplier', {}) or {}
-                if weekday:
-                    vals = list(weekday.values())
-                    mean = sum(vals) / max(len(vals), 1)
-                    var = sum((v - mean) ** 2 for v in vals) / max(len(vals), 1)
+                weekday_vals = [float(v) for v in weekday.values() if isinstance(v, (int, float))]
+                if weekday_vals:
+                    mean = sum(weekday_vals) / len(weekday_vals)
+                    var = sum((v - mean) ** 2 for v in weekday_vals) / len(weekday_vals)
                     weekday_std = var ** 0.5
                 else:
                     weekday_std = 0.0

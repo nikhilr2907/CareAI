@@ -40,7 +40,7 @@ class GAPOPPO:
         num_location_tags=10,
         num_school_periods=4,
         num_day_types=2,
-        edge_feat_dim=21,
+        edge_feat_dim=20,
         node_type_embedding_dim=8,
         location_tag_embedding_dim=16,
         school_period_embedding_dim=4,

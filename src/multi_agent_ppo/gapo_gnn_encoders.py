@@ -17,7 +17,7 @@ class ILCGraphEncoder(nn.Module):
         num_location_tags=10,
         num_school_periods=4,
         num_day_types=2,
-        edge_feat_dim=21,
+        edge_feat_dim=20,
         hidden_dim=64,
         node_type_embedding_dim=8,
         location_tag_embedding_dim=16,
@@ -40,7 +40,7 @@ class ILCGraphEncoder(nn.Module):
                 [weekday, weekend]
             edge_feat_dim: Edge continuous features
                 [distance_m, corridor_width, max_v_ms, entry_x, entry_y, exit_x, exit_y,
-                 clutter_level, num_active_robots, has_patient_bed, current_weight, base_cost]
+                 clutter_level, num_active_robots, current_weight, base_cost]
             hidden_dim: Hidden embedding dimension (default 64)
             node_type_embedding_dim: Dimension for node_type embeddings (default 8)
             department_embedding_dim: Dimension for location tag embeddings (default 16)
@@ -399,7 +399,7 @@ def test_encoders():
         num_location_tags=3,
         num_school_periods=8,
         num_day_types=2,
-        edge_feat_dim=21,
+        edge_feat_dim=20,
         hidden_dim=64,
         node_type_embedding_dim=8,
         location_tag_embedding_dim=16,
