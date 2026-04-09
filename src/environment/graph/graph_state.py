@@ -283,37 +283,30 @@ class GraphState:
 
         Returns:
             (continuous_features, node_indices) where:
-            - continuous_features: [num_edges, 20] numpy array
+            - continuous_features: [num_edges, 16] numpy array
             - node_indices: [num_edges, 2] numpy array (from_node_idx, to_node_idx)
 
-        Continuous features per edge (21 total):
+        Continuous features per edge (16 total):
         1. distance_m: Physical corridor length
         2. corridor_width: Physical width (meters)
-        3. max_v_ms: Max speed allowed (1.0 m/s)
+        3. max_v_ms: Max speed allowed
         4. entry_point_x: Entry coordinate X
         5. entry_point_y: Entry coordinate Y
         6. exit_point_x: Exit coordinate X
         7. exit_point_y: Exit coordinate Y
         8. clutter_level: Static clutter (0-1)
-        9. num_active_robots: Count of robots on corridor
+        9. num_active_robots: Count of robots on edge
         10. current_weight: Dynamic cost (base + congestion)
         11. base_cost: Base travel time (distance / max_v_ms)
-        12. floor_delta: Floor change for edge (signed)
-        13. mode_id: Encoded travel mode (0=unknown, 1=walk, 2=lift, 3=stairs)
-        14. same_direction_robots: Robots moving along edge direction
-        15. opposite_direction_robots: Robots moving opposite edge direction
-        16. approaching_robots: Robots planning to enter this edge
-        17. people_count: Estimated people in corridor
-        18. congestion_factor: num_active / corridor_capacity
-        19. corridor_capacity: width / 0.6 (assumes 60cm per robot)
-        20. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
+        12. approaching_robots: Robots planning to enter this edge
+        13. people_count: Estimated people in corridor
+        14. congestion_factor: num_active / corridor_capacity
+        15. corridor_capacity: width / 0.6 (assumes 60cm per robot)
+        16. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
 
         Node connectivity (2 indices):
-        1. from_node_idx: Source node index (0-9)
-        2. to_node_idx: Destination node index (0-9)
-
-        Note: Node indices will be used by GNN encoder to retrieve node embeddings
-        and augment edge features with from/to node embedding vectors.
+        1. from_node_idx: Source node index
+        2. to_node_idx: Destination node index
         """
         # Create node_id to index mapping
         node_id_to_idx = {node.node_id: idx for idx, node in enumerate(self.nodes)}
@@ -321,18 +314,7 @@ class GraphState:
         continuous_features = []
         node_indices = []
 
-        mode_to_id = {
-            None: 0,
-            "walk": 1,
-            "corridor": 1,
-            "lift": 2,
-            "elevator": 2,
-            "stairs": 3
-        }
-        idx_to_id = {idx: node.node_id for idx, node in enumerate(self.nodes)}
-
         for edge in self.edges:
-            # Continuous features (12)
             entry_x = edge.entry_point[0] if edge.entry_point else 0.0
             entry_y = edge.entry_point[1] if edge.entry_point else 0.0
             exit_x = edge.exit_point[0] if edge.exit_point else 0.0
@@ -344,16 +326,6 @@ class GraphState:
             congestion_factor = num_active / max(1.0, corridor_capacity)
             is_congested = 1.0 if congestion_factor > 0.8 else 0.0
 
-            same_dir = 0.0
-            opposite_dir = 0.0
-            for _, (_, from_idx, to_idx) in edge.active_robot_progress.items():
-                from_id = idx_to_id.get(from_idx)
-                to_id = idx_to_id.get(to_idx)
-                if from_id == edge.from_node and to_id == edge.to_node:
-                    same_dir += 1.0
-                else:
-                    opposite_dir += 1.0
-
             edge_continuous = [
                 edge.distance_m,
                 edge.corridor_width,
@@ -364,12 +336,8 @@ class GraphState:
                 exit_y,
                 edge.clutter_level,
                 num_active,
-                edge.current_weight,  # Dynamic weight (includes congestion)
-                base_cost,  # Base travel time without congestion
-                float(getattr(edge, "floor_delta", 0)),
-                float(mode_to_id.get(getattr(edge, "mode", None), 0)),
-                same_dir,
-                opposite_dir,
+                edge.current_weight,
+                base_cost,
                 float(getattr(edge, "approaching_robot_count", 0)),
                 float(edge.people_count),
                 float(congestion_factor),
@@ -384,7 +352,7 @@ class GraphState:
             node_indices.append([from_idx, to_idx])
 
         return (
-            np.array(continuous_features, dtype=np.float32),  # [num_edges, 20]
+            np.array(continuous_features, dtype=np.float32),  # [num_edges, 16]
             np.array(node_indices, dtype=np.int64)            # [num_edges, 2]
         )
 
@@ -489,11 +457,9 @@ class GraphState:
                 node.width,
                 node.height,
                 node.area,
-                                node.stock_level,  # Total aggregate stock
-                node.consumption_rate,  # Total aggregate consumption
+                node.stock_level,
+                node.consumption_rate,
                 min(node.time_to_stockout, 999.0),
-                float(node.occupancy_count),
-                float(node.urgency_level),
                 float(node.get_total_num_skus()),
                 float(len(node.category_inventory)),
                 float(node.foot_traffic_weight)
@@ -573,8 +539,8 @@ class GraphState:
         17. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
 
         Categorical features per edge (2 total):
-        1. is_bidirectional: 1 (all hospital corridors are bidirectional)
-        2. obstacle_type: 0=none, 1=patient_bed, 2=clutter, 3=both
+        1. is_bidirectional: 1 (all edges are bidirectional)
+        2. obstacle_type: 0=none, 1=clutter
         """
         node_id_to_idx = {node.node_id: idx for idx, node in enumerate(self.nodes)}
 
@@ -627,7 +593,7 @@ class GraphState:
             continuous_features.append(edge_continuous)
 
             # ===== Categorical features (2) =====
-            is_bidirectional = 1  # All hospital corridors are bidirectional
+            is_bidirectional = 1  # All edges are bidirectional
 
             # Obstacle type encoding
             if edge.clutter_level > 0.5:

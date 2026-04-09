@@ -917,7 +917,7 @@ class GAPOTaskAssignmentEnv:
         - task_features: [15]
         - node_continuous: [num_nodes, N] - continuous node features
         - node_categorical: [num_nodes, 1] - node_type_id
-        - edge_features: [num_edges, 21] - continuous edge features
+        - edge_features: [num_edges, 16] - continuous edge features
         - edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx)
         - edge_index: [2, num_edges] - graph connectivity for GNN
         - robot_features: [num_robots, 20]
@@ -963,12 +963,12 @@ class GAPOTaskAssignmentEnv:
 
         # Edge features (COMPLETE extraction)
         edge_features_orig, edge_node_indices_orig = self.graph_state.get_edge_features_complete()
-        # edge_features_orig: [num_orig_edges, 21]
+        # edge_features_orig: [num_orig_edges, 16]
         # edge_node_indices_orig: [num_orig_edges, 2]
 
         # Make edges bidirectional to match edge_index
         # Edge index is bidirectional, so edge features must be too
-        edge_features = np.vstack([edge_features_orig, edge_features_orig])  # [num_edges * 2, 21]
+        edge_features = np.vstack([edge_features_orig, edge_features_orig])  # [num_edges * 2, 16]
         edge_node_indices = np.vstack([
             edge_node_indices_orig,                          # Original: from -> to
             edge_node_indices_orig[:, [1, 0]]                # Reverse: to -> from

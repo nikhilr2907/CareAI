@@ -18,7 +18,7 @@ class ILCGraphEncoder(nn.Module):
         num_location_tags=10,
         num_school_periods=4,
         num_day_types=2,
-        edge_feat_dim=20,
+        edge_feat_dim=16,
         hidden_dim=64,
         node_type_embedding_dim=8,
         location_tag_embedding_dim=16,
@@ -85,7 +85,7 @@ class ILCGraphEncoder(nn.Module):
         )
 
         # Edge feature dimension after augmentation:
-        # Original 12 + from_node_embedding (64) + to_node_embedding (64) = 140
+        # edge_feat_dim (16) + from_node_embedding (64) + to_node_embedding (64) = 144
         augmented_edge_dim = edge_feat_dim + hidden_dim + hidden_dim
 
         # PASS 2: Refine nodes with augmented edge features
@@ -123,7 +123,7 @@ class ILCGraphEncoder(nn.Module):
                 [:, 1] = location_tag_id (0-N or -1 for unknown)
                 [:, 2] = school_period_id (0-N)
                 [:, 3] = day_type_id (0-1)
-            edge_features: [num_edges, 21] - continuous edge features
+            edge_features: [num_edges, 16] - continuous edge features
             edge_node_indices: [num_edges, 2] - (from_node_idx, to_node_idx) for each edge
             edge_index: [2, num_edges] - graph connectivity (for GNN message passing)
 
@@ -193,7 +193,7 @@ class ILCGraphEncoder(nn.Module):
         to_node_embeds = node_embeddings_pass1[edge_node_indices[:, 1]]    # [num_edges, 64]
 
         augmented_edge_features = torch.cat([
-            edge_features,      # [num_edges, 21]
+            edge_features,      # [num_edges, 16]
             from_node_embeds,   # [num_edges, 64]
             to_node_embeds      # [num_edges, 64]
         ], dim=-1)  # [num_edges, 140]
@@ -414,7 +414,7 @@ def test_encoders():
         num_location_tags=3,
         num_school_periods=8,
         num_day_types=2,
-        edge_feat_dim=20,
+        edge_feat_dim=16,
         hidden_dim=64,
         node_type_embedding_dim=8,
         location_tag_embedding_dim=16,
