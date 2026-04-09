@@ -23,6 +23,7 @@ from .gapo_env import GAPOTaskAssignmentEnv
 from .robot.robot_telemetry import RobotTelemetry
 from .tasks.task_state import Task
 from .graph_helpers import dijkstra_shortest_path
+from src.exceptions import TelemetryUnavailableError
 
 
 class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
@@ -61,8 +62,13 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         # Re-init robot telemetry from bridge if data is already available.
         for robot in self.robots:
             raw = self.robot_backend.get_telemetry(robot.robot_id)
-            if raw is not None:
-                robot.update_telemetry(self._bridge_to_env_telemetry(robot, raw))
+            if raw is None:
+                raise TelemetryUnavailableError(
+                    f"No telemetry received from ROS bridge for robot_id={robot.robot_id}. "
+                    "Ensure the bridge is connected and publishing before calling reset()."
+                )
+            
+            robot.update_telemetry(self._bridge_to_env_telemetry(robot, raw))
 
         return self._get_state_dict()
 
