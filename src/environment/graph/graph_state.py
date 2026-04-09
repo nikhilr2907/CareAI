@@ -192,8 +192,8 @@ class GraphState:
 
         Categorical embeddings for:
         - node_type (storage, corridor, recovery, hub)
-        - department_id (department tag index)
-        - shift_period (night, morning, afternoon, evening)
+        - location_tag (seating_area, far_side, home_base, etc.)
+        - school_period (arrival, morning_lesson_1, morning_break, etc.)
         - day_type (weekday, weekend)
 
         Returns:
@@ -208,8 +208,8 @@ class GraphState:
 
         Categorical features [num_nodes, 4]:
             - node_type_id: 0-3 (storage, corridor, recovery, hub)
-            - loc_tag_id: index in location_tag_order list (-1 if unknown)
-            - school_period_id: 0-N index into school_schedule periods
+            - loc_tag_id: index in location_tag_order (-1 if unknown)
+            - school_period_id: 0-N index into school_schedule.periods
             - day_type_id: 0-1 (weekday, weekend)
         """
         node_type_to_id = {
@@ -390,7 +390,7 @@ class GraphState:
         and prepares category embedding indices for the neural network.
 
         Args:
-            category_names: List of category names to extract (e.g., ['iv_therapy', 'ppe'])
+            category_names: List of category names to extract (e.g., ['fruit', 'snack', 'drink'])
                            If None, automatically discovers categories from nodes
             max_categories: Maximum number of categories to track (for fixed tensor size)
 
@@ -405,11 +405,11 @@ class GraphState:
             - location_ids: [num_nodes] - location embedding indices (or -1 if none)
             - floor_ids: [num_nodes] - floor numbers
 
-        Continuous node features (15 + 3 = 18 total):
-        [Same as get_node_features_complete, plus:]
-        16. total_num_skus: Total distinct SKUs at this node
-        17. num_categories: Number of inventory categories
-        18. num_shelves: Number of shelf IDs
+        Continuous node features (per node):
+            - Geometry: center_x, center_y, width, height, area
+            - Inventory: stock_level, consumption_rate, time_to_stockout
+            - Context: foot_traffic_weight, num_skus, num_categories
+            - Per-category: stock_level, max_stock, num_skus, consumption_rate
 
         Category features per node (max_categories × 4):
         For each category slot:

@@ -8,7 +8,7 @@ class ZoneLatencyMetric(BaseMetric):
     """
     Compute latency statistics grouped by destination quadrant.
 
-    Reveals which areas of the hospital are slow.
+    Reveals which areas of the ILC are slow.
     """
 
     def compute(self) -> dict:

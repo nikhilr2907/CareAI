@@ -26,26 +26,27 @@ class ILCGraphEncoder(nn.Module):
         day_type_embedding_dim=4
     ):
         """
-        Initialize Graph Encoder with FINE-GRAINED categorical embeddings.
+        Initialize Graph Encoder with fine-grained categorical embeddings.
 
         Args:
-            node_continuous_dim: Continuous node features
-                [center_x, center_y, width, height, area, stock_level, consumption_rate,
-                 time_to_stockout, occupancy_count, urgency_level, num_skus, num_categories,
-                 foot_traffic_weight]
+            node_continuous_dim: Continuous node features (dynamically sized;
+                includes geometry, inventory, foot_traffic_weight, floor,
+                temporal demand weight, and per-category stock stats)
             num_node_types: Number of node type categories (default 4)
                 [storage, corridor, recovery, hub]
-            num_departments: Number of location tag categories (derived from config)
-            num_shift_periods: Number of school periods (derived from config)
+            num_location_tags: Number of location tag categories (derived from config)
+            num_school_periods: Number of school schedule periods (derived from config)
             num_day_types: Number of day types (default 2)
                 [weekday, weekend]
-            edge_feat_dim: Edge continuous features
+            edge_feat_dim: Edge continuous features (16 total)
                 [distance_m, corridor_width, max_v_ms, entry_x, entry_y, exit_x, exit_y,
-                 clutter_level, num_active_robots, current_weight, base_cost]
+                 clutter_level, num_active_robots, current_weight, base_cost,
+                 approaching_robots, people_count, congestion_factor,
+                 corridor_capacity, is_congested]
             hidden_dim: Hidden embedding dimension (default 64)
             node_type_embedding_dim: Dimension for node_type embeddings (default 8)
-            department_embedding_dim: Dimension for location tag embeddings (default 16)
-            shift_embedding_dim: Dimension for school period embeddings (default 4)
+            location_tag_embedding_dim: Dimension for location tag embeddings (default 16)
+            school_period_embedding_dim: Dimension for school period embeddings (default 4)
             day_type_embedding_dim: Dimension for day type embeddings (default 4)
         """
         super().__init__()

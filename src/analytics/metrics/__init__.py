@@ -1,4 +1,4 @@
-"""Flow analytics metrics: modular calculation of hospital logistics insights."""
+"""Flow analytics metrics: modular calculation of ILC pilot logistics insights."""
 
 from .helpers import MetricHelpers
 from .base import BaseMetric

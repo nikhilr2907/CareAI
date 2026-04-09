@@ -1,9 +1,9 @@
 """
 GAPO Training Script with De-biasing.
 
-Trains hospital robot task allocation using:
+Trains ILC pilot robot task allocation using:
 - Graph Attention-Based Policy Optimization (GAPO)
-- Graph Neural Networks for hospital + robot encoding
+- Graph Neural Networks for graph + robot encoding
 - Cross-attention for task-robot-node
 - De-biasing mechanisms for autoregressive decisions
 - Continuous time simulation with telemetry

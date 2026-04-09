@@ -209,7 +209,7 @@ class GAPOPolicyNetwork(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Encode graph and fleet context for task scoring.
-        Runs the hospital and robot encoders to produce context embeddings.
+        Runs the graph and robot encoders to produce context embeddings.
 
         Args:
             state_dict: State dictionary with graph and robot features
@@ -252,7 +252,7 @@ class GAPOPolicyNetwork(nn.Module):
 
         Args:
             task_features: [num_tasks, task_feat_dim]
-            graph_embedding: [hidden_dim] - hospital graph context
+            graph_embedding: [hidden_dim] - graph context
             fleet_embedding: [hidden_dim] - robot fleet context
 
         Returns:
@@ -333,7 +333,7 @@ class GAPOPolicyNetwork(nn.Module):
             state_values: [batch_size] - estimated state values
             entropy: [batch_size] - policy entropy
             raw_logits: [batch_size, num_robots] - pre-mask logits (for de-biasing)
-            graph_emb: [batch_size, hidden_dim] - per-state hospital graph embeddings
+            graph_emb: [batch_size, hidden_dim] - per-state graph embeddings
             fleet_emb: [batch_size, hidden_dim] - per-state fleet embeddings
         """
         batch_size = len(state_dicts)
@@ -468,7 +468,7 @@ class GAPOPolicyNetwork(nn.Module):
         node_categorical = node_categorical.view(batch_size * num_nodes, -1)
         edge_features = edge_features.view(batch_size * num_edges, -1)
 
-        # Encode hospital graph
+        # Encode graph
         node_embeddings, _, _ = self.graph_encoder(
             node_continuous,
             node_categorical,

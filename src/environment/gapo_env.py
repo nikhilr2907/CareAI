@@ -135,7 +135,7 @@ class GAPOTaskAssignmentEnv:
             )
             self.telemetry_noise_manager.graph_bounds = self.graph_bounds
 
-        # Pull ILC schedule settings from config (no-op for hospital configs)
+        # Pull ILC schedule settings from config
         schedule = getattr(self.graph_state, "school_schedule", None)
         if schedule:
             self.proactive_restock_lead_time_s = float(
@@ -683,7 +683,7 @@ class GAPOTaskAssignmentEnv:
         secs_to_next_break – Seconds until the next break period starts.
                              0.0 if already in a break; inf if no schedule or no more breaks.
 
-        Returns (False, inf) for hospital configs where school_schedule is absent.
+        Returns (False, inf) when school_schedule is absent.
         """
         schedule = getattr(self.graph_state, "school_schedule", None)
         if not schedule:
@@ -773,7 +773,7 @@ class GAPOTaskAssignmentEnv:
                 # Extra +8.0 when the dropoff lands inside the proactive window before a
                 # break (i.e. 0 < secs_to_next_break <= proactive_restock_lead_time_s).
                 # This directly shapes "restock before breaks, not during them" behaviour.
-                # No-op for hospital configs because _break_state() returns inf.
+                # No-op when school_schedule is absent (_break_state() returns inf).
                 is_break, secs_to_break = self._break_state()
                 if not is_break and 0 < secs_to_break <= self.proactive_restock_lead_time_s:
                     task_reward += 8.0
@@ -835,7 +835,7 @@ class GAPOTaskAssignmentEnv:
         # G: ILC movement-during-break penalty
         # Penalises the robot for traversing an edge during a break period.
         # Shapes "stay stationary during congested breaks" behaviour described in the
-        # pilot proposal. No-op for hospital configs (_break_state returns False).
+        # pilot proposal. No-op when school_schedule is absent (_break_state returns False).
         #
         # OPTION B (future): gate the penalty on shelf health so reactive recovery
         # runs are not charged when stock is critically depleted. To switch, comment

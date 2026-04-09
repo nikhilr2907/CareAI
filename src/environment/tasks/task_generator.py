@@ -212,7 +212,7 @@ def generate_random_ad_hoc_tasks(
     next_task_id: int = 0
 ) -> Tuple[List[Task], int]:
     """
-    Generate random ad-hoc tasks (inter-ward transfers, pharmacy deliveries).
+    Generate random ad-hoc restocking tasks.
 
     Args:
         graph_state: GraphState object

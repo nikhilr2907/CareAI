@@ -8,7 +8,7 @@ class RoutePerformanceMetric(BaseMetric):
     """
     Compute latency statistics grouped by origin→destination quadrant pairs.
 
-    Reveals which routes through the hospital are slow.
+    Reveals which routes through the ILC are slow.
     """
 
     def compute(self) -> dict:

@@ -110,7 +110,7 @@ class RobotPeerAttention(nn.Module):
 
     Each robot attends to all other robots given the current task, producing
     per-robot peer-aware embeddings that capture assignment covariance — e.g.
-    "robot A is also near ward 3, so I (robot B) should score lower for this task."
+    "robot A is also near shelf A, so I (robot B) should score lower for this task."
 
     Unlike TaskRobotAttention (task queries robots → single global vector),
     this produces a distinct [64] vector per robot that encodes its relationship
