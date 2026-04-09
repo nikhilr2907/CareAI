@@ -61,9 +61,6 @@ class GAPOTaskAssignmentEnv:
         # Episode metrics
         self.episode_stockouts = 0
         self.cumulative_reward = 0.0
-        self.episode_collisions = 0
-        self.last_collision_count = 0
-
         # Per-task completion credits from the most recent timestep (populated by
         # _compute_timestep_reward, consumed by step() info dict and run_training.py).
         self._last_per_task_credits: Dict[int, float] = {}
@@ -218,9 +215,6 @@ class GAPOTaskAssignmentEnv:
         # Reset metrics
         self.episode_stockouts = 0
         self.cumulative_reward = 0.0
-        self.episode_collisions = 0
-        self.last_collision_count = 0
-
         return self._get_state_dict()
 
     def step(self, dt: float = None):
@@ -284,7 +278,6 @@ class GAPOTaskAssignmentEnv:
             'completed_tasks': len(completed_tasks),
             'total_robot_tasks': sum(r.num_queued_tasks for r in self.robots),
             'stockouts': sum(1 for n in self.graph_state.nodes if n.is_stockout),
-            'collisions': self.last_collision_count,
             'cumulative_reward': self.cumulative_reward,
             'edge_cost_model': self.edge_cost_manager.get_stats(),
             # Per-task completion credits: {parent_task_id: reward}.
@@ -293,7 +286,6 @@ class GAPOTaskAssignmentEnv:
             # Ambient monitoring stats (not in reward, just for logging).
             'episode_stockouts': self.episode_stockouts,
             'episode_break_stockouts': self.episode_break_stockouts,
-            'episode_collisions': self.episode_collisions,
             # Battery management info
             'battery_penalty': self._last_battery_penalty,
             'emergency_tasks': len(self.emergency_tasks),
@@ -829,24 +821,6 @@ class GAPOTaskAssignmentEnv:
         is_break_now, _ = self._break_state()
         if is_break_now:
             self.episode_break_stockouts += stockout_count
-
-        # Track collisions for episode metrics / info dict only.
-        collision_distance_m = 0.5
-        collision_count = 0
-        for i in range(len(self.robots)):
-            ri = self.robots[i]
-            if not ri.telemetry:
-                continue
-            for j in range(i + 1, len(self.robots)):
-                rj = self.robots[j]
-                if not rj.telemetry:
-                    continue
-                dx = ri.telemetry.x - rj.telemetry.x
-                dy = ri.telemetry.y - rj.telemetry.y
-                if (dx * dx + dy * dy) ** 0.5 < collision_distance_m:
-                    collision_count += 1
-        self.episode_collisions += collision_count
-        self.last_collision_count = collision_count
 
         # E: Per-step low-battery ambient penalty
         battery_penalty = 0.0
