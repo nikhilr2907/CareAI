@@ -2,6 +2,7 @@ import torch
 
 from src.multi_agent_ppo.gapo_attention import (
     GAPOAttentionModule,
+    RobotPeerAttention,
     RobotScorer,
     TaskNodeAttention,
     TaskRobotAttention,
@@ -52,24 +53,41 @@ def test_task_node_attention_returns_expected_shapes():
 def test_robot_scorer_handles_batched_and_unbatched_embeddings():
     scorer = RobotScorer(embed_dim=8, hidden_dim=16)
     task_embedding = torch.randn(8)
-    robot_context = torch.randn(8)
+    # peer_context is now per-robot [N, 64], not a global [64] vector
+    peer_context = torch.randn(4, 8)
     node_context = torch.randn(8)
 
     unbatched_scores = scorer(
         torch.randn(4, 8),
         task_embedding,
-        robot_context,
+        peer_context,
         node_context,
     )
     batched_scores = scorer(
         torch.randn(2, 4, 8),
         torch.randn(2, 8),
-        torch.randn(2, 8),
+        torch.randn(2, 4, 8),  # per-robot in batched case too
         torch.randn(2, 8),
     )
 
     assert unbatched_scores.shape == (4,)
     assert batched_scores.shape == (2, 4)
+
+
+def test_robot_peer_attention_produces_per_robot_embeddings_and_respects_mask():
+    torch.manual_seed(4)
+    module = RobotPeerAttention(embed_dim=8, num_heads=2)
+    robot_embeddings = torch.randn(5, 8)
+    task_embedding = torch.randn(8)
+    mask = torch.tensor([True, False, True, True, False])
+
+    peer_output, peer_weights = module(robot_embeddings, task_embedding, mask)
+
+    assert peer_output.shape == (5, 8)       # one vector per robot
+    assert peer_weights.shape == (5, 5)      # N×N robot-robot attention matrix
+    # Masked robots (indices 1, 4) should contribute zero weight as keys
+    assert peer_weights[:, 1].sum().item() == 0.0
+    assert peer_weights[:, 4].sum().item() == 0.0
 
 
 def test_gapo_attention_module_returns_attention_info_and_respects_mask():
@@ -90,13 +108,17 @@ def test_gapo_attention_module_returns_attention_info_and_respects_mask():
     assert action_logits.shape == (5,)
     assert set(attention_info) == {
         "robot_context",
+        "peer_aware_robots",
         "node_context",
         "robot_attn_weights",
+        "peer_attn_weights",
         "node_attn_weights",
     }
     assert attention_info["robot_context"].shape == (8,)
+    assert attention_info["peer_aware_robots"].shape == (5, 8)   # per-robot, not global
     assert attention_info["node_context"].shape == (8,)
     assert attention_info["robot_attn_weights"].shape == (5,)
+    assert attention_info["peer_attn_weights"].shape == (5, 5)   # N×N robot-robot matrix
     assert attention_info["node_attn_weights"].shape == (6,)
     assert attention_info["robot_attn_weights"][1].item() == 0.0
     assert attention_info["robot_attn_weights"][4].item() == 0.0
