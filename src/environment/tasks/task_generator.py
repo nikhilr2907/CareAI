@@ -147,94 +147,60 @@ def generate_inventory_tasks(
             continue
         if not dest_node.consumption_enabled:
             continue
-        if dest_node.sku_inventory:
-            for sku_id, sku_data in dest_node.sku_inventory.items():
-                stock = float(sku_data.get("stock", 0.0))
-                reorder = float(sku_data.get("reorder", 0.0))
-                par_level = float(sku_data.get("par", 0.0))
-                max_level = float(sku_data.get("max", 0.0))
-                if max_level <= 0:
-                    continue
-                if stock > reorder:
-                    continue
+        for sku_id, sku_data in dest_node.sku_inventory.items():
+            stock = float(sku_data.get("stock", 0.0))
+            reorder = float(sku_data.get("reorder", 0.0))
+            par_level = float(sku_data.get("par", 0.0))
+            max_level = float(sku_data.get("max", 0.0))
+            if max_level <= 0:
+                continue
+            if stock > reorder:
+                continue
 
-                # Skip if this (sku, destination) is already pending or in-flight
-                key = (sku_id, dest_idx)
-                if key in seen_keys:
-                    continue
+            # Skip if this (sku, destination) is already pending or in-flight
+            key = (sku_id, dest_idx)
+            if key in seen_keys:
+                continue
 
-                rate = _compute_sku_rate(dest_node, sku_id, graph_state, current_time)
-                tts_hours = (stock / rate) if rate > 0 else float('inf')
-                tts_seconds = tts_hours * 3600
-                deadline = current_time + max(tts_seconds, 60)
+            rate = _compute_sku_rate(dest_node, sku_id, graph_state, current_time)
+            tts_hours = (stock / rate) if rate > 0 else float('inf')
+            tts_seconds = tts_hours * 3600
+            deadline = current_time + max(tts_seconds, 60)
 
-                if par_level > 0:
-                    target = par_level
-                else:
-                    target = max_level
-                delivery_amount = min(max_level - stock, max(target - stock, 1.0))
-                num_items = max(1, int(delivery_amount))
+            if par_level > 0:
+                target = par_level
+            else:
+                target = max_level
+            delivery_amount = min(max_level - stock, max(target - stock, 1.0))
+            num_items = max(1, int(delivery_amount))
 
-                urgency = 5 if tts_hours < 0.5 else 4 if tts_hours < 1.0 else 3 if tts_hours < 2.0 else 2
-                estimated_duration = 120.0
+            urgency = 5 if tts_hours < 0.5 else 4 if tts_hours < 1.0 else 3 if tts_hours < 2.0 else 2
+            estimated_duration = 120.0
 
-                task = Task(
-                    task_id=task_id,
-                    from_location_index=central_storage_idx,
-                    to_location_index=dest_idx,
-                    manual_priority=urgency,
-                    deadline=deadline,
-                    arrival_time=current_time,
-                    estimated_duration=estimated_duration,
-                    task_type='replenishment',
-                    num_items=num_items,
-                    source_stock_level=dest_node.stock_level,
-                    time_to_stockout=tts_hours,
-                    sku_id=sku_id,
-                    category_key=sku_data.get("category"),
-                    category_id=float(graph_state.category_order.index(sku_data.get("category"))) if getattr(graph_state, "category_order", None) and sku_data.get("category") in graph_state.category_order else -1.0,
-                    sku_stock_level=stock,
-                    sku_max_level=max_level,
-                    reorder_point=reorder,
-                    par_level=par_level
-                )
+            task = Task(
+                task_id=task_id,
+                from_location_index=central_storage_idx,
+                to_location_index=dest_idx,
+                manual_priority=urgency,
+                deadline=deadline,
+                arrival_time=current_time,
+                estimated_duration=estimated_duration,
+                task_type='replenishment',
+                num_items=num_items,
+                source_stock_level=dest_node.stock_level,
+                time_to_stockout=tts_hours,
+                sku_id=sku_id,
+                category_key=sku_data.get("category"),
+                category_id=float(graph_state.category_order.index(sku_data.get("category"))) if getattr(graph_state, "category_order", None) and sku_data.get("category") in graph_state.category_order else -1.0,
+                sku_stock_level=stock,
+                sku_max_level=max_level,
+                reorder_point=reorder,
+                par_level=par_level
+            )
 
-                new_tasks.append(task)
-                seen_keys.add(key)
-                task_id += 1
-        else:
-            if dest_node.needs_restock:
-                # Non-SKU node: key on (None, dest_idx)
-                key = (None, dest_idx)
-                if key in seen_keys:
-                    continue
-
-                target_stock = 2.0 * dest_node.consumption_rate
-                delivery_amount = min(
-                    dest_node.max_stock - dest_node.stock_level,
-                    target_stock
-                )
-                num_items = max(1, int(delivery_amount))
-                urgency = dest_node.urgency_level
-                tts_seconds = dest_node.time_to_stockout * 3600
-                deadline = current_time + max(tts_seconds, 60)
-                estimated_duration = 120.0
-                task = Task(
-                    task_id=task_id,
-                    from_location_index=central_storage_idx,
-                    to_location_index=dest_idx,
-                    manual_priority=urgency,
-                    deadline=deadline,
-                    arrival_time=current_time,
-                    estimated_duration=estimated_duration,
-                    task_type='replenishment',
-                    num_items=num_items,
-                    source_stock_level=dest_node.stock_level,
-                    time_to_stockout=dest_node.time_to_stockout
-                )
-                new_tasks.append(task)
-                seen_keys.add(key)
-                task_id += 1
+            new_tasks.append(task)
+            seen_keys.add(key)
+            task_id += 1
 
     return new_tasks, task_id
 
