@@ -90,13 +90,17 @@ def test_gapo_attention_module_returns_attention_info_and_respects_mask():
     assert action_logits.shape == (5,)
     assert set(attention_info) == {
         "robot_context",
+        "peer_aware_robots",
         "node_context",
         "robot_attn_weights",
+        "peer_attn_weights",
         "node_attn_weights",
     }
     assert attention_info["robot_context"].shape == (8,)
+    assert attention_info["peer_aware_robots"].shape == (5, 8)   # per-robot, not global
     assert attention_info["node_context"].shape == (8,)
     assert attention_info["robot_attn_weights"].shape == (5,)
+    assert attention_info["peer_attn_weights"].shape == (5, 5)   # [N, N] robot-robot matrix
     assert attention_info["node_attn_weights"].shape == (6,)
     assert attention_info["robot_attn_weights"][1].item() == 0.0
     assert attention_info["robot_attn_weights"][4].item() == 0.0

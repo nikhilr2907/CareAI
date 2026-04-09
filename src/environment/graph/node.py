@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
 
 @dataclass
-class HospitalNode:
+class GraphNode:
     # 1. Basic Identification
     node_id: str
     node_type: str  # 'storage', 'recovery', 'hub'

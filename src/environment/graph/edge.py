@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, Optional
 
 @dataclass
-class HospitalEdge:
+class GraphEdge:
     from_node: str  # Node ID this corridor connects from
     to_node: str    # Node ID this corridor connects to
     edge_id: Optional[str] = None

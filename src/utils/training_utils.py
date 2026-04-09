@@ -11,7 +11,7 @@ import torch
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.environment.graph.graph_state import GraphState
-from src.environment.graph.edge import HospitalEdge
+from src.environment.graph.edge import GraphEdge
 from src.environment.graph.config_loader import load_config_from_file, get_num_robots_from_config
 
 
@@ -170,7 +170,7 @@ def create_env_from_config_file(config_path: str, num_robots: int = None,
                           (from_node.center_y - to_node.center_y) ** 2)
         detail = edges_detailed.get((from_idx, to_idx)) or edges_detailed.get((to_idx, from_idx))
 
-        edge = HospitalEdge(
+        edge = GraphEdge(
             from_node=from_node.node_id,
             to_node=to_node.node_id,
             distance_m=float(detail.get("distance_m", distance)) if detail else distance,
@@ -241,7 +241,7 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
         distance = np.sqrt((from_node.center_x - to_node.center_x) ** 2 +
                            (from_node.center_y - to_node.center_y) ** 2)
         detail = edges_detailed.get((from_idx, to_idx)) or edges_detailed.get((to_idx, from_idx))
-        edge = HospitalEdge(
+        edge = GraphEdge(
             from_node=from_node.node_id,
             to_node=to_node.node_id,
             distance_m=float(detail.get("distance_m", distance)) if detail else distance,

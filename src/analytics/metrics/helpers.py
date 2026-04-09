@@ -9,7 +9,7 @@ class MetricHelpers:
     def __init__(self, nodes):
         """
         Args:
-            nodes: List of HospitalNode objects
+            nodes: List of GraphNode objects
         """
         self.nodes = nodes
         self._bounds = None

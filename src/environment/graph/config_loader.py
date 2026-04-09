@@ -1,15 +1,15 @@
-"""Load ILC pilot configs into HospitalNode objects."""
+"""Load ILC pilot configs into GraphNode objects."""
 from pathlib import Path
 from typing import List, Tuple, Dict
 import json
 import logging
 
-from .node import HospitalNode
+from .node import GraphNode
 
 logger = logging.getLogger(__name__)
 
 
-def load_config_from_file(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[int, int]], Dict]:
+def load_config_from_file(config_path: str) -> Tuple[List[GraphNode], List[Tuple[int, int]], Dict]:
     """Load an ILC pilot config file and return (nodes, edge_pairs, meta)."""
     config_path = Path(config_path)
     if not config_path.exists():
@@ -36,7 +36,7 @@ def _normalize_category(name: str) -> str:
     return key
 
 
-def _load_ilc_config(raw_data: Dict) -> Tuple[List[HospitalNode], List[Tuple[int, int]], Dict]:
+def _load_ilc_config(raw_data: Dict) -> Tuple[List[GraphNode], List[Tuple[int, int]], Dict]:
     """Load an ILC pilot config (environment_type: ilc_open_space).
 
     - sku_database is a list; normalised to {sku_id: entry} dict.
@@ -66,7 +66,7 @@ def _load_ilc_config(raw_data: Dict) -> Tuple[List[HospitalNode], List[Tuple[int
         if n.get("location_tag")
     ]
 
-    nodes: List[HospitalNode] = []
+    nodes: List[GraphNode] = []
     for node_data in raw_data.get("nodes", []):
         raw_inventory = node_data.get("inventory", {})
 
@@ -88,7 +88,7 @@ def _load_ilc_config(raw_data: Dict) -> Tuple[List[HospitalNode], List[Tuple[int
         total_stock = sum(v["stock"] for v in sku_inventory.values())
         total_max   = sum(v["max"]   for v in sku_inventory.values())
 
-        node = HospitalNode(
+        node = GraphNode(
             node_id=f"node_{node_data['id']}",
             node_type=node_data["type"],
             center_x=float(node_data["pos"][0]),

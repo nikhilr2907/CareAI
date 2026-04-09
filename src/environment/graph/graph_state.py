@@ -1,15 +1,15 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 import numpy as np
-from .node import HospitalNode
-from .edge import HospitalEdge
+from .node import GraphNode
+from .edge import GraphEdge
 
 
 @dataclass
 class GraphState:
     """Represents the ILC pilot graph structure (nodes + edges)."""
-    nodes: List[HospitalNode] = field(default_factory=list)
-    edges: List[HospitalEdge] = field(default_factory=list)
+    nodes: List[GraphNode] = field(default_factory=list)
+    edges: List[GraphEdge] = field(default_factory=list)
     sku_database: Optional[dict] = None
     demand_profiles: Optional[dict] = None
     category_order: Optional[List[str]] = None
@@ -400,7 +400,7 @@ class GraphState:
                 return (node.center_x, node.center_y)
         return (0.0, 0.0)
 
-    def get_node_by_index(self, idx: int) -> HospitalNode:
+    def get_node_by_index(self, idx: int) -> GraphNode:
         """Get node by index."""
         if 0 <= idx < len(self.nodes):
             return self.nodes[idx]

@@ -6,6 +6,7 @@ from typing import Tuple, Optional
 
 
 from torch_geometric.nn import GATConv, SAGEConv
+from torch_scatter import scatter_mean
 
 
 class ILCGraphEncoder(nn.Module):
@@ -206,6 +207,20 @@ class ILCGraphEncoder(nn.Module):
 
         # Final edge embeddings
         edge_embeddings = self.edge_encoder(augmented_edge_features)  # [num_edges, 64]
+
+        # Scatter edge embeddings back to destination nodes and residual-add.
+        # This enriches each node's embedding with the traversal costs of corridors
+        # leading into it, giving TaskNodeAttention implicit path quality signal.
+        # Nodes with no incoming edges are unaffected (scatter produces zero → +0).
+        num_nodes_final = node_embeddings.shape[0]
+        edge_to_node = edge_node_indices[:, 1]  # destination node per edge [num_edges]
+        node_edge_agg = scatter_mean(
+            edge_embeddings,
+            edge_to_node,
+            dim=0,
+            dim_size=num_nodes_final,
+        )  # [num_nodes, 64]
+        node_embeddings = node_embeddings + node_edge_agg
 
         # Global graph embedding (mean pooling)
         graph_embedding = torch.mean(node_embeddings, dim=0)
