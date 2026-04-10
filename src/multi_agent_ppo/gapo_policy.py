@@ -260,7 +260,7 @@ class GAPOPolicyNetwork(nn.Module):
         """
         num_tasks = task_features.shape[0]
         task_features_normed = self.task_input_norm(task_features)
-
+        
         # Expand context to match num_tasks
         graph_expanded = graph_embedding.unsqueeze(0).expand(num_tasks, -1)
         fleet_expanded = fleet_embedding.unsqueeze(0).expand(num_tasks, -1)

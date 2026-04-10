@@ -261,6 +261,7 @@ async def main():
                         ).cpu().numpy()
                     for task, score in zip(all_tasks, scores):
                         task.learned_score = float(score)
+                        # Robot handles the resorting seperately in its own methods.
                     robot.resort_queue()
                     robot.resort_overflow()
                 robot.enforce_capacity_limits()
@@ -297,11 +298,7 @@ async def main():
                     raise
 
                 step_memory_indices.append(mem_idx_before)
-                success = env.assign_task_to_robot(action, task)
-                if not success:
-                    memory.rewards.append(0.0)
-                    memory.is_terminals.append(False)
-                    break
+                env.assign_task_to_robot(action, task)
 
                 num_assignments += 1
                 assignments_this_step += 1
@@ -338,7 +335,7 @@ async def main():
             for task in newly_completed:
                 if task.arrival_time is not None:
                     iteration_completion_times.append(env.current_time - task.arrival_time)
-
+            
             task_completion_credits: dict = info.get('task_completion_credits', {})
 
             for parent_id, bonus in task_completion_credits.items():
