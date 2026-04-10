@@ -6,7 +6,6 @@ from typing import Tuple, Optional
 
 
 from torch_geometric.nn import GATConv, SAGEConv
-from torch_scatter import scatter_mean
 
 
 class ILCGraphEncoder(nn.Module):
@@ -215,12 +214,13 @@ class ILCGraphEncoder(nn.Module):
         # Nodes with no incoming edges are unaffected (scatter produces zero → +0).
         num_nodes_final = node_embeddings.shape[0]
         edge_to_node = edge_node_indices[:, 1]  # destination node per edge [num_edges]
-        node_edge_agg = scatter_mean(
-            edge_embeddings,
-            edge_to_node,
-            dim=0,
-            dim_size=num_nodes_final,
-        )  # [num_nodes, 64]
+        edge_dim = edge_embeddings.shape[1]
+        node_edge_agg = torch.zeros(num_nodes_final, edge_dim, device=edge_embeddings.device, dtype=edge_embeddings.dtype)
+        edge_counts = torch.zeros(num_nodes_final, 1, device=edge_embeddings.device, dtype=edge_embeddings.dtype)
+        idx = edge_to_node.unsqueeze(1).expand(-1, edge_dim)
+        node_edge_agg.scatter_add_(0, idx, edge_embeddings)
+        edge_counts.scatter_add_(0, edge_to_node.unsqueeze(1), torch.ones(edge_embeddings.shape[0], 1, device=edge_embeddings.device, dtype=edge_embeddings.dtype))
+        node_edge_agg = node_edge_agg / edge_counts.clamp(min=1.0)  # [num_nodes, 64]
         node_embeddings = node_embeddings + node_edge_agg
 
         # Global graph embedding (mean pooling)
