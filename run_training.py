@@ -47,7 +47,7 @@ def main():
     args = parse_args()
 
     # Setup logging and output directories
-    logger, output_dir, exp_name = setup_logging_and_output(args)
+    logger, output_dir, _ = setup_logging_and_output(args)
 
     # Setup task-specific logging
     task_logger = TaskLogger(output_dir / "logs")
@@ -497,7 +497,7 @@ def main():
 
             # Simulation time step
             prev_completed = len(env.completed_tasks)
-            state_dict, step_reward, done, info = env.step(dt=timesteps_per_decision)
+            state_dict, _, done, info = env.step(dt=timesteps_per_decision)
 
             # --- Per-task completion credit attribution ---
             # Credits are computed by _compute_timestep_reward() and returned via info.
@@ -558,7 +558,7 @@ def main():
                     env.task_creation_actor.record_completion(parent_id, scaled_bonus)
                 iteration_reward += scaled_bonus
                 orig_idx = task_to_memory_idx.get(parent_id)
-                if orig_idx is not None and orig_idx < len(memory.rewards):
+                if orig_idx is not None:
                     # In-rollout completion: combine assignment_reward + completion bonus
                     # into the causal memory slot, then remove from open_assignments.
                     entry = open_assignments.pop(parent_id, None)

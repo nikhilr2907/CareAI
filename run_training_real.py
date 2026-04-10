@@ -329,7 +329,7 @@ async def main():
 
             # Env step
             prev_completed = len(env.completed_tasks)
-            state_dict, _, done, info = env.step(dt=1.0)
+            state_dict, _, _, info = env.step(dt=1.0)
 
             newly_completed = env.completed_tasks[prev_completed:]
             for task in newly_completed:
@@ -360,7 +360,7 @@ async def main():
                 iteration_reward += scaled_bonus
 
                 orig_idx = task_to_memory_idx.get(parent_id)
-                if orig_idx is not None and orig_idx < len(memory.rewards):
+                if orig_idx is not None:
                     entry = open_assignments.pop(parent_id, None)
                     a_rew = entry['assignment_reward'] if entry else 0.0
                     memory.rewards[orig_idx] = a_rew + scaled_bonus
@@ -371,13 +371,7 @@ async def main():
                         closed_buffer.append(entry)
 
 
-            # Continuous operation: clear per-episode tracking at boundary, no env.reset()
-            if done:
-                task_to_memory_idx.clear()
-                open_assignments.clear()
-                task_logger.task_metadata.clear()
-                if memory.is_terminals:
-                    memory.is_terminals[-1] = True
+            # May need episode termination for future consistency
 
             # Pace to 1 Hz — yields control so backend WebSocket tasks can process messages
             elapsed = time.monotonic() - step_wall_start
@@ -435,6 +429,7 @@ async def main():
             pid for pid, e in open_assignments.items()
             if iteration - e['born_iter'] > OPEN_ASSIGNMENT_TTL
         ]
+        # Stale ids indicate assignments that were never resolved (e.g. due to task cancellation or failure)
         for pid in stale_ids:
             open_assignments.pop(pid)
 
