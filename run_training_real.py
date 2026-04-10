@@ -370,12 +370,6 @@ async def main():
                         entry['reward'] = entry['assignment_reward'] + scaled_bonus
                         closed_buffer.append(entry)
 
-            battery_pen = info.get('battery_penalty', 0.0)
-            if battery_pen != 0.0 and step_memory_indices:
-                share = battery_pen / len(step_memory_indices)
-                for midx in step_memory_indices:
-                    if midx < len(memory.rewards):
-                        memory.rewards[midx] += share
 
             # Continuous operation: clear per-episode tracking at boundary, no env.reset()
             if done:

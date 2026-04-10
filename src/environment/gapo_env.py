@@ -90,7 +90,6 @@ class GAPOTaskAssignmentEnv:
         self.battery_low_step_penalty = 0.05
         self.battery_critical_task_penalty = 1.0
         self.emergency_tasks: list = []
-        self._last_battery_penalty = 0.0
 
         # ILC schedule-aware reward shaping (no-ops when school_schedule is absent)
         # proactive_restock_lead_time_s is overridden from config in reset() if present.
@@ -286,8 +285,6 @@ class GAPOTaskAssignmentEnv:
             # Ambient monitoring stats (not in reward, just for logging).
             'episode_stockouts': self.episode_stockouts,
             'episode_break_stockouts': self.episode_break_stockouts,
-            # Battery management info
-            'battery_penalty': self._last_battery_penalty,
             'emergency_tasks': len(self.emergency_tasks),
             'offline_robots': list(self._offline_robots),
             'robots_charging': [rid for rid, sim in enumerate(self.robot_simulators) if sim.is_charging],
@@ -815,16 +812,6 @@ class GAPOTaskAssignmentEnv:
         is_break_now, _ = self._break_state()
         if is_break_now:
             self.episode_break_stockouts += stockout_count
-
-        # E: Per-step low-battery ambient penalty
-        battery_penalty = 0.0
-        for rid in range(len(self.robots)):
-            if rid in self._offline_robots:
-                continue
-            if self._should_robot_charge(rid):
-                battery_penalty -= self.battery_low_step_penalty
-        self._last_battery_penalty = battery_penalty
-        total_reward += battery_penalty
 
         # G: ILC movement-during-break penalty
         # Penalises the robot for traversing an edge during a break period.

@@ -574,13 +574,7 @@ def main():
                         closed_buffer.append(entry)
                     # else: task predates open_assignments tracking → credit dropped
 
-            # Route ambient battery penalty to current step's memory slots
-            battery_pen = info.get('battery_penalty', 0.0)
-            if battery_pen != 0.0 and step_memory_indices:
-                share = battery_pen / len(step_memory_indices)
-                for midx in step_memory_indices:
-                    if midx < len(memory.rewards):
-                        memory.rewards[midx] += share
+
 
             if done:
                 state_dict = env.reset()
