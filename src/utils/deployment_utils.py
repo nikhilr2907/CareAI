@@ -306,7 +306,7 @@ def rank_pending_tasks(env, ppo):
     if not env.pending_tasks:
         return
     if ppo is None:
-        env.pending_tasks.sort(key=lambda t: (-t.manual_priority, t.arrival_time))
+        env.pending_tasks.sort(key=lambda t: t.arrival_time)
         for i, t in enumerate(env.pending_tasks):
             t.queue_position = i
             t.learned_score = 0.0
@@ -380,9 +380,7 @@ def assign_tasks(env, ppo, max_assignments):
             action = ppo.select_action_greedy(state_dict, robot_mask)
         else:
             action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
-        success = env.assign_task_to_robot(action, task)
-        if not success:
-            break
+        env.assign_task_to_robot(action, task)
         assignments += 1
 
         # Apply capacity overflow rules immediately after insertion so a full robot
