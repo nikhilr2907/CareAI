@@ -461,14 +461,7 @@ def main():
                 step_memory_indices.append(mem_idx_before)
 
                 # Assign task to robot
-                success = env.assign_task_to_robot(action, task)
-                if not success:
-                    # Shouldn't occur for valid robot actions, but guard against it:
-                    # break rather than retrying the same task (would cause infinite loop).
-                    memory.rewards.append(0.0)
-                    memory.is_terminals.append(False)
-                    break
-
+                env.assign_task_to_robot(action, task)
                 num_assignments += 1
                 assignments_this_step += 1
                 # Record which memory slot this task was assigned from, so

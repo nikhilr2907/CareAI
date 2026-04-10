@@ -115,7 +115,7 @@ class TaskQueue:
         """Get current number of tasks."""
         return len(self.tasks)
 
-    def get_queue_summary(self) -> np.ndarray:
+    def get_queue_summary(self, current_time: float) -> np.ndarray:
         """
         Get summary statistics about the queue.
 
@@ -128,12 +128,8 @@ class TaskQueue:
         num_tasks = len(self.tasks)
         avg_priority = np.mean([t.manual_priority for t in self.tasks])
         num_urgent = sum(1 for t in self.tasks if t.manual_priority >= 4)
-
-        # Oldest task age (requires current_time, so we use urgency_score as proxy)
-        oldest_age = max([t.urgency_score for t in self.tasks], default=0.0)
-
-        # Tasks near deadline (using urgency_score as indicator)
-        num_near_deadline = sum(1 for t in self.tasks if t.urgency_score > 50)
+        oldest_age = max(t.get_age(current_time) for t in self.tasks)
+        num_near_deadline = sum(1 for t in self.tasks if t.get_time_to_deadline(current_time) < 300)
 
         return np.array([
             float(num_tasks),
