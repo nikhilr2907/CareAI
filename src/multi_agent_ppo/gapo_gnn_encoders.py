@@ -9,7 +9,7 @@ from torch_geometric.nn import GATConv, SAGEConv
 from torch_scatter import scatter_mean
 
 
-class HospitalGraphEncoder(nn.Module):
+class GraphEncoder(nn.Module):
 
     def __init__(
         self,
@@ -410,7 +410,7 @@ def test_encoders():
 
     # Test Hospital Graph Encoder (with complete features)
     print("\n1. Hospital Graph Encoder (Two-Pass with Fine-Grained Categorical Embeddings)")
-    hospital_encoder = HospitalGraphEncoder(
+    hospital_encoder = GraphEncoder(
         node_continuous_dim=24,  # UPDATED: includes temporal features
         num_node_types=4,
         num_departments=10,

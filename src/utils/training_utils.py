@@ -11,7 +11,7 @@ import torch
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.environment.graph.graph_state import GraphState
-from src.environment.graph.edge import HospitalEdge
+from src.environment.graph.edge import GraphEdge
 from src.environment.graph.config_loader import load_config_from_file, get_num_robots_from_config
 
 
@@ -142,107 +142,19 @@ def load_curriculum_from_configs(config_paths: list) -> list:
     return curriculum
 
 
-def create_env_from_config_file(config_path: str, num_robots: int = None,
-                                max_episode_time: float = 28800.0,
-                                timestep_seconds: float = 1.0,
-                                stochastic_tasks_per_hour: float = 2.0,
-                                stochastic_task_cap_per_hour: int = 2,
-                                initial_stochastic_tasks: int = 0):
-    """
-    Create environment from config file.
-    """
-    nodes, edge_pairs, meta = load_config_from_file(config_path)
-    num_nodes = len(nodes)
-
-    if num_robots is None:
-        num_robots = get_num_robots_from_config(config_path)
-
+def _build_graph_state(nodes, edge_pairs, meta) -> GraphState:
+    """Parse nodes + edge pairs from config into a GraphState with fully populated GraphEdge objects."""
     graph_state = GraphState()
     graph_state.nodes = nodes
-
-    graph_state.edges = []
-    edges_detailed = { (e.get("from"), e.get("to")): e for e in meta.get("edges_detailed", []) }
-    for from_idx, to_idx in edge_pairs:
-        from_node = nodes[from_idx]
-        to_node = nodes[to_idx]
-
-        distance = np.sqrt((from_node.center_x - to_node.center_x) ** 2 +
-                          (from_node.center_y - to_node.center_y) ** 2)
-        detail = edges_detailed.get((from_idx, to_idx)) or edges_detailed.get((to_idx, from_idx))
-
-        edge = HospitalEdge(
-            from_node=from_node.node_id,
-            to_node=to_node.node_id,
-            distance_m=float(detail.get("distance_m", distance)) if detail else distance,
-            corridor_width=1.9,
-            entry_point=(from_node.center_x, from_node.center_y),
-            exit_point=(to_node.center_x, to_node.center_y),
-            max_v_ms=0.5,
-            clutter_level=np.random.random() * 0.3,
-            active_robot_ids=[],
-            has_patient_bed=np.random.random() < 0.1,
-            edge_id=detail.get("edge_id") if detail else None,
-            mode=detail.get("mode") if detail else None,
-            floor_delta=int(detail.get("floor_delta", 0)) if detail else 0,
-            travel_time_model=detail.get("travel_time_model") if detail else None,
-            constraints=detail.get("constraints", "") if detail else ""
-        )
-        graph_state.edges.append(edge)
-
-    env = GAPOTaskAssignmentEnv(
-        num_robots=num_robots,
-        num_nodes=num_nodes,
-        max_episode_time=max_episode_time,
-        timestep_seconds=timestep_seconds,
-        hospital_config=None,
-        stochastic_tasks_per_hour=stochastic_tasks_per_hour,
-        max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
-        initial_stochastic_tasks=initial_stochastic_tasks
-    )
-
-    env.graph_state = graph_state
-    env._custom_graph_state = graph_state
-    graph_state.sku_database = meta.get("sku_database")
-    graph_state.demand_profiles = meta.get("demand_profiles")
-    graph_state.category_order = meta.get("category_order")
-    graph_state.department_order = meta.get("department_order")
-
-    return env, num_nodes
-
-
-def create_real_env_from_config_file(config_path: str, robot_backend,
-                                     num_robots: int = None,
-                                     max_episode_time: float = 28800.0,
-                                     timestep_seconds: float = 1.0,
-                                     stochastic_tasks_per_hour: float = 2.0,
-                                     stochastic_task_cap_per_hour: int = 2,
-                                     initial_stochastic_tasks: int = 0):
-    """
-    Create a real-deployment environment from a config file.
-
-    Identical graph/edge parsing to create_env_from_config_file but
-    instantiates GAPOTaskAssignmentEnvReal with the provided robot_backend.
-    """
-    from ..environment.gapo_env_real import GAPOTaskAssignmentEnvReal
-
-    nodes, edge_pairs, meta = load_config_from_file(config_path)
-    num_nodes = len(nodes)
-
-    if num_robots is None:
-        num_robots = get_num_robots_from_config(config_path)
-
-    graph_state = GraphState()
-    graph_state.nodes = nodes
-
-    graph_state.edges = []
     edges_detailed = {(e.get("from"), e.get("to")): e for e in meta.get("edges_detailed", [])}
+    graph_state.edges = []
     for from_idx, to_idx in edge_pairs:
         from_node = nodes[from_idx]
         to_node = nodes[to_idx]
         distance = np.sqrt((from_node.center_x - to_node.center_x) ** 2 +
                            (from_node.center_y - to_node.center_y) ** 2)
         detail = edges_detailed.get((from_idx, to_idx)) or edges_detailed.get((to_idx, from_idx))
-        edge = HospitalEdge(
+        graph_state.edges.append(GraphEdge(
             from_node=from_node.node_id,
             to_node=to_node.node_id,
             distance_m=float(detail.get("distance_m", distance)) if detail else distance,
@@ -258,29 +170,66 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
             floor_delta=int(detail.get("floor_delta", 0)) if detail else 0,
             travel_time_model=detail.get("travel_time_model") if detail else None,
             constraints=detail.get("constraints", "") if detail else ""
-        )
-        graph_state.edges.append(edge)
-
-    env = GAPOTaskAssignmentEnvReal(
-        robot_backend=robot_backend,
-        num_robots=num_robots,
-        num_nodes=num_nodes,
-        max_episode_time=max_episode_time,
-        timestep_seconds=timestep_seconds,
-        hospital_config=None,
-        stochastic_tasks_per_hour=stochastic_tasks_per_hour,
-        max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
-        initial_stochastic_tasks=initial_stochastic_tasks,
-    )
-
-    env.graph_state = graph_state
-    env._custom_graph_state = graph_state
+        ))
     graph_state.sku_database = meta.get("sku_database")
     graph_state.demand_profiles = meta.get("demand_profiles")
     graph_state.category_order = meta.get("category_order")
     graph_state.department_order = meta.get("department_order")
+    return graph_state
 
-    return env, num_nodes
+
+def create_env_from_config_file(config_path: str, num_robots: Optional[int] = None,
+                                max_episode_time: float = 28800.0,
+                                timestep_seconds: float = 1.0,
+                                stochastic_tasks_per_hour: float = 2.0,
+                                stochastic_task_cap_per_hour: int = 2,
+                                initial_stochastic_tasks: int = 0):
+    """Create a simulation environment from a config JSON file."""
+    nodes, edge_pairs, meta = load_config_from_file(config_path)
+    if num_robots is None:
+        num_robots = get_num_robots_from_config(config_path)
+    graph_state = _build_graph_state(nodes, edge_pairs, meta)
+    env = GAPOTaskAssignmentEnv(
+        num_robots=num_robots,
+        num_nodes=len(nodes),
+        max_episode_time=max_episode_time,
+        timestep_seconds=timestep_seconds,
+        stochastic_tasks_per_hour=stochastic_tasks_per_hour,
+        max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
+        initial_stochastic_tasks=initial_stochastic_tasks
+    )
+    env.graph_state = graph_state
+    env._custom_graph_state = graph_state
+    return env, len(nodes)
+
+
+def create_real_env_from_config_file(config_path: str, robot_backend,
+                                     num_robots: Optional[int] = None,
+                                     max_episode_time: float = 28800.0,
+                                     timestep_seconds: float = 1.0,
+                                     stochastic_tasks_per_hour: float = 2.0,
+                                     stochastic_task_cap_per_hour: int = 2,
+                                     initial_stochastic_tasks: int = 0):
+    """Create a real-deployment environment (GAPOTaskAssignmentEnvReal) from a config JSON file."""
+    from ..environment.gapo_env_real import GAPOTaskAssignmentEnvReal
+
+    nodes, edge_pairs, meta = load_config_from_file(config_path)
+    if num_robots is None:
+        num_robots = get_num_robots_from_config(config_path)
+    graph_state = _build_graph_state(nodes, edge_pairs, meta)
+    env = GAPOTaskAssignmentEnvReal(
+        robot_backend=robot_backend,
+        num_robots=num_robots,
+        num_nodes=len(nodes),
+        max_episode_time=max_episode_time,
+        timestep_seconds=timestep_seconds,
+        stochastic_tasks_per_hour=stochastic_tasks_per_hour,
+        max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
+        initial_stochastic_tasks=initial_stochastic_tasks,
+    )
+    env.graph_state = graph_state
+    env._custom_graph_state = graph_state
+    return env, len(nodes)
 
 
 def setup_logging_and_output(args):

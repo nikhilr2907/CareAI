@@ -15,7 +15,7 @@ class BaseMetric(ABC):
         """
         Args:
             task_logger: TaskLogger instance with cost_data
-            nodes: List of HospitalNode objects
+            nodes: List of GraphNode objects
             helpers: MetricHelpers instance
         """
         self.task_logger = task_logger
