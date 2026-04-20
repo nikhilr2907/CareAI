@@ -67,6 +67,7 @@ class GAPOPPO:
         normalize_returns=True,
         ranking_max_pairs_per_group: int = 64,
         ranking_min_adv_gap: float = 1e-4,
+        lambda_ranking: float = 0.05,
         task_creation_actor: Optional[TaskCreationActor] = None,
         lr_creation: float = 3e-4,
         lambda_creation_scorer: float = 1.0,
@@ -88,6 +89,7 @@ class GAPOPPO:
         self.min_adv_std = min_adv_std
         self.ranking_max_pairs_per_group = int(max(1, ranking_max_pairs_per_group))
         self.ranking_min_adv_gap = float(max(0.0, ranking_min_adv_gap))
+        self.lambda_ranking = float(lambda_ranking)
 
         # GAPO policy network
         self.policy = GAPOPolicyNetwork(
@@ -138,6 +140,15 @@ class GAPOPPO:
         # policy_old is used exclusively for rollout inference — keep it in eval mode
         # so any remaining dropout (e.g. critic head) is disabled during rollout.
         self.policy_old.eval()
+
+        # Compile hot paths. dynamic=True handles variable node/edge/robot counts
+        # across configs without recompiling. reduce-overhead on policy_old trades
+        # compile time for lower per-call kernel launch overhead (inference only).
+        # _forward_batched is compiled directly since evaluate_actions calls it
+        # as a method rather than going through forward().
+        if torch.cuda.is_available():
+            self.policy_old = torch.compile(self.policy_old, mode="reduce-overhead", dynamic=True)
+            self.policy._forward_batched = torch.compile(self.policy._forward_batched, dynamic=True)
 
         self.MseLoss = nn.MSELoss()
 
@@ -434,11 +445,7 @@ class GAPOPPO:
             self._state_dict_to_tensor(sd) for sd in memory.state_dicts
         ]
 
-        # Populate episode_task_features for de-biasing.
-        # During rollout, policy_old.select_action() is used rather than policy.forward(),
-        # so self.policy.episode_task_features is never filled during collection.
-        # Extract task features from stored state dicts here so the temporal_consistency
-        # and state_delta debiasing losses have real data to work with.
+        # Backfill episode_task_features for de-biasing (not filled during rollout since policy_old is used).
         if self.use_debiasing:
             self.policy.episode_task_features = [
                 sd['task_features'].detach() for sd in state_dict_tensors
@@ -474,10 +481,7 @@ class GAPOPPO:
             else:
                 next_value = torch.tensor(0.0).to(self.device)
 
-        # Compute GAE advantages from raw rewards.
-        # Advantages and returns are kept on the raw reward scale here.
-        # The critic trains on raw-scale returns (correct value targets).
-        # The actor receives separately normalized advantages (see below).
+        # GAE advantages on raw reward scale; critic trains on raw returns, actor sees normalized advantages.
         raw_advantages = self._compute_gae(
             rewards_tensor,
             values,
@@ -485,29 +489,20 @@ class GAPOPPO:
             memory.is_terminals
         )
 
-        # Critic targets: raw advantage + baseline (= discounted return estimate).
-        # These are on the same scale as the rewards, which is what the critic should predict.
-        returns = (raw_advantages + values).detach()
+        returns = (raw_advantages + values).detach()  # discounted return targets for critic
 
-        # Normalize advantages for actor gradient only.
-        # Prevents high-variance rewards from dominating gradient magnitude.
-        # If the buffer has no meaningful signal (all rewards zero, adv_std below threshold),
-        # skip scaling to avoid amplifying random critic-init noise by min_adv_std.
+        # Normalize advantages for actor only; skip scaling when adv_std is below threshold (no reward signal).
         adv_std = raw_advantages.std()
         if adv_std > self.min_adv_std:
             advantages = (raw_advantages - raw_advantages.mean()) / (adv_std + 1e-7)
         else:
-            # No meaningful signal — just mean-center without scaling.
-            # Using min_adv_std as a floor here would amplify noise 100-1000x.
-            advantages = raw_advantages - raw_advantages.mean()
+            advantages = raw_advantages - raw_advantages.mean()  # mean-center only; scaling would amplify noise
 
         self.logger.info(f"  Starting PPO update ({self.K_epochs} epochs)...")
 
         # Optimize policy for K epochs
         for epoch in range(self.K_epochs):
-            # Evaluate actions — raw_logits are live (gradient-connected) for de-biasing.
-            # graph_emb_batch / fleet_emb_batch are reused by compute_ranking_loss to avoid
-            # redundant GNN forward passes (one encode_context call per group member saved).
+            # raw_logits are gradient-connected for de-biasing; embeddings reused by compute_ranking_loss.
             logprobs, state_values, dist_entropy, raw_logits, graph_emb_batch, fleet_emb_batch = self.policy.evaluate_actions(
                 state_dict_tensors,
                 old_actions,
@@ -516,8 +511,7 @@ class GAPOPPO:
 
             state_values = state_values.squeeze(-1).clone()
 
-            # Build per-memory-index context cache for ranking loss.
-            # graph_emb_batch[i] / fleet_emb_batch[i] correspond to state_dict_tensors[i].
+            # Context cache maps memory index → (graph_emb, fleet_emb) to skip redundant GNN passes in ranking loss.
             context_cache = {
                 i: (graph_emb_batch[i], fleet_emb_batch[i])
                 for i in range(graph_emb_batch.shape[0])
@@ -555,11 +549,9 @@ class GAPOPPO:
             ranking_loss = self.compute_ranking_loss(
                 memory, state_dict_tensors, advantages, context_cache=context_cache
             )
-            lambda_ranking = 0.05
 
-            # Combined loss: actor + critic + entropy + ranking
-            # Weight critic lower to prevent dominance (critic loss often 10-100x larger)
-            actor_combined = actor_loss + entropy_loss + (lambda_ranking * ranking_loss)
+            # Combined loss: actor + critic + entropy + ranking (critic weighted lower to prevent dominance)
+            actor_combined = actor_loss + entropy_loss + (self.lambda_ranking * ranking_loss)
             critic_scaled = self.critic_coef * critic_loss
             loss = actor_combined + critic_scaled + debias_loss
 
@@ -638,23 +630,21 @@ class GAPOPPO:
             advantages: GAE advantages [T]
         """
         T = len(rewards)
-        advantages = torch.zeros(T, dtype=torch.float32).to(self.device)
-        gae = 0
 
-        # Compute GAE in reverse order
+        # Pre-compute all next values and terminal masks as tensors,
+        # eliminating all branching inside the reverse loop.
+        next_values = torch.cat([values[1:], next_value.unsqueeze(0)])
+        masks = (~torch.tensor(is_terminals, dtype=torch.bool, device=self.device)).float()
+        deltas = rewards + self.gamma * next_values * masks - values
+
+        # Sequential reverse scan — each term depends on the next so this
+        # cannot be parallelised without a parallel scan algorithm, but the
+        # loop body is now a single branchless multiply-add on scalars.
+        advantages = torch.zeros(T, dtype=torch.float32, device=self.device)
+        gae = 0.0
+        coeff = self.gamma * self.lambda_gae
         for t in reversed(range(T)):
-            if t == T - 1:
-                # Bootstrap from next state
-                next_value_t = next_value
-            else:
-                next_value_t = values[t + 1]
-
-            # TD error: δ_t = r_t + γ * V(s_{t+1}) * (1 - terminal) - V(s_t)
-            terminal_mask = 0.0 if is_terminals[t] else 1.0
-            delta = rewards[t] + self.gamma * next_value_t * terminal_mask - values[t]
-
-            # GAE: A_t = δ_t + γλ * A_{t+1} * (1 - terminal)
-            gae = delta + self.gamma * self.lambda_gae * gae * terminal_mask
+            gae = deltas[t].item() + coeff * masks[t].item() * gae
             advantages[t] = gae
 
         return advantages

@@ -113,9 +113,7 @@ class GAPOPolicyNetwork(nn.Module):
             self.debiaser = None
 
         # Episode tracking for de-biasing
-        self.episode_states = []
         self.episode_actions = []
-        self.episode_logits = []
         self.episode_task_features = []
 
     def _pool_sku_embeddings(self, node_sku_features, node_sku_mask):
@@ -147,7 +145,18 @@ class GAPOPolicyNetwork(nn.Module):
         return_attention: bool = False,
         robot_availability_mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict]]:
-        """Run the policy forward pass."""
+        """Single-sample forward pass: encode graph/robots/task, attend, and estimate value.
+
+        Args:
+            state_dict: Environment state tensors (node_continuous, robot_features, task_features, ...).
+            return_attention: If True, include attention_info dict in the return tuple.
+            robot_availability_mask: Boolean [num_robots] — False masks unavailable robots from logits.
+
+        Returns:
+            action_logits: [num_robots] unnormalised log-scores over robot choices.
+            state_value: [1] critic value estimate.
+            attention_info: Dict with attention weights, or None if return_attention=False.
+        """
         if 'node_sku_features' in state_dict and state_dict['node_sku_features'] is not None:
             sku_mask = state_dict.get('node_sku_mask', None)
             pooled = self._pool_sku_embeddings(state_dict['node_sku_features'], sku_mask)
@@ -189,14 +198,6 @@ class GAPOPolicyNetwork(nn.Module):
         ], dim=-1)
 
         state_value = self.critic(global_state)
-
-        # ===== TRACKING FOR DE-BIASING =====
-        if self.training and self.use_debiasing:
-            # Store for de-biasing loss computation
-            self.episode_logits.append(action_logits.detach().clone())
-            self.episode_task_features.append(
-                state_dict['task_features'].detach().clone()
-            )
 
         if return_attention:
             return action_logits, state_value, attention_info
@@ -378,8 +379,11 @@ class GAPOPolicyNetwork(nn.Module):
         state_dicts: List[Dict[str, torch.Tensor]],
         robot_masks: Optional[List[torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict]]:
-        """
-        Batched forward pass for PPO evaluation.
+        """Batched forward pass used by evaluate_actions during PPO updates.
+
+        Constructs a disjoint-union graph over the batch so the GNN processes all
+        samples in a single kernel launch. Returns per-sample logits, values, and
+        context embeddings (graph_emb, fleet_emb) for reuse in compute_ranking_loss.
         """
         batch_size = len(state_dicts)
         device = next(self.parameters()).device
@@ -536,8 +540,8 @@ class GAPOPolicyNetwork(nn.Module):
             debias_loss: Scalar de-biasing penalty
             loss_breakdown: Dictionary with loss components
         """
-        logits_to_use = fresh_logits if fresh_logits is not None else self.episode_logits
-        if not self.use_debiasing or len(logits_to_use) < 2:
+        logits_to_use = fresh_logits
+        if not self.use_debiasing or logits_to_use is None or len(logits_to_use) < 2:
             return torch.tensor(0.0), {}
 
         # Cap sequence length to avoid T² OOM: _compute_task_similarity builds a [T,T]
@@ -565,9 +569,7 @@ class GAPOPolicyNetwork(nn.Module):
 
     def reset_episode_tracking(self):
         """Reset episode tracking for de-biasing."""
-        self.episode_states = []
         self.episode_actions = []
-        self.episode_logits = []
         self.episode_task_features = []
 
     

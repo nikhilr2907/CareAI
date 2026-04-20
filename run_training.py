@@ -125,10 +125,7 @@ def main():
     lr = args.lr
     actor_lr = args.actor_lr if args.actor_lr is not None else lr * 1.2
     critic_lr = args.critic_lr if args.critic_lr is not None else lr * 0.5
-    gamma = 0.99  # Reduced from 1.0: bounded critic targets (vs unbounded undiscounted returns)
-    # so critic can calibrate. Also creates timing differentiation in advantages —
-    # fast completions valued more than slow ones. lambda_gae=0.95 still controls
-    # the effective advantage horizon.
+    gamma = 0.99  # Discounts future rewards: bounds critic targets, differentiates fast vs slow completions.
     K_epochs = 4
     eps_clip = 0.2
     lambda_debias = 0.1
@@ -196,34 +193,23 @@ def main():
     logger.info(f"Eval Seeds: {args.eval_seeds}")
 
     if use_curriculum:
-        logger.info(f"\nCurriculum Learning: Enabled ({curriculum_schedule} schedule)")
-        logger.info(f"  Stages: {len(curriculum_configs)} configurations")
+        logger.info(f"Curriculum Learning: Enabled ({curriculum_schedule} schedule), {len(curriculum_configs)} stages")
         if curriculum_schedule == 'fixed':
-            print(f"  Switch interval: {config_switch_interval} iterations")
+            logger.info(f"  Switch interval: {config_switch_interval} iterations")
         elif curriculum_schedule == 'adaptive':
-            print(f"  Performance threshold: {performance_threshold} avg reward")
-
-        print("\n  Config List:")
+            logger.info(f"  Performance threshold: {performance_threshold} avg reward")
         for idx, (path, desc) in enumerate(curriculum_configs):
-            print(f"    {idx + 1}. {desc} ({path})")
+            logger.info(f"  Config {idx + 1}: {desc} ({path})")
     else:
-        print("\nSingle Config Training:")
-        print(f"  Config: {curriculum_configs[0][1]} ({curriculum_configs[0][0]})")
+        logger.info(f"Single Config Training: {curriculum_configs[0][1]} ({curriculum_configs[0][0]})")
 
-    print("=" * 80)
+    logger.info("=" * 80)
 
-    # Helper function to create environment with config
     def create_env_with_config(config_idx):
-        """Create environment with specified config."""
+        """Create environment from curriculum config at the given index."""
         config_path, config_desc = curriculum_configs[config_idx]
-
-        print(f"\n{'='*80}")
-        if use_curriculum:
-            print(f"Loading Config {config_idx + 1}/{len(curriculum_configs)}: {config_desc}")
-        else:
-            print(f"Loading Config: {config_desc}")
-        print(f"  Path: {config_path}")
-        print(f"{'='*80}")
+        label = f"Config {config_idx + 1}/{len(curriculum_configs)}: {config_desc}" if use_curriculum else f"Config: {config_desc}"
+        logger.info(f"Loading {label} ({config_path})")
 
         env, num_nodes = create_env_from_config_file(
             config_path,
@@ -235,19 +221,11 @@ def main():
             initial_stochastic_tasks=initial_stochastic_tasks
         )
 
-        print(f"  Nodes: {num_nodes}")
-        print(f"  Robots: {env.num_robots}")
-        print(f"  Edges: {len(env.graph_state.edges)}")
-
-        # Print category info if available
         total_categories = set()
         for node in env.graph_state.nodes:
             total_categories.update(node.get_all_categories())
-
-        if total_categories:
-            print(f"  Categories: {len(total_categories)} - {', '.join(sorted(total_categories))}")
-
-        print(f"{'='*80}")
+        cat_str = f", categories={len(total_categories)}" if total_categories else ""
+        logger.info(f"  nodes={num_nodes} robots={env.num_robots} edges={len(env.graph_state.edges)}{cat_str}")
 
         return env, config_desc
 
@@ -324,17 +302,10 @@ def main():
 
     # Training metrics
     memory = Memory()
-    # Maps original task_id -> memory buffer index at assignment time.
-    # Used to route task completion bonuses back to the decision that caused them,
-    # rather than distributing them to whatever assignments happen at completion time.
-    task_to_memory_idx: dict = {}
-    # Carry-over credit buffer: holds the original (s, a, logprob, mask) for every
-    # assigned task that has not yet completed.  Survives memory.clear_memory() so
-    # cross-rollout completions can be attributed to the correct causal tuple rather
-    # than being misrouted to unrelated current-step assignments.
-    open_assignments: dict = {}   # parent_task_id -> {state, action, logprob, mask, reward, born_iter}
-    closed_buffer: list = []      # completed open_assignment entries ready for next PPO update
-    OPEN_ASSIGNMENT_TTL = 5       # drop entries older than this many rollouts (stuck/lost tasks)
+    task_to_memory_idx: dict = {}  # task_id -> memory index at assignment; routes completion bonuses to causal slot
+    open_assignments: dict = {}    # parent_task_id -> {state, action, logprob, mask, reward, born_iter}; survives clear_memory()
+    closed_buffer: list = []       # completed open_assignment entries ready for next PPO update
+    OPEN_ASSIGNMENT_TTL = 5        # discard open_assignments entries older than this many rollouts (stuck/lost tasks)
     running_reward = 0
     iteration_rewards = []
     config_rewards = []
@@ -358,15 +329,13 @@ def main():
     state_dict = env.reset()
     
     for iteration in range(1, max_training_iterations + 1):
-        print(f"=== ITERATION {iteration} START ===", flush=True)
+        logger.debug(f"Iteration {iteration} start")
 
         try:
             if device == 'cuda':
                 torch.cuda.synchronize()
         except Exception as e:
-            print(f"!!! CUDA SYNC ERROR at iteration {iteration}: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+            logger.error(f"CUDA sync error at iteration {iteration}: {e}", exc_info=True)
             raise
 
         if iteration <= warmup_iters:
@@ -386,8 +355,6 @@ def main():
         # Collect rollout_steps timesteps of experience
         for step in range(rollout_steps):
             total_timesteps += 1
-            # if step % 10 == 0:  # Print every 10 steps
-            #     print(f"  Step {step}/{rollout_steps}", flush=True)
 
             # Re-rank pending tasks using context-aware scorer with stochastic ranking
             if env.pending_tasks:
@@ -449,12 +416,13 @@ def main():
                     else:
                         action = ppo.select_action(state_dict, memory, robot_mask)
                 except Exception as e:
-                    print(f"!!! ACTION SELECTION ERROR at iter {iteration}, step {step}: {type(e).__name__}: {e}", flush=True)
-                    import traceback
-                    traceback.print_exc()
-                    print(f"!!! State dict keys: {state_dict.keys()}", flush=True)
-                    print(f"!!! Shapes: nodes={state_dict.get('node_continuous', torch.tensor([])).shape}, "
-                          f"edges={state_dict.get('edge_features', torch.tensor([])).shape}", flush=True)
+                    logger.error(
+                        f"Action selection error at iter={iteration} step={step}: {type(e).__name__}: {e} | "
+                        f"state keys={list(state_dict.keys())} "
+                        f"nodes={state_dict.get('node_continuous', np.array([])).shape} "
+                        f"edges={state_dict.get('edge_features', np.array([])).shape}",
+                        exc_info=True
+                    )
                     raise
 
                 # Track this assignment's memory index
@@ -467,9 +435,7 @@ def main():
                 # Record which memory slot this task was assigned from, so
                 # its completion bonus can be routed back here later.
                 task_to_memory_idx[task.task_id] = mem_idx_before
-                # Preserve the original (s, a, logprob) for cross-rollout credit.
-                # If the task completes after memory.clear_memory(), this entry
-                # is the only way to route the bonus to the causal decision.
+                # Preserve (s, a, logprob) in open_assignments so cross-rollout completions can route bonus to causal decision.
                 feasibility = (task.deadline - env.current_time) / max(task.estimated_duration, 1.0) - 1.0
                 assignment_reward = 0.5 * max(-1.0, min(1.0, feasibility))
                 open_assignments[task.task_id] = {
@@ -523,9 +489,7 @@ def main():
                     f"parent_ids=[{', '.join(str(p) for p in list(task_completion_credits.keys())[:5])}...]"
                 )
 
-            # Route each completion bonus to the memory slot of the original assignment.
-            # If the task was assigned in a previous rollout (memory cleared), fall back
-            # to the closed_buffer cross-rollout mechanism.
+            # Route each completion bonus to the causal memory slot; cross-rollout completions go via closed_buffer.
             for parent_id, bonus in task_completion_credits.items():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
@@ -559,43 +523,28 @@ def main():
                 iteration_reward += scaled_bonus
                 orig_idx = task_to_memory_idx.get(parent_id)
                 if orig_idx is not None:
-                    # In-rollout completion: combine assignment_reward + completion bonus
-                    # into the causal memory slot, then remove from open_assignments.
+                    # In-rollout: write combined reward to causal memory slot.
                     entry = open_assignments.pop(parent_id, None)
                     a_rew = entry['assignment_reward'] if entry else 0.0
                     memory.rewards[orig_idx] = a_rew + scaled_bonus
                 else:
-                    # Cross-rollout completion: combine assignment_reward + completion bonus
-                    # into the closed_buffer entry so the tuple is trained exactly once
-                    # with its full reward signal.
+                    # Cross-rollout: push to closed_buffer for next PPO update; else credit dropped (predates tracking).
                     entry = open_assignments.pop(parent_id, None)
                     if entry is not None:
                         entry['reward'] = entry['assignment_reward'] + scaled_bonus
                         closed_buffer.append(entry)
-                    # else: task predates open_assignments tracking → credit dropped
 
 
 
             if done:
                 state_dict = env.reset()
-                # Task IDs are reset on env.reset(), so clear the mapping to avoid
-                # routing completion bonuses to stale memory indices next episode.
-                task_to_memory_idx.clear()
-                # Episode boundary invalidates all open assignments: task IDs will
-                # be reused and robot/graph state is fully reset.
-                open_assignments.clear()
-                # Clear task logger metadata to avoid stale task_ids from previous episode
+                task_to_memory_idx.clear()    # task IDs reused after reset
+                open_assignments.clear()      # episode boundary invalidates all open assignments
                 task_logger.task_metadata.clear()
-                # Only mark terminal on true episode ends — rollout boundaries are NOT
-                # terminals (environment continues) so next_value bootstrap must flow through
                 if len(memory.is_terminals) > 0:
-                    memory.is_terminals[-1] = True
+                    memory.is_terminals[-1] = True  # only true episode ends are terminals (not rollout boundaries)
 
-        # Inject carry-over completion entries from previous rollouts.
-        # Each entry holds the original (s, a, logprob) from when the task was
-        # assigned.  is_terminals=True makes GAE compute a single-step advantage
-        # (r - V(s)) for each entry without bootstrapping into the new rollout data,
-        # which is correct since the task is fully resolved at this point.
+        # Inject cross-rollout entries; is_terminals=True gives single-step GAE without bootstrapping.
         for entry in closed_buffer:
             if iteration - entry['born_iter'] <= OPEN_ASSIGNMENT_TTL:
                 memory.state_dicts.append(entry['state'])
@@ -606,11 +555,7 @@ def main():
                 memory.robot_masks.append(entry['mask'])
         closed_buffer.clear()
 
-        # Remove memory entries for tasks assigned this rollout that did NOT complete.
-        # Those entries have reward=0 and their actual completion bonus will arrive
-        # via closed_buffer in a future rollout.  Including them now would:
-        #   (a) train the critic to predict near-zero value for assignment states, and
-        #   (b) double-count the gradient when the real reward arrives later.
+        # Strip incomplete-task entries (reward=0) from memory; their bonus arrives via closed_buffer later.
         if open_assignments and task_to_memory_idx:
             pending_mem_indices = {
                 task_to_memory_idx[tid]
@@ -637,24 +582,22 @@ def main():
 
         # Update policy
         next_state_dict = state_dict
-        print(f">>> PPO update (buffer={buffer_size})...", flush=True)
+        logger.debug(f"PPO update: buffer={buffer_size}")
         if buffer_size < 2:
-            print(f"  Skipping PPO update: buffer too small ({buffer_size} samples)", flush=True)
+            logger.warning(f"Skipping PPO update at iter={iteration}: buffer too small ({buffer_size} samples)")
         else:
             try:
                 ppo.update(memory, next_state_dict)
             except Exception as e:
-                print(f"!!! PPO UPDATE ERROR at iteration {iteration}: {type(e).__name__}: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
-                print(f"!!! Buffer info: {len(memory.actions)} actions, {len(memory.state_dicts)} states", flush=True)
+                logger.error(
+                    f"PPO update error at iteration {iteration}: {type(e).__name__}: {e} | "
+                    f"buffer: {len(memory.actions)} actions, {len(memory.state_dicts)} states",
+                    exc_info=True
+                )
                 raise
         memory.clear_memory()
-        # Memory indices are now invalid; clear the task mapping so stale entries
-        # from this rollout don't pollute the next one's credit attribution.
-        task_to_memory_idx.clear()
-        # Prune open_assignments entries that have exceeded their TTL.
-        # These are tasks assigned but never completed (e.g. stuck robots).
+        task_to_memory_idx.clear()  # indices invalid after clear; reset before next rollout
+        # Prune open_assignments beyond TTL (stuck/lost tasks that never completed).
         stale_ids = [
             pid for pid, e in open_assignments.items()
             if iteration - e['born_iter'] > OPEN_ASSIGNMENT_TTL
@@ -704,7 +647,6 @@ def main():
             config_rewards = []
             iterations_on_current_config = 0
 
-        # Brief loss metrics (every iteration for audit)
         loss_info_current = ppo.get_last_loss_info()
         if loss_info_current:
             logger.info(
