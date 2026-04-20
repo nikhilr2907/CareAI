@@ -84,6 +84,7 @@ class RobotBridgeWebSocketClient:
         self.on_location_inventory: Optional[Callable] = None
         self.on_system_state: Optional[Callable] = None
         self.on_connection_lost: Optional[Callable] = None
+        self.on_emergency_stop: Optional[Callable] = None
 
         logger.info(f"ROS Bridge Client initialized (not connected) - bridge URL: {bridge_url}")
 
@@ -149,6 +150,8 @@ class RobotBridgeWebSocketClient:
             logger.debug("Ignoring deprecated message type: consumption_rates")
         elif msg_type == 'system_state':
             await self._handle_system_state(data)
+        elif msg_type == 'emergency_stop':
+            await self._handle_emergency_stop(data)
         else:
             logger.warning(f"Unknown message type: {msg_type}")
 
@@ -259,6 +262,13 @@ class RobotBridgeWebSocketClient:
             logger.debug(f"System state updated: {len(inventories)} locations")
         except Exception as e:
             logger.error(f"Error parsing system state: {e}")
+
+    async def _handle_emergency_stop(self, data: Dict):
+        """Handle emergency stop signal. Fires on_emergency_stop callback when active=True."""
+        active = data.get('active', True)
+        logger.critical(f"Emergency stop received: active={active}")
+        if active and self.on_emergency_stop:
+            await self._call_callback(self.on_emergency_stop, data)
 
     async def _call_callback(self, callback: Callable, data: Any):
         """Safely call a callback (sync or async)."""

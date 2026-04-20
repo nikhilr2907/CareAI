@@ -6,6 +6,7 @@ import logging
 import asyncio
 import math
 import os
+import signal
 
 
 @dataclass
@@ -196,6 +197,10 @@ class ROSBridgeRobotBackend(RobotBackend):
         # Per-robot completion queue — drained each step by gapo_env_real
         self._completed_task_queue: Dict[int, Any] = {i: deque() for i in range(num_robots)}
 
+        # Emergency stop state — set True when an active emergency_stop is received.
+        # The deployment loop can also poll this flag before sending new commands.
+        self.emergency_stop_triggered: bool = False
+
         # Create one WebSocket client and dispatcher per robot.
         for robot_id in range(num_robots):
             client = _WebSocketClient(bridge_url=bridge_url)
@@ -222,6 +227,7 @@ class ROSBridgeRobotBackend(RobotBackend):
                     await self._handle_task_status(rid, data)
                 return handler
             client.on_task_status = make_task_status_handler(robot_id)
+            client.on_emergency_stop = self._handle_emergency_stop
             task = asyncio.create_task(self._listen_with_reconnect(robot_id, client))
             self._listen_tasks[robot_id] = task
         self._logger.info(f"ROSBridgeRobotBackend started: {self._num_robots} robot(s)")
@@ -309,6 +315,14 @@ class ROSBridgeRobotBackend(RobotBackend):
                 f"Robot {robot_id}: task {task_id} in progress "
                 f"{data.get('progress_percent', 0):.1f}%"
             )
+
+    async def _handle_emergency_stop(self, data: Dict) -> None:
+        """Terminate the process immediately when an active emergency stop is received."""
+        self.emergency_stop_triggered = True
+        self._logger.critical(
+            "EMERGENCY STOP received — terminating deployment process immediately."
+        )
+        os.kill(os.getpid(), signal.SIGTERM)
 
     def set_graph_state(self, graph_state: Any) -> None:
         """
