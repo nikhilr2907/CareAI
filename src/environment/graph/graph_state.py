@@ -1,68 +1,21 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 import numpy as np
-from .node import HospitalNode
-from .edge import HospitalEdge
-from .hospital_config import HospitalConfig
+from .node import GraphNode
+from .edge import GraphEdge
 
 
 @dataclass
 class GraphState:
-    """Represents the hospital graph structure (nodes + edges)."""
-    nodes: List[HospitalNode] = field(default_factory=list)
-    edges: List[HospitalEdge] = field(default_factory=list)
-    config: Optional[HospitalConfig] = None
+    """Represents the graph structure (nodes + edges)."""
+    nodes: List[GraphNode] = field(default_factory=list)
+    edges: List[GraphEdge] = field(default_factory=list)
     sku_database: Optional[dict] = None
     demand_profiles: Optional[dict] = None
     category_order: Optional[List[str]] = None
     department_order: Optional[List[str]] = None
     current_time: float = 0.0
     consumption_scale: float = 1.0
-
-    def __post_init__(self):
-        """Create hospital graph from config, or use default if none provided."""
-        if not self.nodes:
-            if self.config is None:
-                # Use default configuration
-                self.config = HospitalConfig()
-            self._create_nodes_from_config()
-        if not self.edges:
-            self._create_edges_from_config()
-
-    def _create_nodes_from_config(self):
-        """Create nodes from configuration."""
-        for node_config in self.config.nodes:
-            params = self.config.get_node_params(node_config)
-            node = HospitalNode(**params)
-            self.nodes.append(node)
-
-    def _create_edges_from_config(self):
-        """Create edges from configuration."""
-        for from_idx, to_idx in self.config.edges:
-            from_node = self.nodes[from_idx]
-            to_node = self.nodes[to_idx]
-
-            # Entry/exit points (simplified: use centers)
-            entry_point = (from_node.center_x, from_node.center_y)
-            exit_point = (to_node.center_x, to_node.center_y)
-
-            # Calculate distance
-            distance = np.sqrt((from_node.center_x - to_node.center_x)**2 +
-                             (from_node.center_y - to_node.center_y)**2)
-
-            edge = HospitalEdge(
-                from_node=from_node.node_id,
-                to_node=to_node.node_id,
-                distance_m=distance,
-                corridor_width=1.9,
-                entry_point=entry_point,
-                exit_point=exit_point,
-                max_v_ms=0.5,
-                clutter_level=np.random.random() * 0.3,
-                active_robot_ids=[],
-                has_patient_bed=np.random.random() < 0.1
-            )
-            self.edges.append(edge)
 
     def get_node_features(self) -> np.ndarray:
         """
@@ -481,7 +434,7 @@ class GraphState:
                 return (node.center_x, node.center_y)
         return (0.0, 0.0)
 
-    def get_node_by_index(self, idx: int) -> HospitalNode:
+    def get_node_by_index(self, idx: int) -> GraphNode:
         """Get node by index."""
         if 0 <= idx < len(self.nodes):
             return self.nodes[idx]

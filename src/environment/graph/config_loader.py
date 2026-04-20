@@ -1,17 +1,17 @@
-"""Load hospital configs into ``HospitalNode`` objects."""
+"""Load hospital configs into ``GraphNode`` objects."""
 from pathlib import Path
 from typing import List, Tuple, Dict
 import json
 import logging
 
-from .node import HospitalNode
+from .node import GraphNode
 from .mock_config_parser import MockConfigParser
 from .extended_config_parser import ExtendedConfigParser
 
 logger = logging.getLogger(__name__)
 
 
-def load_config_from_file(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[int, int]], Dict]:
+def load_config_from_file(config_path: str) -> Tuple[List[GraphNode], List[Tuple[int, int]], Dict]:
     """Load a config file and return nodes, edges, and metadata."""
     config_path = Path(config_path)
     if not config_path.exists():
@@ -84,7 +84,7 @@ def _build_category_multipliers(raw_data: Dict) -> Dict[str, Dict[str, float]]:
     return multipliers
 
 
-def _load_v3_config(raw_data: Dict) -> Tuple[List[HospitalNode], List[Tuple[int, int]], Dict]:
+def _load_v3_config(raw_data: Dict) -> Tuple[List[GraphNode], List[Tuple[int, int]], Dict]:
     """Load a v3 config."""
     item_database = raw_data.get("item_database", {})
     sku_to_category = {}
@@ -142,7 +142,7 @@ def _load_v3_config(raw_data: Dict) -> Tuple[List[HospitalNode], List[Tuple[int,
                 if department_tag is None:
                     department_tag = demand_ctx.get("department_tag", ctx.get("department_tag"))
 
-        node = HospitalNode(
+        node = GraphNode(
             node_id=f"node_{node_data['id']}",
             node_type=node_data["type"],
             center_x=node_data["pos"][0],
@@ -228,7 +228,7 @@ def _load_v3_config(raw_data: Dict) -> Tuple[List[HospitalNode], List[Tuple[int,
     return nodes, edge_pairs, meta
 
 
-def _load_mock_config(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[int, int]]]:
+def _load_mock_config(config_path: str) -> Tuple[List[GraphNode], List[Tuple[int, int]]]:
     """Load a mock config."""
     parser = MockConfigParser(config_path)
 
@@ -253,7 +253,7 @@ def _load_mock_config(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[
         total_max_stock = sum(cat.max_stock for cat in mock_node.category_inventory.values())
         total_consumption = sum(cat.consumption_rate for cat in mock_node.category_inventory.values())
 
-        node = HospitalNode(
+        node = GraphNode(
             node_id=f"node_{mock_node.node_id}",
             node_type=mock_node.node_type,
             center_x=mock_node.pos[0],
@@ -285,7 +285,7 @@ def _load_mock_config(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[
     return nodes, edge_pairs
 
 
-def _load_extended_config(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[int, int]]]:
+def _load_extended_config(config_path: str) -> Tuple[List[GraphNode], List[Tuple[int, int]]]:
     """Load an extended config."""
     parser = ExtendedConfigParser(config_path)
 
@@ -304,7 +304,7 @@ def _load_extended_config(config_path: str) -> Tuple[List[HospitalNode], List[Tu
         total_max_stock = sum(cat.max_stock for cat in ext_node.inventory_categories.values())
         total_consumption = sum(cat.consumption_rate for cat in ext_node.inventory_categories.values())
 
-        node = HospitalNode(
+        node = GraphNode(
             node_id=ext_node.node_id,
             node_type=ext_node.node_type,
             center_x=ext_node.pos[0],
@@ -334,7 +334,7 @@ def _load_extended_config(config_path: str) -> Tuple[List[HospitalNode], List[Tu
     return nodes, edge_pairs
 
 
-def _load_simple_config(config_path: str) -> Tuple[List[HospitalNode], List[Tuple[int, int]]]:
+def _load_simple_config(config_path: str) -> Tuple[List[GraphNode], List[Tuple[int, int]]]:
     """Load a legacy config."""
     with open(config_path, 'r') as f:
         data = json.load(f)
@@ -356,7 +356,7 @@ def _load_simple_config(config_path: str) -> Tuple[List[HospitalNode], List[Tupl
             consumption_rate = 0.0
             max_stock = 0.0
 
-        node = HospitalNode(
+        node = GraphNode(
             node_id=f"node_{node_data['id']}",
             node_type=node_type,
             center_x=node_data['pos'][0],

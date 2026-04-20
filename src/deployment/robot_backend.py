@@ -6,6 +6,7 @@ import logging
 import asyncio
 import math
 import os
+import signal
 
 
 @dataclass
@@ -196,6 +197,10 @@ class ROSBridgeRobotBackend(RobotBackend):
         # Per-robot completion queue — drained each step by gapo_env_real
         self._completed_task_queue: Dict[int, Any] = {i: deque() for i in range(num_robots)}
 
+        # Emergency stop state — set True when an active emergency_stop is received.
+        # The deployment loop can also poll this flag before sending new commands.
+        self.emergency_stop_triggered: bool = False
+
         # Create one WebSocket client and dispatcher per robot.
         for robot_id in range(num_robots):
             client = _WebSocketClient(bridge_url=bridge_url)
@@ -222,6 +227,7 @@ class ROSBridgeRobotBackend(RobotBackend):
                     await self._handle_task_status(rid, data)
                 return handler
             client.on_task_status = make_task_status_handler(robot_id)
+            client.on_emergency_stop = self._handle_emergency_stop
             task = asyncio.create_task(self._listen_with_reconnect(robot_id, client))
             self._listen_tasks[robot_id] = task
         self._logger.info(f"ROSBridgeRobotBackend started: {self._num_robots} robot(s)")
@@ -310,6 +316,14 @@ class ROSBridgeRobotBackend(RobotBackend):
                 f"{data.get('progress_percent', 0):.1f}%"
             )
 
+    async def _handle_emergency_stop(self, data: Dict) -> None:
+        """Terminate the process immediately when an active emergency stop is received."""
+        self.emergency_stop_triggered = True
+        self._logger.critical(
+            "EMERGENCY STOP received — terminating deployment process immediately."
+        )
+        os.kill(os.getpid(), signal.SIGTERM)
+
     def set_graph_state(self, graph_state: Any) -> None:
         """
         Provide graph context so task submitters can resolve node indices to (x,y).
@@ -365,8 +379,8 @@ class ROSBridgeRobotBackend(RobotBackend):
         Command a robot to follow a path (list of node indices).
 
         Schedules the WebSocket task send asynchronously. This method is synchronous
-        to match the RobotBackend interface, but internally uses asyncio.ensure_future()
-        if an event loop is running, or asyncio.run_until_complete() otherwise.
+        to match the RobotBackend interface, but fires the coroutine into the running
+        event loop via create_task(), or falls back to asyncio.run() for sync callers.
 
         Args:
             robot_id: Robot identifier
@@ -376,15 +390,11 @@ class ROSBridgeRobotBackend(RobotBackend):
         """
         coro = self._async_send_path_command(robot_id, path, task_id, num_items)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Deployment context: event loop already running (async task)
-                asyncio.ensure_future(coro)
-            else:
-                # Fallback: blocking send for sync callers (e.g. test scripts)
-                loop.run_until_complete(coro)
+            loop = asyncio.get_running_loop()
+            # Deployment context: called from within a running event loop.
+            loop.create_task(coro)
         except RuntimeError:
-            # No event loop in current thread — create one
+            # No running event loop — sync caller (e.g. test scripts).
             asyncio.run(coro)
         except Exception as e:
             self._logger.error(

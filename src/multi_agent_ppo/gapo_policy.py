@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Dict, Tuple, Optional, List
 import numpy as np
 
-from .gapo_gnn_encoders import HospitalGraphEncoder, RobotFleetEncoder, TaskEncoder
+from .gapo_gnn_encoders import GraphEncoder, RobotFleetEncoder, TaskEncoder
 from .gapo_attention import GAPOAttentionModule
 from .debiasing import ComprehensiveDebiasing
 
@@ -41,7 +41,7 @@ class GAPOPolicyNetwork(nn.Module):
         self.sku_feat_dim = sku_feat_dim
 
         # ===== ENCODERS =====
-        self.hospital_encoder = HospitalGraphEncoder(
+        self.graph_encoder = GraphEncoder(
             node_continuous_dim=node_continuous_dim,
             num_node_types=num_node_types,
             num_departments=num_departments,
@@ -113,9 +113,7 @@ class GAPOPolicyNetwork(nn.Module):
             self.debiaser = None
 
         # Episode tracking for de-biasing
-        self.episode_states = []
         self.episode_actions = []
-        self.episode_logits = []
         self.episode_task_features = []
 
     def _pool_sku_embeddings(self, node_sku_features, node_sku_mask):
@@ -155,7 +153,7 @@ class GAPOPolicyNetwork(nn.Module):
                 state_dict = dict(state_dict)
                 state_dict['node_continuous'] = torch.cat([state_dict['node_continuous'], pooled], dim=-1)
 
-        node_embeddings, edge_embeddings, graph_embedding = self.hospital_encoder(
+        node_embeddings, edge_embeddings, graph_embedding = self.graph_encoder(
             state_dict['node_continuous'],
             state_dict['node_categorical'],
             state_dict['edge_features'],
@@ -190,14 +188,6 @@ class GAPOPolicyNetwork(nn.Module):
 
         state_value = self.critic(global_state)
 
-        # ===== TRACKING FOR DE-BIASING =====
-        if self.training and self.use_debiasing:
-            # Store for de-biasing loss computation
-            self.episode_logits.append(action_logits.detach().clone())
-            self.episode_task_features.append(
-                state_dict['task_features'].detach().clone()
-            )
-
         if return_attention:
             return action_logits, state_value, attention_info
         else:
@@ -226,7 +216,7 @@ class GAPOPolicyNetwork(nn.Module):
                 state_dict = dict(state_dict)
                 state_dict['node_continuous'] = torch.cat([state_dict['node_continuous'], pooled], dim=-1)
 
-        node_embeddings, _, graph_embedding = self.hospital_encoder(
+        node_embeddings, _, graph_embedding = self.graph_encoder(
             state_dict['node_continuous'],
             state_dict['node_categorical'],
             state_dict['edge_features'],
@@ -469,7 +459,7 @@ class GAPOPolicyNetwork(nn.Module):
         edge_features = edge_features.view(batch_size * num_edges, -1)
 
         # Encode hospital graph
-        node_embeddings, _, _ = self.hospital_encoder(
+        node_embeddings, _, _ = self.graph_encoder(
             node_continuous,
             node_categorical,
             edge_features,
@@ -536,8 +526,8 @@ class GAPOPolicyNetwork(nn.Module):
             debias_loss: Scalar de-biasing penalty
             loss_breakdown: Dictionary with loss components
         """
-        logits_to_use = fresh_logits if fresh_logits is not None else self.episode_logits
-        if not self.use_debiasing or len(logits_to_use) < 2:
+        logits_to_use = fresh_logits
+        if not self.use_debiasing or logits_to_use is None or len(logits_to_use) < 2:
             return torch.tensor(0.0), {}
 
         # Cap sequence length to avoid T² OOM: _compute_task_similarity builds a [T,T]
@@ -565,9 +555,7 @@ class GAPOPolicyNetwork(nn.Module):
 
     def reset_episode_tracking(self):
         """Reset episode tracking for de-biasing."""
-        self.episode_states = []
         self.episode_actions = []
-        self.episode_logits = []
         self.episode_task_features = []
 
     

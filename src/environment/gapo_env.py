@@ -2,7 +2,6 @@ import numpy as np
 from typing import List, Dict, Optional
 
 from .graph.graph_state import GraphState
-from .graph.hospital_config import HospitalConfig
 from .robot.robot_state import RobotState, create_default_robot
 from .robot.robot_simulator import RobotSimulator
 from .tasks.task_state import Task
@@ -25,7 +24,6 @@ class GAPOTaskAssignmentEnv:
         num_nodes=10,
         max_episode_time=28800.0,
         timestep_seconds=1.0,
-        hospital_config: Optional[HospitalConfig] = None,
         stochastic_tasks_per_hour: float = 2.0,
         max_stochastic_tasks_per_hour: int = 2,
         initial_stochastic_tasks: int = 0,
@@ -38,7 +36,6 @@ class GAPOTaskAssignmentEnv:
         self.num_nodes = num_nodes
         self.max_episode_time = max_episode_time
         self.timestep_seconds = timestep_seconds
-        self.hospital_config = hospital_config  # Optional custom config
 
         # Environment components
         self.graph_state = None
@@ -119,8 +116,9 @@ class GAPOTaskAssignmentEnv:
             for node in self.graph_state.nodes:
                 node.current_robot_ids = []
         else:
-            # Create new graph from hospital_config or default
-            self.graph_state = GraphState(config=self.hospital_config)
+            raise RuntimeError(
+                "No graph config loaded. Call create_env_from_config_file() before reset()."
+            )
 
         # Calculate graph bounds for position validation
         if self.graph_state and self.graph_state.nodes:
@@ -737,7 +735,7 @@ class GAPOTaskAssignmentEnv:
             # D: Utilization bonus on dropoff
             # Encourage efficient batching (more items per trip)
             if task.leg_type == 'dropoff' and robot:
-                load_ratio = robot.effective_load / max(robot.max_capacity, 1.0)
+                load_ratio = robot.current_load / max(robot.max_capacity, 1.0)
                 task_reward += 2.0 * load_ratio
 
             # F: Depletion penalty - deduct if robot is critically low on battery at task end
@@ -747,7 +745,7 @@ class GAPOTaskAssignmentEnv:
                     task_reward -= self.battery_critical_task_penalty
 
             parent_id = getattr(task, 'parent_task_id', None)
-            if parent_id is not None:
+            if parent_id is not None and task.leg_type == "dropoff":
                 self._last_per_task_credits[parent_id] = task_reward
             total_reward += task_reward
 

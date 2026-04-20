@@ -8,7 +8,7 @@ from typing import Tuple, Optional
 from torch_geometric.nn import GATConv, SAGEConv
 
 
-class HospitalGraphEncoder(nn.Module):
+class GraphEncoder(nn.Module):
 
     def __init__(
         self,
@@ -209,6 +209,21 @@ class HospitalGraphEncoder(nn.Module):
         # Final edge embeddings
         edge_embeddings = self.edge_encoder(augmented_edge_features)  # [num_edges, 64]
 
+        # Scatter edge embeddings back to destination nodes and residual-add.
+        # This enriches each node's embedding with the traversal costs of corridors
+        # leading into it, giving TaskNodeAttention implicit path quality signal.
+        # Nodes with no incoming edges are unaffected (scatter produces zero → +0).
+        num_nodes_final = node_embeddings.shape[0]
+        edge_to_node = edge_node_indices[:, 1]  # destination node per edge [num_edges]
+        edge_dim = edge_embeddings.shape[1]
+        node_edge_agg = torch.zeros(num_nodes_final, edge_dim, device=edge_embeddings.device, dtype=edge_embeddings.dtype)
+        edge_counts = torch.zeros(num_nodes_final, 1, device=edge_embeddings.device, dtype=edge_embeddings.dtype)
+        idx = edge_to_node.unsqueeze(1).expand(-1, edge_dim)
+        node_edge_agg.scatter_add_(0, idx, edge_embeddings)
+        edge_counts.scatter_add_(0, edge_to_node.unsqueeze(1), torch.ones(edge_embeddings.shape[0], 1, device=edge_embeddings.device, dtype=edge_embeddings.dtype))
+        node_edge_agg = node_edge_agg / edge_counts.clamp(min=1.0)  # [num_nodes, 64]
+        node_embeddings = node_embeddings + node_edge_agg
+
         # Global graph embedding (mean pooling)
         graph_embedding = torch.mean(node_embeddings, dim=0)
 
@@ -395,7 +410,7 @@ def test_encoders():
 
     # Test Hospital Graph Encoder (with complete features)
     print("\n1. Hospital Graph Encoder (Two-Pass with Fine-Grained Categorical Embeddings)")
-    hospital_encoder = HospitalGraphEncoder(
+    hospital_encoder = GraphEncoder(
         node_continuous_dim=24,  # UPDATED: includes temporal features
         num_node_types=4,
         num_departments=10,

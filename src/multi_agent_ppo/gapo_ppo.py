@@ -67,6 +67,7 @@ class GAPOPPO:
         normalize_returns=True,
         ranking_max_pairs_per_group: int = 64,
         ranking_min_adv_gap: float = 1e-4,
+        lambda_ranking: float = 0.05,
         task_creation_actor: Optional[TaskCreationActor] = None,
         lr_creation: float = 3e-4,
         lambda_creation_scorer: float = 1.0,
@@ -88,6 +89,7 @@ class GAPOPPO:
         self.min_adv_std = min_adv_std
         self.ranking_max_pairs_per_group = int(max(1, ranking_max_pairs_per_group))
         self.ranking_min_adv_gap = float(max(0.0, ranking_min_adv_gap))
+        self.lambda_ranking = float(lambda_ranking)
 
         # GAPO policy network
         self.policy = GAPOPolicyNetwork(
@@ -138,6 +140,15 @@ class GAPOPPO:
         # policy_old is used exclusively for rollout inference — keep it in eval mode
         # so any remaining dropout (e.g. critic head) is disabled during rollout.
         self.policy_old.eval()
+
+        # Compile hot paths. dynamic=True handles variable node/edge/robot counts
+        # across configs without recompiling. reduce-overhead on policy_old trades
+        # compile time for lower per-call kernel launch overhead (inference only).
+        # _forward_batched is compiled directly since evaluate_actions calls it
+        # as a method rather than going through forward().
+        if torch.cuda.is_available():
+            self.policy_old = torch.compile(self.policy_old, mode="reduce-overhead", dynamic=True)
+            self.policy._forward_batched = torch.compile(self.policy._forward_batched, dynamic=True)
 
         self.MseLoss = nn.MSELoss()
 
@@ -555,11 +566,8 @@ class GAPOPPO:
             ranking_loss = self.compute_ranking_loss(
                 memory, state_dict_tensors, advantages, context_cache=context_cache
             )
-            lambda_ranking = 0.05
-
-            # Combined loss: actor + critic + entropy + ranking
-            # Weight critic lower to prevent dominance (critic loss often 10-100x larger)
-            actor_combined = actor_loss + entropy_loss + (lambda_ranking * ranking_loss)
+            # Combined loss: actor + critic + entropy + ranking (critic weighted lower to prevent dominance)
+            actor_combined = actor_loss + entropy_loss + (self.lambda_ranking * ranking_loss)
             critic_scaled = self.critic_coef * critic_loss
             loss = actor_combined + critic_scaled + debias_loss
 
@@ -638,23 +646,21 @@ class GAPOPPO:
             advantages: GAE advantages [T]
         """
         T = len(rewards)
-        advantages = torch.zeros(T, dtype=torch.float32).to(self.device)
-        gae = 0
 
-        # Compute GAE in reverse order
+        # Pre-compute all next values and terminal masks as tensors,
+        # eliminating all branching inside the reverse loop.
+        next_values = torch.cat([values[1:], next_value.unsqueeze(0)])
+        masks = (~torch.tensor(is_terminals, dtype=torch.bool, device=self.device)).float()
+        deltas = rewards + self.gamma * next_values * masks - values
+
+        # Sequential reverse scan — each term depends on the next so this
+        # cannot be parallelised without a parallel scan algorithm, but the
+        # loop body is now a single branchless multiply-add on scalars.
+        advantages = torch.zeros(T, dtype=torch.float32, device=self.device)
+        gae = 0.0
+        coeff = self.gamma * self.lambda_gae
         for t in reversed(range(T)):
-            if t == T - 1:
-                # Bootstrap from next state
-                next_value_t = next_value
-            else:
-                next_value_t = values[t + 1]
-
-            # TD error: δ_t = r_t + γ * V(s_{t+1}) * (1 - terminal) - V(s_t)
-            terminal_mask = 0.0 if is_terminals[t] else 1.0
-            delta = rewards[t] + self.gamma * next_value_t * terminal_mask - values[t]
-
-            # GAE: A_t = δ_t + γλ * A_{t+1} * (1 - terminal)
-            gae = delta + self.gamma * self.lambda_gae * gae * terminal_mask
+            gae = deltas[t].item() + coeff * masks[t].item() * gae
             advantages[t] = gae
 
         return advantages

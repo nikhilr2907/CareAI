@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 
 # Type hints for objects we'll receive
 from src.environment.robot.robot_state import RobotState
-from src.environment.graph.node import HospitalNode
-from src.environment.graph.edge import HospitalEdge
+from src.environment.graph.node import GraphNode
+from src.environment.graph.edge import GraphEdge
 
 
 class RealtimeAnalyticsCollector:
@@ -20,8 +20,8 @@ class RealtimeAnalyticsCollector:
     Data flow:
     - Task completion data from TaskLogger.cost_data
     - RobotState/RobotTelemetry → record_robot_telemetry()
-    - HospitalNode → record_inventory_snapshot()
-    - HospitalEdge → record_corridor_state()
+    - GraphNode → record_inventory_snapshot()
+    - GraphEdge → record_corridor_state()
 
     Outputs:
     - metrics.json (raw events)
@@ -106,15 +106,15 @@ class RealtimeAnalyticsCollector:
                     'timestamp': current_time,
                 })
 
-    def record_inventory_snapshot(self, nodes: List[HospitalNode], current_time: float):
+    def record_inventory_snapshot(self, nodes: List[GraphNode], current_time: float):
         """
-        Sample inventory levels from HospitalNode objects.
+        Sample inventory levels from GraphNode objects.
         Called periodically during training (e.g., every 50 steps).
 
         On first call: store nodes and initialize flow metrics.
 
         Args:
-            nodes: List of HospitalNode objects
+            nodes: List of GraphNode objects
             current_time: Current simulation/real time
         """
         # Initialize metrics on first call (capture nodes + floor layout)
@@ -138,13 +138,13 @@ class RealtimeAnalyticsCollector:
                         'timestamp': current_time,
                     })
 
-    def record_corridor_state(self, edges: List[HospitalEdge], current_time: float):
+    def record_corridor_state(self, edges: List[GraphEdge], current_time: float):
         """
-        Sample corridor congestion from HospitalEdge objects.
+        Sample corridor congestion from GraphEdge objects.
         Called periodically (e.g., every 50 steps).
 
         Args:
-            edges: List of HospitalEdge objects
+            edges: List of GraphEdge objects
             current_time: Current simulation/real time
         """
         for edge in edges:
