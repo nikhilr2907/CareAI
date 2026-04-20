@@ -365,8 +365,8 @@ class ROSBridgeRobotBackend(RobotBackend):
         Command a robot to follow a path (list of node indices).
 
         Schedules the WebSocket task send asynchronously. This method is synchronous
-        to match the RobotBackend interface, but internally uses asyncio.ensure_future()
-        if an event loop is running, or asyncio.run_until_complete() otherwise.
+        to match the RobotBackend interface, but fires the coroutine into the running
+        event loop via create_task(), or falls back to asyncio.run() for sync callers.
 
         Args:
             robot_id: Robot identifier
@@ -376,15 +376,11 @@ class ROSBridgeRobotBackend(RobotBackend):
         """
         coro = self._async_send_path_command(robot_id, path, task_id, num_items)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Deployment context: event loop already running (async task)
-                asyncio.ensure_future(coro)
-            else:
-                # Fallback: blocking send for sync callers (e.g. test scripts)
-                loop.run_until_complete(coro)
+            loop = asyncio.get_running_loop()
+            # Deployment context: called from within a running event loop.
+            loop.create_task(coro)
         except RuntimeError:
-            # No event loop in current thread — create one
+            # No running event loop — sync caller (e.g. test scripts).
             asyncio.run(coro)
         except Exception as e:
             self._logger.error(

@@ -155,14 +155,14 @@ class RobotBridgeWebSocketClient:
     async def _handle_robot_state(self, data: Dict):
         """Handle robot telemetry update."""
         try:
+            pos = data.get('position') or {}
+            if 'x' not in pos or 'y' not in pos:
+                logger.warning(f"robot_state missing position fields: {list(pos.keys())} — skipping update")
+                return
             telemetry = RobotTelemetryData(
                 robot_id=data.get('robot_id', 0),
                 timestamp=data.get('timestamp', 0.0),
-                position=(
-                    data['position']['x'],
-                    data['position']['y'],
-                    data['position'].get('z', 0.0)
-                ),
+                position=(float(pos['x']), float(pos['y']), float(pos.get('z', 0.0))),
                 orientation=data.get('orientation_quat', {'x': 0, 'y': 0, 'z': 0, 'w': 1}),
                 velocity=data.get('velocity', {'linear_x': 0, 'angular_z': 0}),
                 battery_level=data.get('battery_level', 0.0),
@@ -177,7 +177,7 @@ class RobotBridgeWebSocketClient:
 
             logger.debug(f"Robot state: pos=({telemetry.position[0]:.2f}, {telemetry.position[1]:.2f}), battery={telemetry.battery_level:.1%}")
         except Exception as e:
-            logger.error(f"Error parsing robot state: {e}")
+            logger.error(f"Error parsing robot state: {e}", exc_info=True)
 
     async def _handle_task_status(self, data: Dict):
         """Handle task status update."""
@@ -218,21 +218,21 @@ class RobotBridgeWebSocketClient:
             robot_data = data.get('robot_state')
             robot_telemetry = None
             if robot_data:
-                robot_telemetry = RobotTelemetryData(
-                    robot_id=robot_data.get('robot_id', 0),
-                    timestamp=data.get('timestamp', 0.0),
-                    position=(
-                        robot_data['position']['x'],
-                        robot_data['position']['y'],
-                        robot_data['position'].get('z', 0.0)
-                    ),
-                    orientation=robot_data.get('orientation_quat', {'x': 0, 'y': 0, 'z': 0, 'w': 1}),
-                    velocity=robot_data.get('velocity', {'linear_x': 0, 'angular_z': 0}),
-                    battery_level=robot_data.get('battery_level', 0.0),
-                    current_capacity=robot_data.get('current_capacity', 0),
-                    max_capacity=robot_data.get('max_capacity', 12),
-                    active_task_id=robot_data.get('active_task_id')
-                )
+                rpos = robot_data.get('position') or {}
+                if 'x' in rpos and 'y' in rpos:
+                    robot_telemetry = RobotTelemetryData(
+                        robot_id=robot_data.get('robot_id', 0),
+                        timestamp=data.get('timestamp', 0.0),
+                        position=(float(rpos['x']), float(rpos['y']), float(rpos.get('z', 0.0))),
+                        orientation=robot_data.get('orientation_quat', {'x': 0, 'y': 0, 'z': 0, 'w': 1}),
+                        velocity=robot_data.get('velocity', {'linear_x': 0, 'angular_z': 0}),
+                        battery_level=robot_data.get('battery_level', 0.0),
+                        current_capacity=robot_data.get('current_capacity', 0),
+                        max_capacity=robot_data.get('max_capacity', 12),
+                        active_task_id=robot_data.get('active_task_id')
+                    )
+                else:
+                    logger.warning(f"system_state robot_state missing position fields: {list(rpos.keys())}")
 
             # Parse inventory from snapshot
             inventories = {}

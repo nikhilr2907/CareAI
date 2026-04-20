@@ -737,7 +737,7 @@ class GAPOTaskAssignmentEnv:
             # D: Utilization bonus on dropoff
             # Encourage efficient batching (more items per trip)
             if task.leg_type == 'dropoff' and robot:
-                load_ratio = robot.effective_load / max(robot.max_capacity, 1.0)
+                load_ratio = robot.current_load / max(robot.max_capacity, 1.0)
                 task_reward += 2.0 * load_ratio
 
             # F: Depletion penalty - deduct if robot is critically low on battery at task end
@@ -747,7 +747,7 @@ class GAPOTaskAssignmentEnv:
                     task_reward -= self.battery_critical_task_penalty
 
             parent_id = getattr(task, 'parent_task_id', None)
-            if parent_id is not None:
+            if parent_id is not None and task.leg_type == "dropoff":
                 self._last_per_task_credits[parent_id] = task_reward
             total_reward += task_reward
 
