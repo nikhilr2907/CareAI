@@ -79,6 +79,12 @@ def parse_deploy_args():
     parser.add_argument('--device', type=str, default='auto',
                         choices=['auto', 'cpu', 'cuda'])
 
+    # Digital twin
+    parser.add_argument('--twin', action='store_true',
+                        help='Enable digital twin WebSocket publisher (browser 3D view)')
+    parser.add_argument('--twin-port', type=int, default=8766,
+                        help='WebSocket port for digital twin (HTTP on port+1, default 8767)')
+
     # Output
     parser.add_argument('--output-dir', type=str, default='outputs',
                         help='Directory for logs and analytics (default: outputs)')
@@ -224,6 +230,14 @@ async def main():
     start_time = time.time()
 
     state_dict = env.reset()
+
+    twin_publisher = None
+    if args.twin:
+        from src.deployment.twin_publisher import TwinPublisher
+        twin_publisher = TwinPublisher(graph_state=env.graph_state, port=args.twin_port)
+        twin_publisher.start()
+        logger.info(f"Open http://localhost:{args.twin_port + 1} to view the digital twin")
+
     logger.info("Environment initialised — starting deployment loop")
     logger.info("-" * 80)
 
@@ -316,6 +330,9 @@ async def main():
                     f"SimTime={sim_hours:.2f}h  WallTime={wall_hours:.2f}h"
                 )
 
+            if twin_publisher:
+                twin_publisher.broadcast(env, robot_backend=robot_backend)
+
             # Pace to 1 Hz — yields for WebSocket listen tasks
             elapsed = time.monotonic() - step_wall_start
             await asyncio.sleep(max(0.0, 1.0 - elapsed))
@@ -333,6 +350,9 @@ async def main():
     logger.info(f"  Wall time:         {wall_hours:.2f}h")
     if completion_time_history:
         logger.info(f"  Avg completion:    {float(np.mean(completion_time_history)) / 60:.1f}min")
+
+    if twin_publisher:
+        twin_publisher.stop()
 
     await robot_backend.stop()
 

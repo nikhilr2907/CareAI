@@ -156,6 +156,16 @@ def parse_args() -> argparse.Namespace:
         help="Sim seconds per real second (default: 1.0)"
     )
 
+    # Digital twin
+    parser.add_argument(
+        "--twin", action="store_true",
+        help="Enable digital twin WebSocket publisher (browser 3D view)"
+    )
+    parser.add_argument(
+        "--twin-port", type=int, default=8766,
+        help="WebSocket port for digital twin (HTTP served on port+1, default 8767)"
+    )
+
     # Visualization
     parser.add_argument(
         "--headless", action="store_true",
@@ -329,6 +339,14 @@ def main():
                 f"cap={args.stochastic_task_cap_per_hour}/h "
                 f"initial={args.initial_stochastic_tasks}")
     logger.info("\n" + "=" * 80)
+
+    # ============ Digital Twin Publisher ============
+    twin_publisher = None
+    if args.twin:
+        from src.deployment.twin_publisher import TwinPublisher
+        twin_publisher = TwinPublisher(graph_state=env.graph_state, port=args.twin_port)
+        twin_publisher.start()
+        logger.info(f"Open http://localhost:{args.twin_port + 1} to view the digital twin")
 
     # ============ Visualization Setup ============
     if not args.headless:
@@ -602,6 +620,9 @@ def main():
                 pygame.display.flip()
                 clock.tick(args.fps)
 
+            if twin_publisher:
+                twin_publisher.broadcast(env)
+
             # Check for episode termination
             if done:
                 logger.info(f"Episode complete at t={current_time/60:.1f}m")
@@ -639,6 +660,9 @@ def main():
 
         if not args.headless:
             pygame.quit()
+
+        if twin_publisher:
+            twin_publisher.stop()
 
         logger.info(f"\nLogs saved to: {output_dir}")
         logger.info("=" * 80)

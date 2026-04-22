@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>CareRobotics Digital Twin</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0f1117; color: #e0e6f0; font-family: 'Segoe UI', monospace; overflow: hidden; }
+    #canvas-container { position: absolute; inset: 0; }
+    #hud {
+      position: absolute; top: 16px; right: 16px; width: 240px;
+      background: rgba(15,17,23,0.85); border: 1px solid #2a3040;
+      border-radius: 8px; padding: 14px; font-size: 13px; line-height: 1.8;
+    }
+    #hud h2 { font-size: 14px; color: #7eb8f7; margin-bottom: 8px; letter-spacing: 0.05em; }
+    #hud .label { color: #6b7a99; font-size: 11px; }
+    #hud .val   { color: #e0e6f0; }
+    #status {
+      position: absolute; bottom: 16px; left: 16px;
+      font-size: 11px; color: #4a5568;
+    }
+    #status.connected { color: #48bb78; }
+    #status.error     { color: #fc8181; }
+    #legend {
+      position: absolute; bottom: 16px; right: 16px;
+      background: rgba(15,17,23,0.85); border: 1px solid #2a3040;
+      border-radius: 6px; padding: 10px 14px; font-size: 11px; line-height: 2;
+    }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+
+  <div id="hud">
+    <h2>CAREROBOTICS TWIN</h2>
+    <div><span class="label">Sim time</span><br><span class="val" id="h-time">—</span></div>
+    <div><span class="label">Robots</span><br><span class="val" id="h-robots">—</span></div>
+    <div><span class="label">Pending tasks</span><br><span class="val" id="h-tasks">—</span></div>
+  </div>
+
+  <div id="legend">
+    <div><span class="dot" style="background:#4a90d9"></span>Storage</div>
+    <div><span class="dot" style="background:#48bb78"></span>Shelf (recovery)</div>
+    <div><span class="dot" style="background:#f6ad55"></span>Robot</div>
+  </div>
+
+  <div id="status">Connecting…</div>
+
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js" } }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+
+    // ── Scene setup ──────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setClearColor(0x0f1117);
+    document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x0f1117, 40, 80);
+
+    // Top-down perspective camera
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
+    camera.position.set(0, 22, 0);
+    camera.lookAt(0, 0, 0);
+
+    // Lighting
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(5, 10, 5);
+    scene.add(dirLight);
+
+    // Floor grid
+    const grid = new THREE.GridHelper(60, 60, 0x1a2030, 0x1a2030);
+    scene.add(grid);
+
+    // ── Graph state ──────────────────────────────────────────────────────────
+    let cx = 0, cy = 0;        // scene centre offset (set after graph loads)
+    const nodeObjects = {};    // node_id → THREE.Mesh
+    const robotObjects = {};   // robot_id → THREE.Mesh
+    const edgeLines = [];
+
+    function worldToScene(x, y) {
+      return { x: x - cx, z: -(y - cy) };
+    }
+
+    async function loadGraph() {
+      const res = await fetch('/graph.json');
+      const g = await res.json();
+
+      // Compute centroid for centering the scene
+      const xs = g.nodes.map(n => n.x), ys = g.nodes.map(n => n.y);
+      cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+      cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+
+      // Nodes
+      const COLOR = { storage: 0x4a90d9, recovery: 0x48bb78, unknown: 0x8899aa };
+      g.nodes.forEach(node => {
+        const color = COLOR[node.type] ?? COLOR.unknown;
+        const geom = new THREE.CylinderGeometry(0.6, 0.6, 0.3, 24);
+        const mat  = new THREE.MeshStandardMaterial({ color, roughness: 0.4 });
+        const mesh = new THREE.Mesh(geom, mat);
+        const p = worldToScene(node.x, node.y);
+        mesh.position.set(p.x, 0.15, p.z);
+        scene.add(mesh);
+
+        // Glow ring
+        const ring = new THREE.Mesh(
+          new THREE.RingGeometry(0.7, 0.85, 32),
+          new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity: 0.35 })
+        );
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.set(p.x, 0.01, p.z);
+        scene.add(ring);
+
+        nodeObjects[node.id] = mesh;
+      });
+
+      // Edges
+      const nodeById = {};
+      g.nodes.forEach(n => nodeById[n.id] = n);
+      g.edges.forEach(edge => {
+        const a = nodeById[edge.from], b = nodeById[edge.to];
+        if (!a || !b) return;
+        const pa = worldToScene(a.x, a.y), pb = worldToScene(b.x, b.y);
+        const points = [
+          new THREE.Vector3(pa.x, 0.05, pa.z),
+          new THREE.Vector3(pb.x, 0.05, pb.z),
+        ];
+        const line = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(points),
+          new THREE.LineBasicMaterial({ color: 0x2a3a55, linewidth: 2 })
+        );
+        scene.add(line);
+        edgeLines.push(line);
+      });
+    }
+
+    // ── Robot mesh factory ────────────────────────────────────────────────────
+    function makeRobotMesh(id) {
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(0.6, 0.5, 0.8),
+        new THREE.MeshStandardMaterial({ color: 0xf6ad55, roughness: 0.3 })
+      );
+      body.position.y = 0.4;
+
+      // Direction indicator (small front nub)
+      const nub = new THREE.Mesh(
+        new THREE.BoxGeometry(0.15, 0.15, 0.2),
+        new THREE.MeshStandardMaterial({ color: 0xfbd38d })
+      );
+      nub.position.set(0, 0, -0.5);
+      body.add(nub);
+
+      const group = new THREE.Group();
+      group.add(body);
+      scene.add(group);
+      return group;
+    }
+
+    // ── Robot label ───────────────────────────────────────────────────────────
+    // Simple canvas-based sprite label
+    function makeLabel(text) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128; canvas.height = 32;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = 'rgba(0,0,0,0)';
+      ctx.fillRect(0, 0, 128, 32);
+      ctx.font = 'bold 18px monospace';
+      ctx.fillStyle = '#f6ad55';
+      ctx.textAlign = 'center';
+      ctx.fillText(text, 64, 22);
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+      const sprite = new THREE.Sprite(mat);
+      sprite.scale.set(2, 0.5, 1);
+      sprite.position.y = 1.4;
+      return sprite;
+    }
+
+    // ── State update from WebSocket ───────────────────────────────────────────
+    function applyState(data) {
+      // HUD
+      const mins = Math.floor(data.t / 60);
+      document.getElementById('h-time').textContent =
+        `${Math.floor(mins / 60)}h ${mins % 60}m`;
+      document.getElementById('h-tasks').textContent =
+        `${data.tasks.length} pending`;
+
+      let robotInfo = '';
+      data.robots.forEach(r => {
+        // Create mesh on first appearance
+        if (!robotObjects[r.id]) {
+          const group = makeRobotMesh(r.id);
+          group.add(makeLabel(`R${r.id}`));
+          robotObjects[r.id] = group;
+        }
+
+        const mesh = robotObjects[r.id];
+        const p = worldToScene(r.x, r.y);
+        mesh.position.x = p.x;
+        mesh.position.z = p.z;
+        mesh.rotation.y = -r.heading;
+
+        // Battery colour: green → orange → red
+        const batt = r.battery;
+        const bodyMesh = mesh.children[0];
+        const hue = batt > 0.5 ? 0.27 : batt > 0.2 ? 0.08 : 0.02;
+        bodyMesh.material.color.setHSL(hue, 0.85, 0.55);
+
+        robotInfo += `R${r.id} 🔋${(batt * 100).toFixed(0)}%  `;
+      });
+
+      document.getElementById('h-robots').textContent =
+        robotInfo || 'none';
+    }
+
+    // ── WebSocket ─────────────────────────────────────────────────────────────
+    const WS_URL = `ws://${location.hostname}:8766`;
+    const statusEl = document.getElementById('status');
+    let ws;
+
+    function connect() {
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        statusEl.textContent = `● Connected  ${WS_URL}`;
+        statusEl.className = 'connected';
+      };
+
+      ws.onmessage = (ev) => {
+        try { applyState(JSON.parse(ev.data)); }
+        catch (e) { console.error('parse error', e); }
+      };
+
+      ws.onclose = () => {
+        statusEl.textContent = `Disconnected — retrying…`;
+        statusEl.className = 'error';
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => {
+        statusEl.textContent = `Connection error`;
+        statusEl.className = 'error';
+      };
+    }
+
+    // ── Resize ────────────────────────────────────────────────────────────────
+    function resize() {
+      const w = innerWidth, h = innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ── Render loop ───────────────────────────────────────────────────────────
+    function animate() {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    }
+
+    // ── Bootstrap ─────────────────────────────────────────────────────────────
+    await loadGraph();
+    connect();
+    animate();
+  </script>
+</body>
+</html>
