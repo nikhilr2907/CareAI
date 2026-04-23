@@ -20,6 +20,7 @@ from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
 from ..reliability.telemetry_effects import TelemetryEffectsManager
 from ..deployment.robot_backend import RobotBackend
 from ..utils.fleet_event_logger import FleetEventLogger
+from ..utils.sku_logger import SKULogger
 
 
 class GAPOTaskAssignmentEnv:
@@ -35,6 +36,7 @@ class GAPOTaskAssignmentEnv:
         use_task_creation_actor: bool = True,
         device: str = 'cpu',
         fleet_event_logger: Optional['FleetEventLogger'] = None,
+        log_dir: Optional[str] = None,
     ):
         super(GAPOTaskAssignmentEnv, self).__init__()
 
@@ -43,6 +45,7 @@ class GAPOTaskAssignmentEnv:
         self.max_episode_time = max_episode_time
         self.timestep_seconds = timestep_seconds
         self.fleet_event_logger = fleet_event_logger
+        self.sku_logger = SKULogger(log_dir) if log_dir is not None else None
         # Environment components
         self.graph_state = None
         self.robots = []
@@ -295,6 +298,8 @@ class GAPOTaskAssignmentEnv:
     def _update_inventory(self, time_delta_hours: float):
         """Hook for inventory update each step. Override in subclasses for real deployment."""
         update_inventory_levels(self.graph_state, time_delta_hours)
+        if self.sku_logger is not None:
+            self.sku_logger.maybe_snapshot(self.graph_state, self.current_time)
 
     def _prune_stochastic_task_history(self):
         cutoff = self.current_time - 3600.0
@@ -550,6 +555,34 @@ class GAPOTaskAssignmentEnv:
             # Update robot telemetry
             robot.update_telemetry(telemetry)
 
+            # Stationarity tracking — accumulate idle time and fire fleet event at 10s threshold
+            _velocity_threshold = 0.05
+            if simulator.velocity_ms < _velocity_threshold:
+                robot.consecutive_idle_s += dt
+                if robot.consecutive_idle_s >= 10.0 and not robot._stationary_event_fired:
+                    robot._stationary_event_fired = True
+                    if self.fleet_event_logger:
+                        _rid = robot.robot_id
+                        if simulator.is_charging:
+                            _reason = "charging"
+                        elif _rid in self._robots_routing_to_charge:
+                            _reason = "routing_to_charge"
+                        elif not robot.task_queue:
+                            _reason = "no_task"
+                        else:
+                            _reason = "unknown"
+                        self.fleet_event_logger.log_robot_stationary(
+                            robot_id=_rid,
+                            sim_time=self.current_time,
+                            battery_level=simulator.battery_level,
+                            duration_s=robot.consecutive_idle_s,
+                            current_node=robot.current_node_index,
+                            stoppage_reason=_reason,
+                        )
+            else:
+                robot.consecutive_idle_s = 0.0
+                robot._stationary_event_fired = False
+
             # Mid-task battery interrupt: override path with charge trip if battery too low
             self._interrupt_mid_task_for_charging(simulator.robot_id, robot, simulator)
 
@@ -633,6 +666,21 @@ class GAPOTaskAssignmentEnv:
                     if task.sku_id:
                         self._refresh_task_inventory_context(task)
                         task.sku_stock_level_at_dropoff = task.current_sku_stock_level
+                        if self.sku_logger is not None:
+                            sku_data = to_node.sku_inventory.get(task.sku_id, {})
+                            self.sku_logger.log_restock(
+                                node_idx=task.to_location_index,
+                                node_tag=getattr(to_node, 'location_tag', None) or f"node_{task.to_location_index}",
+                                floor=getattr(to_node, 'floor', None),
+                                sku_id=task.sku_id,
+                                category=sku_data.get('category', ''),
+                                stock_after=task.sku_stock_level_at_dropoff or 0.0,
+                                max_stock=float(sku_data.get('max', 0.0)),
+                                par=float(sku_data.get('par', 0.0)),
+                                reorder=float(sku_data.get('reorder', 0.0)),
+                                sim_time=self.current_time,
+                                consumption_rate=float(sku_data.get('rate', 0.0)),
+                            )
 
                 # Unload items from simulator on dropoff
                 if task.leg_type == "dropoff":

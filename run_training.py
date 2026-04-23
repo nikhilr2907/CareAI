@@ -219,7 +219,8 @@ def main():
             stochastic_tasks_per_hour=stochastic_tasks_per_hour,
             stochastic_task_cap_per_hour=stochastic_task_cap_per_hour,
             initial_stochastic_tasks=initial_stochastic_tasks,
-            fleet_event_logger=FleetEventLogger(output_dir / "logs" / "fleet_events.log")   
+            fleet_event_logger=FleetEventLogger(output_dir / "logs"),
+            log_dir=output_dir / "logs"
         )
 
         total_categories = set()
@@ -485,8 +486,6 @@ def main():
             completed_leg_credits: dict = info.get('completed_leg_credits', {})
 
             for leg_task in completed_task_legs:
-                if getattr(leg_task, "leg_type", None) != "pickup":
-                    continue
                 raw_leg_reward = float(completed_leg_credits.get(leg_task.task_id, 0.0))
                 scaled_leg_reward = raw_leg_reward * reward_scale
                 if reward_clip is not None and reward_clip > 0:
@@ -515,28 +514,6 @@ def main():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_bonus = float(np.clip(scaled_bonus, -reward_clip, reward_clip))
-
-                completed_task = next(
-                    (
-                        t for t in completed_task_legs
-                        if getattr(t, "parent_task_id", None) == parent_id
-                        or t.task_id == parent_id
-                    ),
-                    None
-                )
-                actual_completion_time = None
-                if completed_task is not None and completed_task.arrival_time is not None:
-                    actual_completion_time = env.current_time - completed_task.arrival_time
-
-                task_logger.log_completion(
-                    parent_id,
-                    scaled_bonus,
-                    actual_completion_time,
-                    env.current_time,
-                    distance_traveled=0.0,
-                    energy_consumed=0.0,
-                    completed_task=completed_task,
-                )
 
                 # Route completion signal to task creation actor buffer (#7/#8 training)
                 if env.task_creation_actor is not None:

@@ -20,6 +20,10 @@ class RobotState:
     planned_path: List[int] = field(default_factory=list)  # Full path for current task
     travel_start_time: float = 0.0  # When robot started current journey
 
+    # ===== STATIONARITY TRACKING =====
+    consecutive_idle_s: float = 0.0  # Seconds continuously at ~0 velocity
+    _stationary_event_fired: bool = False  # True after 10s threshold logged, reset when robot moves
+
     # ===== TELEMETRY (Robot simulator/hardware reports) =====
     telemetry: Optional[RobotTelemetry] = None  # Latest sensor data
 

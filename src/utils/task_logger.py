@@ -46,6 +46,8 @@ class TaskLogger:
         self.source_breakdown = defaultdict(lambda: {'assigned': 0, 'completed': 0})
         # Track cost metrics
         self.cost_data = []  # List of {'source', 'reward', 'distance', 'robot_hours', 'energy', 'total_cost', 'cost_per_reward'}
+        # Track shelf access frequency (dropoff completions per destination)
+        self.location_visit_counts = defaultdict(int)
 
     @staticmethod
     def _format_stock_snapshot(label: str, stock_level, max_level) -> str:
@@ -267,6 +269,10 @@ class TaskLogger:
             # Track source breakdown
             self.source_breakdown[source]['completed'] += 1
 
+            # Track shelf access frequency
+            if to_idx is not None:
+                self.location_visit_counts[to_idx] += 1
+
             # Track cost data for analytics
             self.cost_data.append({
                 'task_id': completed_task_id,
@@ -366,6 +372,15 @@ class TaskLogger:
         else:
             cost_info = "  Avg Cost Per Task: N/A (no cost data)\n"
 
+        # Shelf access frequency (top 10)
+        if self.location_visit_counts:
+            top_locations = sorted(self.location_visit_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            shelf_info = "  Shelf Access Frequency (top 10 destinations): " + ", ".join(
+                f"loc={loc}:{count}" for loc, count in top_locations
+            )
+        else:
+            shelf_info = "  Shelf Access Frequency: no dropoffs recorded"
+
         # Log running summary
         self.logger.info(
             f"=== RUNNING SUMMARY (Iterations 0-{iteration}) ===\n"
@@ -373,6 +388,7 @@ class TaskLogger:
             f"  By Source:\n{source_info}\n"
             f"{cost_info}"
             f"  Robot Completion Breakdown: {robot_breakdown}\n"
+            f"  {shelf_info}\n"
             f"{'=' * 60}"
         )
 

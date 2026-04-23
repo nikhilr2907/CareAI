@@ -140,7 +140,8 @@ async def main():
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         stochastic_task_cap_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
-        fleet_event_logger=FleetEventLogger(output_dir / "logs" / "fleet_events.log")   
+        fleet_event_logger=FleetEventLogger(output_dir / "logs"),
+        log_dir=output_dir / "logs"
     )
 
    

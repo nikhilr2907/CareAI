@@ -106,6 +106,23 @@ class FleetEventLogger:
             f"requeued={requeued_task_ids} emergency={emergency_task_ids}"
         )
 
+    def log_robot_stationary(
+        self,
+        robot_id: int,
+        sim_time: float,
+        battery_level: float,
+        duration_s: float,
+        current_node: Optional[int],
+        stoppage_reason: str,
+    ):
+        """Robot has been stationary for >= 10s. stoppage_reason populated from scheduler
+        state in sim; to be enriched with ROS backend data in real deployment."""
+        self.logger.info(
+            f"ROBOT_STATIONARY robot={robot_id} sim_time={sim_time:.1f}s "
+            f"battery={battery_level:.3f} duration={duration_s:.1f}s "
+            f"current_node={current_node} stoppage_reason={stoppage_reason}"
+        )
+
     def log_summary(self):
         self.logger.info(
             f"=== FLEET SUMMARY === "

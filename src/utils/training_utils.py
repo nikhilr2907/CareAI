@@ -182,7 +182,8 @@ def create_env_from_config_file(config_path: str, num_robots: Optional[int] = No
                                 stochastic_tasks_per_hour: float = 2.0,
                                 stochastic_task_cap_per_hour: int = 2,
                                 initial_stochastic_tasks: int = 0,
-                                fleet_event_logger=None):
+                                fleet_event_logger=None,
+                                log_dir=None):
     """Create a simulation environment from a config JSON file."""
     nodes, edge_pairs, meta = load_config_from_file(config_path)
     if num_robots is None:
@@ -197,6 +198,7 @@ def create_env_from_config_file(config_path: str, num_robots: Optional[int] = No
         max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
         fleet_event_logger=fleet_event_logger,
+        log_dir=log_dir,
     )
     env.graph_state = graph_state
     env._custom_graph_state = graph_state
@@ -210,7 +212,8 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
                                      stochastic_tasks_per_hour: float = 2.0,
                                      stochastic_task_cap_per_hour: int = 2,
                                      initial_stochastic_tasks: int = 0,
-                                     fleet_event_logger=None):
+                                     fleet_event_logger=None,
+                                     log_dir=None):
     """Create a real-deployment environment (GAPOTaskAssignmentEnvReal) from a config JSON file."""
     from ..environment.gapo_env_real import GAPOTaskAssignmentEnvReal
 
@@ -228,6 +231,7 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
         max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
         fleet_event_logger=fleet_event_logger,
+        log_dir=log_dir,
     )
     env.graph_state = graph_state
     env._custom_graph_state = graph_state

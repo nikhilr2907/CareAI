@@ -258,7 +258,7 @@ def main():
         stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
         stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
         initial_stochastic_tasks=args.initial_stochastic_tasks,
-        fleet_event_logger=FleetEventLogger(output_dir / "logs" / "fleet_events.log")   
+        fleet_event_logger=FleetEventLogger(output_dir / "logs")
     )
     env.reset()
     apply_floorplan_layout(env.graph_state)
