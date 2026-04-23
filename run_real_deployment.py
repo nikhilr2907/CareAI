@@ -192,7 +192,7 @@ async def main():
         school_period_embedding_dim=4,
         day_type_embedding_dim=4,
         robot_feat_dim=19,
-        task_feat_dim=15,
+        task_feat_dim=10,
         queue_feat_dim=16,
         sku_feat_dim=sku_feat_dim,
         sku_embed_dim=sku_embed_dim,

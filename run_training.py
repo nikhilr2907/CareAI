@@ -259,7 +259,7 @@ def main():
         school_period_embedding_dim=4,
         day_type_embedding_dim=4,
         robot_feat_dim=19,
-        task_feat_dim=15,
+        task_feat_dim=10,
         queue_feat_dim=16,
         sku_feat_dim=sku_feat_dim,
         sku_embed_dim=sku_embed_dim,
@@ -436,7 +436,7 @@ def main():
                 # its completion bonus can be routed back here later.
                 task_to_memory_idx[task.task_id] = mem_idx_before
                 # Preserve (s, a, logprob) in open_assignments so cross-rollout completions can route bonus to causal decision.
-                feasibility = (task.deadline - env.current_time) / max(task.estimated_duration, 1.0) - 1.0
+                feasibility = task.get_time_to_deadline(env.current_time) / max(task.estimated_duration, 1.0) - 1.0
                 assignment_reward = 0.5 * max(-1.0, min(1.0, feasibility))
                 open_assignments[task.task_id] = {
                     'state':             state_dict,

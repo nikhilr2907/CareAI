@@ -192,10 +192,10 @@ class GraphState:
 
         Continuous features (per node):
             - Geometry: center_x, center_y, width, height, area
-            - Inventory: stock_level, consumption_rate, time_to_stockout
+            - Inventory: stock_level
             - Context: foot_traffic_weight, num_skus, num_categories
             - Temporal: period_demand_weight
-            - Per-category: stock_ratio, consumption_rate, time_to_stockout (N categories)
+            - Per-category: stock_ratio (N categories)
 
         Categorical features [num_nodes, 4]:
             - node_type_id: 0-3 (storage, corridor, recovery, hub)
@@ -383,10 +383,10 @@ class GraphState:
 
         Returns:
             tuple of:
-            - node_continuous: [num_nodes, N] - continuous features (geometry, total stock, etc.)
+            - node_continuous: [num_nodes, 9] - continuous features (geometry, total stock, etc.)
             - node_categorical: [num_nodes, 1] - node_type_id
-            - category_features: [num_nodes, max_categories, 4] - per-category features
-              Each category: [stock_level, max_stock, num_skus, consumption_rate]
+            - category_features: [num_nodes, max_categories, 3] - per-category features
+              Each category: [stock_level, max_stock, num_skus]
             - category_mask: [num_nodes, max_categories] - 1 if category exists, 0 if padding
             - category_ids: [num_nodes, max_categories] - category embedding indices
             - location_ids: [num_nodes] - location embedding indices (or -1 if none)
@@ -394,16 +394,14 @@ class GraphState:
 
         Continuous node features (per node):
             - Geometry: center_x, center_y, width, height, area
-            - Inventory: stock_level, consumption_rate, time_to_stockout
+            - Inventory: stock_level
             - Context: foot_traffic_weight, num_skus, num_categories
-            - Per-category: stock_level, max_stock, num_skus, consumption_rate
 
-        Category features per node (max_categories × 4):
+        Category features per node (max_categories × 3):
         For each category slot:
         - stock_level: Current stock in this category
         - max_stock: Max capacity for this category
         - num_skus: Number of distinct SKUs in category
-        - consumption_rate: Consumption rate for category
         """
         # Auto-discover categories if not provided
         if category_names is None:

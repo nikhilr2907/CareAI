@@ -311,7 +311,7 @@ def main():
             day_type_embedding_dim=4,
             edge_feat_dim=edge_feat_dim,
             robot_feat_dim=19,
-            task_feat_dim=15,
+            task_feat_dim=10,
             queue_feat_dim=16,
             sku_feat_dim=sku_feat_dim,
             sku_embed_dim=sku_embed_dim,

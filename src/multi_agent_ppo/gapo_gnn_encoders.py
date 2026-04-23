@@ -382,7 +382,7 @@ class TaskEncoder(nn.Module):
     Output: Task embedding
     """
 
-    def __init__(self, task_feat_dim=15, hidden_dim=64):
+    def __init__(self, task_feat_dim=10, hidden_dim=64):
         super().__init__()
 
         self.encoder = nn.Sequential(
@@ -409,7 +409,7 @@ def test_encoders():
 
     # Test ILC Graph Encoder (with complete features)
     print("\n1. ILC Graph Encoder (Two-Pass with Fine-Grained Categorical Embeddings)")
-    hospital_encoder = ILCGraphEncoder(
+    ilc_encoder = ILCGraphEncoder(
         node_continuous_dim=24,  # UPDATED: includes temporal features
         num_node_types=4,
         num_location_tags=3,
@@ -433,7 +433,7 @@ def test_encoders():
     edge_node_indices = torch.randint(0, 10, (20, 2))  # Edge-node connectivity
     edge_index = torch.randint(0, 10, (2, 20))  # Graph connectivity
 
-    node_embeds, edge_embeds, graph_embed = hospital_encoder(
+    node_embeds, edge_embeds, graph_embed = ilc_encoder(
         node_continuous, node_categorical, edge_features, edge_node_indices, edge_index
     )
 
@@ -462,7 +462,7 @@ def test_encoders():
 
     # Test Task Encoder
     print("\n3. Task Encoder")
-    task_encoder = TaskEncoder(task_feat_dim=15, hidden_dim=64)
+    task_encoder = TaskEncoder(task_feat_dim=10, hidden_dim=64)
 
     task_features = torch.randn(15)
     task_embed = task_encoder(task_features)

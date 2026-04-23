@@ -1,6 +1,7 @@
 import numpy as np
 from typing import List, Optional, Set, Tuple, Dict
 from .task_state import Task, TaskQueue
+from ..graph_helpers import dijkstra_shortest_path
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -174,14 +175,14 @@ def generate_inventory_tasks(
             delivery_amount = min(max_level - stock, max(target - stock, 1.0))
             num_items = max(1, int(delivery_amount))
 
-            urgency = 5 if tts_hours < 0.5 else 4 if tts_hours < 1.0 else 3 if tts_hours < 2.0 else 2
-            estimated_duration = 120.0
+            _, estimated_duration = dijkstra_shortest_path(
+                central_storage_idx, dest_idx, graph_state, len(graph_state.nodes)
+            )
 
             task = Task(
                 task_id=task_id,
                 from_location_index=central_storage_idx,
                 to_location_index=dest_idx,
-                manual_priority=urgency,
                 deadline=deadline,
                 arrival_time=current_time,
                 estimated_duration=estimated_duration,
@@ -205,74 +206,6 @@ def generate_inventory_tasks(
     return new_tasks, task_id
 
 
-def generate_random_ad_hoc_tasks(
-    graph_state,
-    current_time: float,
-    num_tasks: int,
-    next_task_id: int = 0
-) -> Tuple[List[Task], int]:
-    """
-    Generate random ad-hoc restocking tasks.
-
-    Args:
-        graph_state: GraphState object
-        current_time: Current simulation time
-        num_tasks: Number of ad-hoc tasks to generate
-        next_task_id: Next available task ID
-
-    Returns:
-        Tuple of (list of new tasks, next task ID)
-    """
-    new_tasks = []
-    task_id = next_task_id
-    num_nodes = len(graph_state.nodes)
-
-    for _ in range(num_tasks):
-        # Random source and destination
-        from_idx = np.random.randint(0, num_nodes)
-        to_idx = np.random.randint(0, num_nodes)
-
-        # Allow same-room tasks some of the time
-        if np.random.random() >= 0.3:
-            while to_idx == from_idx:
-                to_idx = np.random.randint(0, num_nodes)
-
-        # Random task type
-        task_type = np.random.choice(
-            ['ad_hoc', 'returns', 'emergency'],
-            p=[0.7, 0.25, 0.05]
-        )
-
-        # Priority based on type
-        if task_type == 'emergency':
-            priority = 5
-            deadline_offset = np.random.uniform(60, 300)  # 1-5 minutes
-        elif task_type == 'ad_hoc':
-            priority = np.random.randint(2, 4)
-            deadline_offset = np.random.uniform(600, 1800)  # 10-30 minutes
-        else:  # returns
-            priority = np.random.randint(1, 3)
-            deadline_offset = np.random.uniform(1800, 3600)  # 30-60 minutes
-
-        # Random number of items
-        num_items = np.random.randint(1, 5)
-
-        task = Task(
-            task_id=task_id,
-            from_location_index=from_idx,
-            to_location_index=to_idx,
-            manual_priority=priority,
-            deadline=current_time + deadline_offset,
-            arrival_time=current_time,
-            estimated_duration=np.random.uniform(60, 180),
-            task_type=task_type,
-            num_items=num_items
-        )
-
-        new_tasks.append(task)
-        task_id += 1
-
-    return new_tasks, task_id
 
 
 def update_inventory_levels(graph_state, time_delta_hours: float):

@@ -63,7 +63,9 @@ class TaskLogger:
             'assignment_reward': assignment_reward,
             'sim_time_assigned': sim_time,
             'sku_id': getattr(task, 'sku_id', None),
-            'sku_stock_level_at_assign': getattr(task, 'sku_stock_level', None),
+            'sku_stock_level_at_assign': getattr(
+                task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None)
+            ),
             'sku_max_level': getattr(task, 'sku_max_level', None),
             'reorder_point': getattr(task, 'reorder_point', None),
             'par_level': getattr(task, 'par_level', None),
@@ -78,7 +80,7 @@ class TaskLogger:
         # Log assignment event
         to_loc = getattr(task, 'to_location_index', '?')
         sku_id = getattr(task, 'sku_id', 'N/A')
-        sku_stock = getattr(task, 'sku_stock_level', None)
+        sku_stock = getattr(task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None))
         sku_max = getattr(task, 'sku_max_level', None)
 
         # Build SKU info string

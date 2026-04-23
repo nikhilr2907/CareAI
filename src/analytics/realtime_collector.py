@@ -70,7 +70,6 @@ class RealtimeAnalyticsCollector:
             'latency': {'p50': 0, 'p95': 0, 'p99': 0, 'mean': 0},
             'utilization': {'idle': 0, 'active': 0, 'waiting': 0},
             'replenishment_lag': {'mean': 0, 'max': 0},
-            'sku_demand': {},  # sku → consumption_rate
             'cost': {'mean': 0, 'min': 0, 'max': 0},
             'failure_rate': 0.0,
             'a_c_ratio': 0.0,

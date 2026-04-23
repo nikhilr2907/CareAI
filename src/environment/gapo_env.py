@@ -1,5 +1,8 @@
+import logging
 import numpy as np
 from typing import List, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from .graph.graph_state import GraphState
 from .robot.robot_state import RobotState, create_default_robot
@@ -7,7 +10,7 @@ from .robot.robot_simulator import RobotSimulator
 from .tasks.task_state import Task
 from .tasks.task_generator import (
     generate_inventory_tasks,
-    generate_random_ad_hoc_tasks,
+    _compute_sku_rate,
     update_inventory_levels
 )
 from ..multi_agent_ppo.task_creation_actor import TaskCreationActor
@@ -45,9 +48,6 @@ class GAPOTaskAssignmentEnv:
         # Task management (continuous operation)
         self.pending_tasks = []  # Tasks waiting for assignment
         self.completed_tasks = []  # Tasks that have been completed
-        # Fallback-only heuristic queue ranker.
-        # Default OFF so training/deployment can use learned ranking as source of truth.
-        self.use_heuristic_pending_rank = False
 
         # Time tracking
         self.current_time = 0.0
@@ -197,19 +197,8 @@ class GAPOTaskAssignmentEnv:
                     new_task.source = 'factoriser'
                     self.pending_tasks.append(new_task)
                     created += 1
-                else:
-                    # Fallback for seed tasks when no eligible SKU candidates exist
-                    ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
-                        self.graph_state, self.current_time, 1, self.next_task_id
-                    )
-                    if ad_hoc:
-                        ad_hoc[0].source = 'random_adhoc_fallback'
-                        self.pending_tasks.extend(ad_hoc)
-                        created += len(ad_hoc)
             if created > 0:
                 self._record_stochastic_tasks(created)
-
-        self._apply_fallback_pending_rank()
 
         # Reset metrics
         self.episode_stockouts = 0
@@ -236,7 +225,6 @@ class GAPOTaskAssignmentEnv:
                 for task in new_tasks:
                     task.source = 'deterministic'
                 self.pending_tasks.extend(new_tasks)
-                self._apply_fallback_pending_rank()
 
             self.last_inventory_check = self.current_time
 
@@ -296,20 +284,6 @@ class GAPOTaskAssignmentEnv:
         """Hook for inventory update each step. Override in subclasses for real deployment."""
         update_inventory_levels(self.graph_state, time_delta_hours)
 
-    def _apply_fallback_pending_rank(self):
-        """
-        Optional heuristic ranking for pending queue.
-
-        This is intentionally fallback-only. Keep disabled when using learned ranking.
-        """
-        if not self.use_heuristic_pending_rank or not self.pending_tasks:
-            return
-        # Lazy import keeps heuristic ranking dependency out of the default path.
-        from .tasks.task_state import TaskQueue, rank_tasks
-
-        task_queue = TaskQueue(tasks=self.pending_tasks)
-        self.pending_tasks = rank_tasks(task_queue, self.current_time)
-
     def _prune_stochastic_task_history(self):
         cutoff = self.current_time - 3600.0
         self._stochastic_task_timestamps = [
@@ -331,8 +305,7 @@ class GAPOTaskAssignmentEnv:
         Generate stochastic tasks via the TaskCreationActor pipeline (#7/#8).
 
         Rate and hard hourly cap are checked first. If the actor finds no eligible
-        candidates, falls back to generate_random_ad_hoc_tasks so training is never
-        starved of task diversity.
+        candidates, a debug message is logged and no task is created.
         """
         remaining_budget = self._remaining_stochastic_task_budget()
         if remaining_budget <= 0 or self.stochastic_tasks_per_hour <= 0.0:
@@ -358,21 +331,8 @@ class GAPOTaskAssignmentEnv:
             new_task.source = 'factoriser'
             self.pending_tasks.append(new_task)
             self._record_stochastic_tasks(1)
-            self._apply_fallback_pending_rank()
         else:
-            # Fallback: blind random task when no eligible SKU candidates exist
-            ad_hoc, self.next_task_id = generate_random_ad_hoc_tasks(
-                self.graph_state, self.current_time, 1, self.next_task_id
-            )
-            if ad_hoc:
-                ad_hoc[0].source = 'random_adhoc_fallback'  # Mark as fallback from factoriser
-                self.pending_tasks.extend(ad_hoc)
-                self._record_stochastic_tasks(len(ad_hoc))
-                self._apply_fallback_pending_rank()
-                # Track fallback occurrence
-                if not hasattr(self, '_factoriser_fallback_count'):
-                    self._factoriser_fallback_count = 0
-                self._factoriser_fallback_count += 1
+            logger.debug("task_creation_actor found no eligible SKU candidates — no stochastic task generated")
 
     def assign_task_to_robot(self, robot_id: int, task: Task) -> bool:
         """
@@ -411,7 +371,6 @@ class GAPOTaskAssignmentEnv:
             task_id=self.next_task_id,
             from_location_index=task.from_location_index,
             to_location_index=task.from_location_index,
-            manual_priority=task.manual_priority,
             deadline=task.deadline,
             arrival_time=task.arrival_time,
             estimated_duration=task.estimated_duration,
@@ -419,13 +378,20 @@ class GAPOTaskAssignmentEnv:
             num_items=task.num_items,
             source_stock_level=task.source_stock_level,
             time_to_stockout=task.time_to_stockout,
+            initial_time_to_stockout=task.initial_time_to_stockout,
+            current_time_to_stockout=task.current_time_to_stockout,
+            original_deadline=task.original_deadline,
+            current_deadline=task.current_deadline,
             sku_id=task.sku_id,
             category_key=task.category_key,
             category_id=task.category_id,
             sku_stock_level=task.sku_stock_level,
+            initial_sku_stock_level=task.initial_sku_stock_level,
+            current_sku_stock_level=task.current_sku_stock_level,
             sku_max_level=task.sku_max_level,
             reorder_point=task.reorder_point,
             par_level=task.par_level,
+            demand_location_index=task.demand_location_index,
             leg_type="pickup",
             parent_task_id=task.task_id,
             learned_score=task.learned_score
@@ -436,7 +402,6 @@ class GAPOTaskAssignmentEnv:
             task_id=self.next_task_id,
             from_location_index=task.from_location_index,
             to_location_index=task.to_location_index,
-            manual_priority=task.manual_priority,
             deadline=task.deadline,
             arrival_time=task.arrival_time,
             estimated_duration=task.estimated_duration,
@@ -444,13 +409,20 @@ class GAPOTaskAssignmentEnv:
             num_items=task.num_items,
             source_stock_level=task.source_stock_level,
             time_to_stockout=task.time_to_stockout,
+            initial_time_to_stockout=task.initial_time_to_stockout,
+            current_time_to_stockout=task.current_time_to_stockout,
+            original_deadline=task.original_deadline,
+            current_deadline=task.current_deadline,
             sku_id=task.sku_id,
             category_key=task.category_key,
             category_id=task.category_id,
             sku_stock_level=task.sku_stock_level,
+            initial_sku_stock_level=task.initial_sku_stock_level,
+            current_sku_stock_level=task.current_sku_stock_level,
             sku_max_level=task.sku_max_level,
             reorder_point=task.reorder_point,
             par_level=task.par_level,
+            demand_location_index=task.demand_location_index,
             leg_type="dropoff",
             parent_task_id=task.task_id,
             learned_score=task.learned_score
@@ -493,7 +465,7 @@ class GAPOTaskAssignmentEnv:
             start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
 
         # Plan path from current location to task destination
-        path, distance = dijkstra_shortest_path(
+        path, _ = dijkstra_shortest_path(
             start_node,
             task.to_location_index,
             self.graph_state,
@@ -519,7 +491,6 @@ class GAPOTaskAssignmentEnv:
         robot.planned_path = path
         robot.target_node_index = task.to_location_index
         robot.travel_start_time = self.current_time
-        task.estimated_completion_time = self.current_time + distance
 
     def _update_robot_positions(self, dt: float):
         """
@@ -775,10 +746,6 @@ class GAPOTaskAssignmentEnv:
                 if not is_break and 0 < secs_to_break <= self.proactive_restock_lead_time_s:
                     task_reward += 8.0
 
-            # A: Ad-hoc task completion bonus
-            if task.task_type == 'ad_hoc' and task.leg_type == 'dropoff':
-                task_reward += 1.0
-
             # D: Utilization bonus on dropoff
             # Encourage efficient batching (more items per trip)
             if task.leg_type == 'dropoff' and robot:
@@ -849,6 +816,57 @@ class GAPOTaskAssignmentEnv:
 
         return total_reward
 
+    def refresh_task_inventory_contexts(self) -> None:
+        """
+        Refresh live inventory-derived fields for pending and queued replenishment tasks.
+
+        Creation-time fields are preserved for logging/audit. Current fields are used
+        by Task.get_features() so periodic ranking sees the latest stock and demand.
+        """
+        for task in self.pending_tasks:
+            self._refresh_task_inventory_context(task)
+
+        for robot in self.robots:
+            for task in robot.task_queue:
+                self._refresh_task_inventory_context(task)
+            for task in robot.overflow_queue:
+                self._refresh_task_inventory_context(task)
+
+    def _refresh_task_inventory_context(self, task: Task) -> None:
+        if task.task_type != "replenishment" or not task.sku_id:
+            return
+        if self.graph_state is None or not getattr(self.graph_state, "nodes", None):
+            return
+
+        demand_idx = getattr(task, "demand_location_index", None)
+        if demand_idx is None:
+            demand_idx = task.to_location_index
+        if demand_idx is None or demand_idx < 0 or demand_idx >= len(self.graph_state.nodes):
+            return
+
+        node = self.graph_state.nodes[demand_idx]
+        sku_inventory = getattr(node, "sku_inventory", None) or {}
+        sku_data = sku_inventory.get(task.sku_id)
+        if sku_data is None:
+            return
+
+        stock = float(sku_data.get("stock", task.get_current_sku_stock_level()))
+        max_level = float(sku_data.get("max", task.sku_max_level))
+        reorder = float(sku_data.get("reorder", task.reorder_point))
+        par_level = float(sku_data.get("par", task.par_level))
+
+        rate = _compute_sku_rate(node, task.sku_id, self.graph_state, self.current_time)
+        current_tts = (stock / rate) if rate > 0 else float("inf")
+        current_deadline = self.current_time + max(current_tts * 3600.0, 60.0)
+
+        task.current_time_to_stockout = current_tts
+        task.current_deadline = current_deadline
+        task.current_sku_stock_level = stock
+        task.sku_max_level = max_level
+        task.reorder_point = reorder
+        task.par_level = par_level
+        task.demand_location_index = demand_idx
+
     def get_robot_availability_mask(self, task: Task) -> np.ndarray:
         """
         Get boolean mask for which robots can accept a task.
@@ -869,7 +887,7 @@ class GAPOTaskAssignmentEnv:
         Build graph-structured state dictionary for GAPO.
 
         Returns dict with:
-        - task_features: [15]
+        - task_features: [10]
         - node_continuous: [num_nodes, N] - continuous node features
         - node_categorical: [num_nodes, 1] - node_type_id
         - edge_features: [num_edges, 16] - continuous edge features
@@ -879,12 +897,14 @@ class GAPOTaskAssignmentEnv:
         - robot_positions: [num_robots, 2]
         - queue_features: [16]
         """
+        self.refresh_task_inventory_contexts()
+
         # Task features (get most urgent pending task, or zeros if none)
         if self.pending_tasks:
             current_task = self.pending_tasks[0]  # Most urgent task
             task_features = current_task.get_features(self.current_time)
         else:
-            task_features = np.zeros(15, dtype=np.float32)
+            task_features = np.zeros(10, dtype=np.float32)
 
         # Node features (v3 uses category stats when available)
         try:
@@ -898,7 +918,7 @@ class GAPOTaskAssignmentEnv:
                 node_continuous, node_categorical = self.graph_state.get_node_features_complete()
 
                 node_sku_features, node_sku_mask = (None, None)
-        except Exception as e:
+        except Exception:
 
             import traceback
             traceback.print_exc()
@@ -979,8 +999,8 @@ class GAPOTaskAssignmentEnv:
         # Queue features (based on pending tasks + robot queues)
         if self.pending_tasks:
             num_pending = len(self.pending_tasks)
-            avg_priority = np.mean([t.manual_priority for t in self.pending_tasks])
-            num_urgent = sum(1 for t in self.pending_tasks if t.manual_priority >= 4)
+            avg_priority = np.mean([t.get_current_time_to_stockout() for t in self.pending_tasks])
+            num_urgent = sum(1 for t in self.pending_tasks if t.get_current_time_to_stockout() < 1.0)
             oldest_age = max([t.get_age(self.current_time) for t in self.pending_tasks])
             num_near_deadline = sum(1 for t in self.pending_tasks if t.get_time_to_deadline(self.current_time) < 300)
         else:
@@ -1325,7 +1345,6 @@ class GAPOTaskAssignmentEnv:
             parent_id = getattr(task, 'parent_task_id', None)
             if parent_id in in_transit_parents:
                 # Items on robot - human handling
-                task.manual_priority = 999
                 task.task_type = 'emergency_manual'
                 self.emergency_tasks.append(task)
             else:

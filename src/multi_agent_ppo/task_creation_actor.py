@@ -5,10 +5,11 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from ..environment.graph_helpers import dijkstra_shortest_path
 
 
-# Candidate feature dimension: matches Task.get_features() output (15 dims)
-CANDIDATE_FEAT_DIM = 15
+# Candidate feature dimension: matches Task.get_features() output (10 dims)
+CANDIDATE_FEAT_DIM = 10
 
 # Lightweight state summary dimension fed to both networks
 STATE_SUMMARY_DIM = 8
@@ -237,15 +238,18 @@ def build_candidate_universe(
                 stock_ratio = stock / max_stock
                 reorder_ratio = reorder / max_stock if max_stock > 0 else 0.0
 
+                _, path_cost = dijkstra_shortest_path(
+                    source_node_idx, node_idx, graph_state, len(graph_state.nodes)
+                )
+
                 feat = np.array([
-                    float(source_node_idx), float(node_idx),
-                    120.0,           # estimated_duration (seconds)
+                    float(node_idx),
+                    path_cost,       # estimated_duration: dijkstra(hub → destination)
                     0.0,             # age (not in queue yet)
                     tts * 3600,      # time_to_deadline (proxy from tts)
                     0.0,             # queue_position (not in queue yet)
                     float(num_items),
                     tts,             # time_to_stockout (hours)
-                    1.0, 0.0, 0.0, 0.0,  # replenishment, returns, ad_hoc, emergency
                     cat_id, stock_ratio, reorder_ratio,
                 ], dtype=np.float32)
 
@@ -288,7 +292,7 @@ def build_state_summary(
         1: fraction of robots with empty task queues (idle)
         2: fraction of current simulated hour elapsed
         3: mean pending task age, normalised by 5 minutes
-        4: fraction of pending tasks with manual_priority >= 4
+        4: fraction of pending tasks with time_to_stockout < 1.0 hour (urgent)
         5: mean (stock_level / max_stock) across all nodes
         6: fraction of robots currently moving (from telemetry)
         7: queue fill ratio (duplicate of dim 0 for feature symmetry)
@@ -305,7 +309,10 @@ def build_state_summary(
     if pending_tasks:
         avg_age = float(np.mean([current_time - t.arrival_time for t in pending_tasks]))
         avg_age_norm = avg_age / 300.0  # normalise by 5 minutes
-        frac_urgent = sum(1 for t in pending_tasks if t.manual_priority >= 4) / num_pending
+        frac_urgent = sum(
+            1 for t in pending_tasks
+            if t.get_current_time_to_stockout() < 1.0
+        ) / num_pending
     else:
         avg_age_norm = 0.0
         frac_urgent = 0.0
@@ -460,10 +467,9 @@ class TaskCreationActor(nn.Module):
             task_id=next_task_id,
             from_location_index=selected.from_node_idx,
             to_location_index=selected.to_node_idx,
-            manual_priority=2,           # Non-urgent; deterministic path handles urgent
             deadline=deadline,
             arrival_time=current_time,
-            estimated_duration=120.0,
+            estimated_duration=selected.features[1],  # dijkstra(hub → destination) from candidate
             task_type='replenishment',
             num_items=num_items,
             sku_id=selected.sku_id,

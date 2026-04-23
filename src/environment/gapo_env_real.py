@@ -212,7 +212,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                 robot.telemetry.x, robot.telemetry.y
             )
 
-        path, distance = dijkstra_shortest_path(
+        path, _ = dijkstra_shortest_path(
             start_node,
             task.to_location_index,
             self.graph_state,
@@ -228,7 +228,6 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         robot.planned_path = path
         robot.target_node_index = task.to_location_index
         robot.travel_start_time = self.current_time
-        task.estimated_completion_time = self.current_time + distance
 
     # ------------------------------------------------------------------
     # Traversal records (future work)

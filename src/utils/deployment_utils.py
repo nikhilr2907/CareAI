@@ -243,7 +243,7 @@ def draw_tasks(screen, env, bounds, width, height):
         to_x, to_y = _get_node_center(to_node)
         fx, fy = world_to_screen(from_x, from_y, bounds, width, height)
         tx, ty = world_to_screen(to_x, to_y, bounds, width, height)
-        color = (255, 200, 50) if task.manual_priority >= 4 else (200, 200, 200)
+        color = (255, 200, 50) if task.get_current_time_to_stockout() < 1.0 else (200, 200, 200)
         pygame.draw.circle(screen, color, (fx, fy), 4)
         pygame.draw.circle(screen, (50, 200, 255), (tx, ty), 4)
 
