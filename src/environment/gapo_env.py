@@ -19,6 +19,7 @@ from .graph_helpers import dijkstra_shortest_path
 from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
 from ..reliability.telemetry_effects import TelemetryEffectsManager
 from ..deployment.robot_backend import RobotBackend
+from ..utils.fleet_event_logger import FleetEventLogger
 
 
 class GAPOTaskAssignmentEnv:
@@ -33,6 +34,7 @@ class GAPOTaskAssignmentEnv:
         initial_stochastic_tasks: int = 0,
         use_task_creation_actor: bool = True,
         device: str = 'cpu',
+        fleet_event_logger: Optional['FleetEventLogger'] = None,
     ):
         super(GAPOTaskAssignmentEnv, self).__init__()
 
@@ -40,6 +42,7 @@ class GAPOTaskAssignmentEnv:
         self.num_nodes = num_nodes
         self.max_episode_time = max_episode_time
         self.timestep_seconds = timestep_seconds
+        self.fleet_event_logger = fleet_event_logger
         # Environment components
         self.graph_state = None
         self.robots = []
@@ -66,6 +69,10 @@ class GAPOTaskAssignmentEnv:
         # _compute_timestep_reward, consumed by step() info dict and run_training.py).
         self._last_per_task_credits: Dict[int, float] = {}
         self._last_completed_leg_credits: Dict[int, float] = {}
+        # Battery level snapshotted when each leg starts navigating, keyed by task_id.
+        # Used to compute per-leg distance and energy at completion.
+        self._task_battery_snapshots: Dict[int, float] = {}
+        self.BATTERY_CAPACITY_WH = 500.0  # nominal robot battery capacity
 
         # Proactive SKU task creation actor (#7 factorizer + #8 scorer)
         # Creates inventory-aware stochastic replenishment tasks instead of blind random.
@@ -167,6 +174,7 @@ class GAPOTaskAssignmentEnv:
         self.next_task_id = 1
         self.current_time = 0.0
         self.last_inventory_check = 0.0
+        self._task_battery_snapshots.clear()
         self.graph_state.current_time = self.current_time
         self._stochastic_task_timestamps = []
 
@@ -476,6 +484,12 @@ class GAPOTaskAssignmentEnv:
             all_robots=self.robots,
         )
 
+        # Store planned route on task so logger can record it at completion
+        task.planned_path = path
+
+        # Snapshot battery at leg start so completion can compute distance/energy delta
+        self._task_battery_snapshots[task.task_id] = simulator.battery_level
+
         # Set path in simulator
         simulator.set_path(path, task.task_id, task.num_items)
 
@@ -560,6 +574,15 @@ class GAPOTaskAssignmentEnv:
                     simulator.path_queue == [] and
                     simulator.current_target_node is None and
                     self._should_robot_charge(robot_id)):
+                if self.fleet_event_logger:
+                    hub_idx = self._nearest_hub_index(robot_id)
+                    self.fleet_event_logger.log_charge_dispatch_idle(
+                        robot_id=robot_id,
+                        sim_time=self.current_time,
+                        battery_level=simulator.battery_level,
+                        current_node=robot.current_node_index,
+                        hub_node=hub_idx,
+                    )
                 self._send_robot_to_charge(robot_id)
 
     def _check_task_completions(self) -> List[Task]:
@@ -602,6 +625,13 @@ class GAPOTaskAssignmentEnv:
                     simulator.complete_task(task.num_items)
                     robot.mark_dropoff_complete(task.parent_task_id)
 
+                # Compute per-leg distance and energy from battery delta
+                battery_start = self._task_battery_snapshots.pop(task.task_id, simulator.battery_level)
+                battery_delta = max(0.0, battery_start - simulator.battery_level)
+                drain_rate = simulator.battery_drain_rate if simulator.battery_drain_rate > 0 else 1e-9
+                task.distance_traveled = battery_delta / drain_rate
+                task.energy_consumed_wh = battery_delta * self.BATTERY_CAPACITY_WH
+
                 # Remove task from robot queue
                 completed_task = robot.complete_current_task()
                 if completed_task:
@@ -634,11 +664,25 @@ class GAPOTaskAssignmentEnv:
                 node = self.graph_state.nodes[robot.current_node_index]
                 if node.node_type == 'hub' and not simulator.is_charging:
                     simulator.start_charging()
+                    if self.fleet_event_logger:
+                        self.fleet_event_logger.log_charge_start(
+                            robot_id=robot_id,
+                            sim_time=self.current_time,
+                            battery_level=simulator.battery_level,
+                            hub_node=robot.current_node_index,
+                        )
 
             # Handle charging completion
             if (simulator.is_charging is False and robot_id in self._robots_routing_to_charge and
                     simulator.active_task_id == -1):
                 # Charging just finished
+                if self.fleet_event_logger:
+                    self.fleet_event_logger.log_charge_complete(
+                        robot_id=robot_id,
+                        sim_time=self.current_time,
+                        battery_level=simulator.battery_level,
+                        hub_node=robot.current_node_index,
+                    )
                 self._robots_routing_to_charge.discard(robot_id)
                 if robot.task_queue:
                     self._plan_path_for_robot(robot, robot.current_task, simulator)
@@ -1309,6 +1353,20 @@ class GAPOTaskAssignmentEnv:
         # Interrupt: _send_robot_to_charge overwrites simulator path_queue and
         # sets active_task_id = -1. Tasks stay in robot.task_queue so they
         # auto-resume once the charge trip completes.
+        robot = self.robots[robot_id]
+        simulator = self.robot_simulators[robot_id]
+        if self.fleet_event_logger:
+            hub_idx = self._nearest_hub_index(robot_id)
+            queued_ids = [t.task_id for t in robot.task_queue]
+            self.fleet_event_logger.log_charge_interrupt(
+                robot_id=robot_id,
+                sim_time=self.current_time,
+                battery_level=simulator.battery_level,
+                interrupted_task_id=simulator.active_task_id,
+                queued_task_ids=queued_ids,
+                current_node=robot.current_node_index,
+                hub_node=hub_idx,
+            )
         self._send_robot_to_charge(robot_id)
         return True
 
@@ -1348,15 +1406,27 @@ class GAPOTaskAssignmentEnv:
 
         in_transit_parents = set(robot.picked_up_task_ids)
 
+        requeued_ids = []
+        emergency_ids = []
         for task in robot.task_queue:
             parent_id = getattr(task, 'parent_task_id', None)
             if parent_id in in_transit_parents:
-                # Items on robot - human handling
                 task.task_type = 'emergency_manual'
                 self.emergency_tasks.append(task)
+                emergency_ids.append(task.task_id)
             else:
-                # Not yet picked up - reassign to pending
                 self.pending_tasks.insert(0, task)
+                requeued_ids.append(task.task_id)
+
+        if self.fleet_event_logger:
+            self.fleet_event_logger.log_robot_offline(
+                robot_id=robot_id,
+                sim_time=self.current_time,
+                battery_level=simulator.battery_level,
+                current_node=robot.current_node_index,
+                requeued_task_ids=requeued_ids,
+                emergency_task_ids=emergency_ids,
+            )
 
         # Clear robot queues
         robot.task_queue.clear()

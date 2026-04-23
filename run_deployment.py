@@ -42,6 +42,7 @@ from src.utils.deployment_utils import (
     rescore_robot_queues,
     assign_tasks,
 )
+from src.utils.task_logger import TaskLogger
 
 
 def parse_args() -> argparse.Namespace:
@@ -212,6 +213,7 @@ def main():
         ]
     )
     logger = logging.getLogger(__name__)
+    task_logger = TaskLogger(output_dir / "logs")
 
     # Set random seed if provided
     if args.seed is not None:
@@ -406,7 +408,7 @@ def main():
             rescore_robot_queues(env, ppo)
 
             # Assign top pending tasks to available robots
-            assigned_this_cycle = assign_tasks(env, ppo, args.max_assignments_per_step)
+            assigned_this_cycle = assign_tasks(env, ppo, args.max_assignments_per_step, task_logger=task_logger, total_assignments=total_tasks_assigned)
             total_tasks_assigned += assigned_this_cycle
 
             # Simulation step
@@ -431,6 +433,14 @@ def main():
                         else:
                             total_late += 1
                             total_lateness += lateness
+                    task_logger.log_completion(
+                        task.task_id, 0.0,
+                        current_time - task.arrival_time if task.arrival_time is not None else None,
+                        current_time,
+                        distance_traveled=getattr(task, "distance_traveled", 0.0),
+                        energy_consumed=getattr(task, "energy_consumed_wh", 0.0),
+                        completed_task=task,
+                    )
 
             # Log metrics at specified time interval
             if current_time - last_log_time >= args.log_interval:
@@ -641,6 +651,7 @@ def main():
         logger.error(f"Error during deployment: {e}", exc_info=True)
         raise
     finally:
+        task_logger.plot_metrics(output_dir)
         # Cleanup
         logger.info("\n" + "=" * 80)
         logger.info("DEPLOYMENT SUMMARY")

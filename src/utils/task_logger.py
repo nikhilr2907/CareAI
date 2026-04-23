@@ -77,6 +77,7 @@ class TaskLogger:
             'source': source,
             'task_type': getattr(task, 'task_type', None),
             'leg_type': getattr(task, 'leg_type', None),
+            'learned_score': getattr(task, 'learned_score', 0.0),
         }
 
         # Track source breakdown
@@ -100,11 +101,12 @@ class TaskLogger:
         num_items = getattr(task, 'num_items', 1)
         deadline = getattr(task, 'current_deadline', getattr(task, 'deadline', None))
         deadline_str = f"{deadline:.1f}s" if deadline is not None else "?"
+        learned_score = getattr(task, 'learned_score', 0.0)
         self.logger.info(
             f"ASSIGN task_id={task_id} iter={iteration} sim_time={sim_time:.1f}s "
             f"robot={assigned_robot} location={task.from_location_index}->{to_loc} "
             f"leg={leg_type} items={num_items} deadline={deadline_str} "
-            f"arrival={task.arrival_time:.1f}s "
+            f"arrival={task.arrival_time:.1f}s priority_score={learned_score:.4f} "
             f"assign_reward={assignment_reward:.4f} {sku_info} "
             f"(buffer={buffer_size} assignments={num_assignments})"
         )
@@ -173,15 +175,19 @@ class TaskLogger:
             from_idx = meta['from_location_idx']
         if to_idx is None:
             to_idx = meta['to_location_idx']
+        planned_path = getattr(completed_task, 'planned_path', None) if completed_task is not None else None
+        route_str = f"route={planned_path} route_nodes={len(planned_path)}" if planned_path else "route=unknown"
+        priority_score = meta.get('learned_score', 0.0)
         self.logger.info(
             f"COMPLT task_id={completed_task_id} parent={parent_id} iter={meta['iteration']} "
             f"sim_time={sim_time:.1f}s robot={meta['assigned_robot']} source={source} "
             f"leg={leg_type_str} items={num_items_str} location={from_idx}->{to_idx if to_idx is not None else '?'} "
             f"time_from_assign={sim_time - meta['sim_time_assigned']:.1f}s "
+            f"priority_score={priority_score:.4f} "
             f"assign_reward={meta['assignment_reward']:.4f} completion_reward={completion_reward:.4f} "
             f"total_reward={total_reward:.4f} actual_time={actual_time_str} "
             f"cost=[dist:{distance_cost:.2f} robohrs:{robot_hours_cost:.2f} energy:{energy_cost:.2f}] "
-            f"total_cost={total_cost:.2f} cost_per_reward={cost_per_reward:.4f} {sku_info}"
+            f"total_cost={total_cost:.2f} cost_per_reward={cost_per_reward:.4f} {sku_info} {route_str}"
         )
 
         # Keep aggregate completion/cost analytics at original-task granularity.

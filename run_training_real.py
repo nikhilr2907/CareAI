@@ -338,23 +338,28 @@ async def main():
                     iteration_completion_times.append(env.current_time - task.arrival_time)
             
             task_completion_credits: dict = info.get('task_completion_credits', {})
+            completed_task_legs = info.get('completed_task_legs', [])
+            completed_leg_credits: dict = info.get('completed_leg_credits', {})
+
+            for leg_task in completed_task_legs:
+                raw_leg_reward = float(completed_leg_credits.get(leg_task.task_id, 0.0))
+                scaled_leg_reward = raw_leg_reward * reward_scale
+                if reward_clip is not None and reward_clip > 0:
+                    scaled_leg_reward = float(np.clip(scaled_leg_reward, -reward_clip, reward_clip))
+                task_logger.log_completion(
+                    getattr(leg_task, "parent_task_id", leg_task.task_id),
+                    scaled_leg_reward,
+                    env.current_time - leg_task.arrival_time if leg_task.arrival_time is not None else None,
+                    env.current_time,
+                    distance_traveled=getattr(leg_task, "distance_traveled", 0.0),
+                    energy_consumed=getattr(leg_task, "energy_consumed_wh", 0.0),
+                    completed_task=leg_task,
+                )
 
             for parent_id, bonus in task_completion_credits.items():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_bonus = float(np.clip(scaled_bonus, -reward_clip, reward_clip))
-
-                completed_task = next(
-                    (t for t in newly_completed if t.task_id == parent_id), None
-                )
-                actual_completion_time = None
-                if completed_task is not None and completed_task.arrival_time is not None:
-                    actual_completion_time = env.current_time - completed_task.arrival_time
-
-                task_logger.log_completion(
-                    parent_id, scaled_bonus, actual_completion_time, env.current_time,
-                    distance_traveled=0.0, energy_consumed=0.0,
-                )
 
                 if env.task_creation_actor is not None:
                     env.task_creation_actor.record_completion(parent_id, scaled_bonus)

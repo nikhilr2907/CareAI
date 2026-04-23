@@ -298,7 +298,7 @@ async def main():
 
             # Env step
             prev_completed = len(env.completed_tasks)
-            state_dict, _, done, info = env.step(dt=1.0)
+            state_dict, _, _, _ = env.step(dt=1.0)
             total_steps += 1
 
             newly_completed = env.completed_tasks[prev_completed:]
@@ -311,12 +311,10 @@ async def main():
                     task.task_id, 0.0,
                     (env.current_time - task.arrival_time) if task.arrival_time is not None else None,
                     env.current_time,
-                    distance_traveled=0.0, energy_consumed=0.0,
+                    distance_traveled=getattr(task, "distance_traveled", 0.0),
+                    energy_consumed=getattr(task, "energy_consumed_wh", 0.0),
+                    completed_task=task,
                 )
-
-            if done:
-                # Continuous operation — no reset, just clear per-episode task metadata
-                task_logger.task_metadata.clear()
 
             # Periodic logging
             if total_steps % args.log_interval == 0:
@@ -351,6 +349,8 @@ async def main():
     logger.info(f"  Wall time:         {wall_hours:.2f}h")
     if completion_time_history:
         logger.info(f"  Avg completion:    {float(np.mean(completion_time_history)) / 60:.1f}min")
+
+    task_logger.plot_metrics(output_dir)
 
     if twin_publisher:
         twin_publisher.stop()

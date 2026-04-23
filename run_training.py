@@ -480,6 +480,25 @@ def main():
 
             # Retrieve per-task credits from env (computed in _compute_timestep_reward).
             task_completion_credits: dict = info.get('task_completion_credits', {})
+            completed_task_legs = info.get('completed_task_legs', [])
+            completed_leg_credits: dict = info.get('completed_leg_credits', {})
+
+            for leg_task in completed_task_legs:
+                if getattr(leg_task, "leg_type", None) != "pickup":
+                    continue
+                raw_leg_reward = float(completed_leg_credits.get(leg_task.task_id, 0.0))
+                scaled_leg_reward = raw_leg_reward * reward_scale
+                if reward_clip is not None and reward_clip > 0:
+                    scaled_leg_reward = float(np.clip(scaled_leg_reward, -reward_clip, reward_clip))
+                task_logger.log_completion(
+                    getattr(leg_task, "parent_task_id", leg_task.task_id),
+                    scaled_leg_reward,
+                    env.current_time - leg_task.arrival_time if leg_task.arrival_time is not None else None,
+                    env.current_time,
+                    distance_traveled=getattr(leg_task, "distance_traveled", 0.0),
+                    energy_consumed=getattr(leg_task, "energy_consumed_wh", 0.0),
+                    completed_task=leg_task,
+                )
 
             # Debug: Check if tasks are completing
             if len(newly_completed) > 0 and len(task_completion_credits) > 0:
@@ -496,26 +515,26 @@ def main():
                 if reward_clip is not None and reward_clip > 0:
                     scaled_bonus = float(np.clip(scaled_bonus, -reward_clip, reward_clip))
 
-                # Log task completion
                 completed_task = next(
-                    (t for t in newly_completed if t.task_id == parent_id),
+                    (
+                        t for t in completed_task_legs
+                        if getattr(t, "parent_task_id", None) == parent_id
+                        or t.task_id == parent_id
+                    ),
                     None
                 )
                 actual_completion_time = None
-                if completed_task is not None:
-                    actual_completion_time = (
-                        env.current_time - completed_task.arrival_time
-                        if completed_task.arrival_time is not None else None
-                    )
+                if completed_task is not None and completed_task.arrival_time is not None:
+                    actual_completion_time = env.current_time - completed_task.arrival_time
 
-                # Always log completion (even if task_id wasn't in assignment log)
-                # TODO: distance_traveled and energy_consumed should come from robot telemetry
                 task_logger.log_completion(
-                    parent_id, scaled_bonus,
+                    parent_id,
+                    scaled_bonus,
                     actual_completion_time,
                     env.current_time,
-                    distance_traveled=0.0,  # Placeholder: compute from robot odometry
-                    energy_consumed=0.0     # Placeholder: compute from battery model
+                    distance_traveled=0.0,
+                    energy_consumed=0.0,
+                    completed_task=completed_task,
                 )
 
                 # Route completion signal to task creation actor buffer (#7/#8 training)
