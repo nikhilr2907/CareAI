@@ -321,10 +321,6 @@ def apply_consumption_scale(env, scale: Optional[float]):
         return
     if hasattr(env, "graph_state") and env.graph_state is not None:
         env.graph_state.consumption_scale = float(scale)
-    for node in env.graph_state.nodes:
-        if not hasattr(node, "_base_consumption_rate"):
-            node._base_consumption_rate = node.consumption_rate
-        node.consumption_rate = node._base_consumption_rate * scale
 
 
 def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_step,

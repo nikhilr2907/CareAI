@@ -134,7 +134,6 @@ class RealtimeAnalyticsCollector:
                         'stock': stock,
                         'max_stock': max_stock,
                         'stock_ratio': stock / max_stock if max_stock > 0 else 0,
-                        'consumption_rate': node.consumption_rate,
                         'timestamp': current_time,
                     })
 
@@ -249,17 +248,7 @@ class RealtimeAnalyticsCollector:
                 'waiting': int(statuses.get('WAITING_AT_LOCATION', 0)),
             }
 
-        # 3. SKU demand (consumption rate)
-        if self.inventory_snapshots:
-            sku_stats = defaultdict(list)
-            for snap in self.inventory_snapshots:
-                sku_stats[snap['sku_id']].append(snap['consumption_rate'])
-            self.metrics['sku_demand'] = {
-                sku: float(np.mean(rates))
-                for sku, rates in sku_stats.items()
-            }
-
-        # 4. Failure rate (no failure tracking in cost_data yet, set to 0)
+        # 3. Failure rate (no failure tracking in cost_data yet, set to 0)
         self.metrics['failure_rate'] = 0.0
 
     def increment_iteration(self):

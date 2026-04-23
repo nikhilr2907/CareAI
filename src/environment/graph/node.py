@@ -18,7 +18,6 @@ class GraphNode:
 
     # 4. Inventory
     stock_level: float = 0.0
-    consumption_rate: float = 0.0
     max_stock: float = 0.0
     category_inventory: dict = field(default_factory=dict)
     sku_inventory: Dict[str, Dict] = field(default_factory=dict)
@@ -73,39 +72,18 @@ class GraphNode:
     # ── Inventory state ─────────────────────────────────────────────────────────
 
     @property
-    def time_to_stockout(self) -> float:
-        if self.sku_inventory:
-            rate = self.consumption_rate
-            if rate <= 0:
-                return float('inf')
-            return self.stock_level / rate
-        if self.consumption_rate <= 0:
-            return float('inf')
-        return self.stock_level / self.consumption_rate
-
-    @property
     def needs_restock(self) -> bool:
         if self.sku_inventory:
             for data in self.sku_inventory.values():
                 if float(data.get('stock', 0)) <= float(data.get('reorder', 0)):
                     return True
-            return False
-        return self.time_to_stockout < 2.0
+        return False
 
     @property
     def is_stockout(self) -> bool:
         if self.sku_inventory:
             return any(d.get('stock', 0.0) <= 0 for d in self.sku_inventory.values())
         return self.stock_level <= 0
-
-    @property
-    def urgency_level(self) -> int:
-        tts = self.time_to_stockout
-        if tts < 0.5:   return 5
-        if tts < 1.0:   return 4
-        if tts < 2.0:   return 3
-        if tts < 4.0:   return 2
-        return 1
 
     # ── SKU operations ──────────────────────────────────────────────────────────
 
@@ -163,16 +141,6 @@ class GraphNode:
 
     def get_total_num_skus(self) -> int:
         return sum(cat.get('num_skus', 0) for cat in self.category_inventory.values())
-
-    def get_category_consumption_rate(self, category: str) -> float:
-        return self.category_inventory.get(category, {}).get('rate', 0.0)
-
-    def get_category_time_to_stockout(self, category: str) -> float:
-        stock = self.get_category_stock_level(category)
-        rate  = self.get_category_consumption_rate(category)
-        if rate <= 0:
-            return float('inf')
-        return stock / rate
 
     def get_all_categories(self) -> List[str]:
         return list(self.category_inventory.keys())

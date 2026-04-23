@@ -26,9 +26,6 @@ class GraphState:
         - center_x, center_y: Region center coordinates
         - width, height: Region dimensions
         - stock_level: Current inventory
-        - consumption_rate: Items consumed per hour
-        - time_to_stockout: Hours until stockout
-        - (deprecated) occupancy_count removed from this compact view
         """
         features = []
         for node in self.nodes:
@@ -38,8 +35,6 @@ class GraphState:
                 node.width,
                 node.height,
                 node.stock_level,
-                node.consumption_rate,
-                node.time_to_stockout
             ]
             features.append(node_features)
         return np.array(features, dtype=np.float32)
@@ -78,15 +73,13 @@ class GraphState:
             - continuous_features: [num_nodes, 8] numpy array
             - categorical_features: [num_nodes, 1] numpy array (node_type_id)
 
-        Continuous features per node (8 total):
+        Continuous features per node (6 total):
         1. center_x: Region center X coordinate
         2. center_y: Region center Y coordinate
         3. width: Region width (meters)
         4. height: Region height (meters)
         5. area: Region area (width * height)
         6. stock_level: Current inventory items
-        7. consumption_rate: Items consumed per hour
-        8. time_to_stockout: Hours until stockout (inf if not consuming)
 
         Categorical features per node (1 total):
         1. node_type_id: Integer ID for node_type
@@ -113,8 +106,6 @@ class GraphState:
                 node.height,
                 node.area,
                 node.stock_level,
-                node.consumption_rate,
-                min(node.time_to_stockout, 999.0)
             ]
             continuous_features.append(node_continuous)
 
@@ -240,8 +231,6 @@ class GraphState:
                 node.height,
                 node.area,
                 node.stock_level,
-                node.consumption_rate,
-                min(node.time_to_stockout, 999.0),
                 float(node.foot_traffic_weight),
                 float(node.floor),
                 float(node.get_total_num_skus()),
@@ -257,10 +246,8 @@ class GraphState:
             for cat in category_order:
                 stock = node.get_category_stock_level(cat)
                 max_stock = node.get_category_max_stock(cat)
-                rate = node.get_category_consumption_rate(cat)
-                tts = node.get_category_time_to_stockout(cat)
                 stock_ratio = (stock / max_stock) if max_stock > 0 else 0.0
-                cat_feats.extend([stock_ratio, rate, min(tts, 999.0)])
+                cat_feats.extend([stock_ratio])
 
             node_type_id = node_type_to_id.get(node.node_type, 0)
             categorical_features.append([
@@ -458,8 +445,6 @@ class GraphState:
                 node.height,
                 node.area,
                 node.stock_level,
-                node.consumption_rate,
-                min(node.time_to_stockout, 999.0),
                 float(node.get_total_num_skus()),
                 float(len(node.category_inventory)),
                 float(node.foot_traffic_weight)
@@ -470,7 +455,7 @@ class GraphState:
             node_type_id = node_type_to_id.get(node.node_type, 0)
             node_categorical.append([node_type_id])
 
-            # ===== Category features (max_categories × 4) =====
+            # ===== Category features (max_categories × 3) =====
             node_cat_features = []
             node_cat_mask = []
             node_cat_ids = []
@@ -482,20 +467,19 @@ class GraphState:
                         node.get_category_stock_level(cat_name),
                         node.get_category_max_stock(cat_name),
                         float(node.get_category_num_skus(cat_name)),
-                        node.get_category_consumption_rate(cat_name)
                     ]
                     node_cat_features.append(cat_data)
                     node_cat_mask.append(1.0)
                     node_cat_ids.append(category_to_id[cat_name])
                 else:
                     # Category doesn't exist - pad with zeros
-                    node_cat_features.append([0.0, 0.0, 0.0, 0.0])
+                    node_cat_features.append([0.0, 0.0, 0.0])
                     node_cat_mask.append(0.0)
                     node_cat_ids.append(-1)  # -1 = no category
 
             # Pad to max_categories if needed
             while len(node_cat_features) < max_categories:
-                node_cat_features.append([0.0, 0.0, 0.0, 0.0])
+                node_cat_features.append([0.0, 0.0, 0.0])
                 node_cat_mask.append(0.0)
                 node_cat_ids.append(-1)
 
@@ -513,9 +497,9 @@ class GraphState:
             floor_ids.append(node.floor)
 
         return (
-            np.array(node_continuous, dtype=np.float32),  # [num_nodes, 18]
+            np.array(node_continuous, dtype=np.float32),  # [num_nodes, 9]
             np.array(node_categorical, dtype=np.int64),    # [num_nodes, 1]
-            np.array(category_features, dtype=np.float32), # [num_nodes, max_categories, 4]
+            np.array(category_features, dtype=np.float32), # [num_nodes, max_categories, 3]
             np.array(category_mask, dtype=np.float32),     # [num_nodes, max_categories]
             np.array(category_ids, dtype=np.int64),        # [num_nodes, max_categories]
             np.array(location_ids, dtype=np.int64),        # [num_nodes]

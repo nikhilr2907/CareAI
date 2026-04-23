@@ -146,8 +146,6 @@ class RobotBridgeWebSocketClient:
             await self._handle_task_status(data)
         elif msg_type == 'location_inventory':
             await self._handle_location_inventory(data)
-        elif msg_type == 'consumption_rates':
-            logger.debug("Ignoring deprecated message type: consumption_rates")
         elif msg_type == 'system_state':
             await self._handle_system_state(data)
         elif msg_type == 'emergency_stop':

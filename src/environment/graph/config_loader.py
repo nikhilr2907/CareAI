@@ -101,7 +101,6 @@ def _load_ilc_config(raw_data: Dict) -> Tuple[List[GraphNode], List[Tuple[int, i
             location_tag=node_data.get("location_tag"),
             stock_level=total_stock,
             max_stock=total_max,
-            consumption_rate=0.0,
             sku_inventory=sku_inventory,
         )
         node.display_name = node_data.get("name", node.node_id)

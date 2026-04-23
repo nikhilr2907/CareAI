@@ -1,0 +1,45 @@
+{
+  "nodes": [
+    {
+      "index": 0,
+      "id": "node_0",
+      "name": "node_0",
+      "type": "storage",
+      "x": 1.0,
+      "y": 1.0
+    },
+    {
+      "index": 1,
+      "id": "node_1",
+      "name": "node_1",
+      "type": "recovery",
+      "x": 12.0,
+      "y": 10.0
+    },
+    {
+      "index": 2,
+      "id": "node_2",
+      "name": "node_2",
+      "type": "recovery",
+      "x": 13.0,
+      "y": 4.0
+    }
+  ],
+  "edges": [
+    {
+      "from": "node_0",
+      "to": "node_1",
+      "distance_m": 15.0
+    },
+    {
+      "from": "node_0",
+      "to": "node_2",
+      "distance_m": 12.5
+    },
+    {
+      "from": "node_1",
+      "to": "node_2",
+      "distance_m": 7.1
+    }
+  ]
+}

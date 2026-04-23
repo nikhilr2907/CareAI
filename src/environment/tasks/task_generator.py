@@ -299,10 +299,7 @@ def update_inventory_levels(graph_state, time_delta_hours: float):
                     category_rates[category] = category_rates.get(category, 0.0) + rate
 
             node.stock_level = total_stock
-            node.consumption_rate = total_rate
             node.recalc_category_inventory()
             for cat, rate in category_rates.items():
                 if cat in node.category_inventory:
                     node.category_inventory[cat]["rate"] = rate
-        elif node.consumption_rate > 0:
-            node.consume_stock(time_delta_hours)

@@ -262,43 +262,6 @@ def build_candidate_universe(
                     features=feat,
                 ))
 
-        else:
-            # Node-level fallback
-            stock = node.stock_level
-            max_stock = node.max_stock
-            rate = node.consumption_rate
-            reorder = rate * 2.0  # 2-hour buffer default (buffer_time field removed)
-
-            if stock <= reorder or rate <= 0 or max_stock <= 0 or stock >= max_stock:
-                continue
-            if (node_idx, None) in covered:
-                continue
-
-            tts = stock / rate
-            room = max_stock - stock
-            num_items = max(1, int(room))
-            stock_ratio = stock / max_stock
-            reorder_ratio = reorder / max_stock if max_stock > 0 else 0.0
-
-            feat = np.array([
-                float(source_node_idx), float(node_idx),
-                120.0, 0.0, tts * 3600, 0.0, float(num_items), tts,
-                1.0, 0.0, 0.0, 0.0,
-                -1.0, stock_ratio, reorder_ratio,
-            ], dtype=np.float32)
-
-            candidates.append(CandidateSpec(
-                from_node_idx=source_node_idx,
-                to_node_idx=node_idx,
-                sku_id=None,
-                category_id=-1.0,
-                stock=stock,
-                reorder=reorder,
-                max_stock=max_stock,
-                rate=rate,
-                time_to_stockout=tts,
-                features=feat,
-            ))
 
     if not candidates:
         return []
