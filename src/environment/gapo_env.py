@@ -377,6 +377,8 @@ class GAPOTaskAssignmentEnv:
         # Allow assignment regardless of capacity to avoid HOLD behavior
 
         was_idle = len(robot.task_queue) == 0
+        assignment_stock_level = getattr(task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None))
+        task.sku_stock_level_at_assign = assignment_stock_level
 
         # Split into pickup + dropoff legs
         pickup_task = Task(
@@ -399,6 +401,7 @@ class GAPOTaskAssignmentEnv:
             sku_stock_level=task.sku_stock_level,
             initial_sku_stock_level=task.initial_sku_stock_level,
             current_sku_stock_level=task.current_sku_stock_level,
+            sku_stock_level_at_assign=assignment_stock_level,
             sku_max_level=task.sku_max_level,
             reorder_point=task.reorder_point,
             par_level=task.par_level,
@@ -429,6 +432,7 @@ class GAPOTaskAssignmentEnv:
             sku_stock_level=task.sku_stock_level,
             initial_sku_stock_level=task.initial_sku_stock_level,
             current_sku_stock_level=task.current_sku_stock_level,
+            sku_stock_level_at_assign=assignment_stock_level,
             sku_max_level=task.sku_max_level,
             reorder_point=task.reorder_point,
             par_level=task.par_level,
@@ -607,6 +611,12 @@ class GAPOTaskAssignmentEnv:
 
                 task = robot.current_task
 
+                # Refresh live demand-side stock at the exact event moment so downstream
+                # logging can distinguish assignment-time stock from pickup/dropoff stock.
+                if task.task_type == 'replenishment' and task.sku_id and task.leg_type == "pickup":
+                    self._refresh_task_inventory_context(task)
+                    task.sku_stock_level_at_collection = task.current_sku_stock_level
+
                 # Complete delivery
                 if task.leg_type == "pickup":
                     simulator.load_items(task.num_items)
@@ -619,6 +629,10 @@ class GAPOTaskAssignmentEnv:
                         to_node.stock_level = sum(v.get('stock', 0.0) for v in to_node.category_inventory.values())
                     else:
                         to_node.restock(task.num_items)
+
+                    if task.sku_id:
+                        self._refresh_task_inventory_context(task)
+                        task.sku_stock_level_at_dropoff = task.current_sku_stock_level
 
                 # Unload items from simulator on dropoff
                 if task.leg_type == "dropoff":

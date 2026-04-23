@@ -47,6 +47,14 @@ class TaskLogger:
         # Track cost metrics
         self.cost_data = []  # List of {'source', 'reward', 'distance', 'robot_hours', 'energy', 'total_cost', 'cost_per_reward'}
 
+    @staticmethod
+    def _format_stock_snapshot(label: str, stock_level, max_level) -> str:
+        """Format a stock snapshot consistently for assignment/completion logs."""
+        if stock_level is None or max_level is None:
+            return ""
+        stock_pct = (stock_level / max_level * 100) if max_level > 0 else 0
+        return f" {label}={stock_level:.1f}/{max_level:.1f}({stock_pct:.0f}%)"
+
     def log_assignment(self, task, assigned_robot: int, assignment_reward: float,
                       iteration: int, sim_time: float, num_assignments: int, buffer_size: int):
         """Log task assignment."""
@@ -69,7 +77,8 @@ class TaskLogger:
             'parent_task_id': getattr(task, 'parent_task_id', None),
             'sku_id': getattr(task, 'sku_id', None),
             'sku_stock_level_at_assign': getattr(
-                task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None)
+                task, 'sku_stock_level_at_assign',
+                getattr(task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None))
             ),
             'sku_max_level': getattr(task, 'sku_max_level', None),
             'reorder_point': getattr(task, 'reorder_point', None),
@@ -86,16 +95,18 @@ class TaskLogger:
         # Log assignment event
         to_loc = getattr(task, 'to_location_index', '?')
         sku_id = getattr(task, 'sku_id', 'N/A')
-        sku_stock = getattr(task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None))
+        sku_stock = getattr(
+            task,
+            'sku_stock_level_at_assign',
+            getattr(task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None)),
+        )
         sku_max = getattr(task, 'sku_max_level', None)
 
         # Build SKU info string
         sku_info = f"sku_id={sku_id}"
-        if sku_stock is not None and sku_max is not None:
-            stock_pct = (sku_stock / sku_max * 100) if sku_max > 0 else 0
-            sku_info += f" stock_level={sku_stock:.1f}/{sku_max:.1f}({stock_pct:.0f}%)"
-            if hasattr(task, 'reorder_point') and task.reorder_point is not None:
-                sku_info += f" reorder={task.reorder_point:.1f}"
+        sku_info += self._format_stock_snapshot('stock_at_assign', sku_stock, sku_max)
+        if hasattr(task, 'reorder_point') and task.reorder_point is not None:
+            sku_info += f" reorder={task.reorder_point:.1f}"
 
         leg_type = getattr(task, 'leg_type', 'full')
         num_items = getattr(task, 'num_items', 1)
@@ -157,15 +168,69 @@ class TaskLogger:
 
         # Build SKU info string
         sku_info = f"sku_id={meta['sku_id'] or 'N/A'}"
-        if meta['sku_stock_level_at_assign'] is not None and meta['sku_max_level'] is not None:
-            stock_pct = (meta['sku_stock_level_at_assign'] / meta['sku_max_level'] * 100) if meta['sku_max_level'] > 0 else 0
-            sku_info += f" stock_at_assign={meta['sku_stock_level_at_assign']:.1f}/{meta['sku_max_level']:.1f}({stock_pct:.0f}%)"
-            if meta['reorder_point'] is not None:
-                sku_info += f" reorder={meta['reorder_point']:.1f}"
+        sku_info += self._format_stock_snapshot(
+            'stock_at_assign',
+            meta['sku_stock_level_at_assign'],
+            meta['sku_max_level'],
+        )
+        completed_stock = None
+        completed_stock_max = meta['sku_max_level']
+        if completed_task is not None:
+            completed_stock = getattr(completed_task, 'sku_stock_level_at_collection', None)
+            if completed_stock is None:
+                completed_stock = getattr(completed_task, 'sku_stock_level_at_dropoff', None)
+            if completed_stock is None:
+                completed_stock = getattr(
+                    completed_task,
+                    'current_sku_stock_level',
+                    getattr(completed_task, 'sku_stock_level', None),
+                )
+            completed_stock_max = getattr(completed_task, 'sku_max_level', completed_stock_max)
+        if completed_leg_type == "pickup":
+            sku_info += self._format_stock_snapshot(
+                'stock_at_collection',
+                completed_stock,
+                completed_stock_max,
+            )
+        elif completed_leg_type == "dropoff":
+            sku_info += self._format_stock_snapshot(
+                'stock_at_dropoff',
+                completed_stock,
+                completed_stock_max,
+            )
+        elif completed_leg_type:
+            sku_info += self._format_stock_snapshot(
+                'stock_at_completion',
+                completed_stock,
+                completed_stock_max,
+            )
+        reorder_point = getattr(completed_task, 'reorder_point', None) if completed_task is not None else None
+        if reorder_point is None:
+            reorder_point = meta['reorder_point']
+        if reorder_point is not None:
+            sku_info += f" reorder={reorder_point:.1f}"
 
         # Log completion event with cost breakdown
         actual_time_str = f"{actual_completion_time:.1f}s" if actual_completion_time is not None else "?"
         leg_type_str = completed_leg_type or meta.get('leg_type') or 'full'
+        if not completed_leg_type and leg_type_str == "pickup":
+            sku_info += self._format_stock_snapshot(
+                'stock_at_collection',
+                completed_stock,
+                completed_stock_max,
+            )
+        elif not completed_leg_type and leg_type_str == "dropoff":
+            sku_info += self._format_stock_snapshot(
+                'stock_at_dropoff',
+                completed_stock,
+                completed_stock_max,
+            )
+        elif not completed_leg_type and completed_stock is not None:
+            sku_info += self._format_stock_snapshot(
+                'stock_at_completion',
+                completed_stock,
+                completed_stock_max,
+            )
         num_items_str = getattr(completed_task, 'num_items', None) if completed_task is not None else None
         if num_items_str is None:
             num_items_str = meta.get('num_items') or 1
@@ -223,6 +288,9 @@ class TaskLogger:
                 'task_type': meta.get('task_type'),
                 'leg_type': leg_type_str,
                 'iteration': meta.get('iteration'),
+                'stock_at_assign': meta.get('sku_stock_level_at_assign'),
+                'stock_at_completion': completed_stock,
+                'sku_max_level': completed_stock_max,
             })
 
         # Keep parent metadata after pickup so the later dropoff can reuse it.

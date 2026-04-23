@@ -40,6 +40,7 @@ from src.utils.training_utils import (
 )
 from src.utils.task_logger import TaskLogger
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
+from src.utils.fleet_event_logger import FleetEventLogger
 
 
 def parse_deploy_args():
@@ -163,6 +164,7 @@ async def main():
         stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
         stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
         initial_stochastic_tasks=args.initial_stochastic_tasks,
+        fleet_event_logger=FleetEventLogger(output_dir / "logs" / "fleet_events.log")   
     )
     logger.info(f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}")
 

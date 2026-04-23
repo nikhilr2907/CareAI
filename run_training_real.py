@@ -27,6 +27,7 @@ from collections import deque
 
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO, Memory
 from src.deployment.robot_backend import ROSBridgeRobotBackend
+from src.utils.fleet_event_logger import FleetEventLogger
 from src.utils.training_utils import (
     parse_args,
     create_real_env_from_config_file,
@@ -37,7 +38,7 @@ from src.utils.training_utils import (
 from src.utils.task_logger import TaskLogger
 from src.utils.policy_inspector import PolicyInspector
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
-
+from src.utils.fleet_event_logger import FleetEventLogger
 
 async def main():
     args = parse_args()
@@ -139,7 +140,10 @@ async def main():
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         stochastic_task_cap_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
+        fleet_event_logger=FleetEventLogger(output_dir / "logs" / "fleet_events.log")   
     )
+
+   
     logger.info(f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}")
 
     # --- Build PPO model ---

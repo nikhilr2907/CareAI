@@ -43,6 +43,7 @@ from src.utils.deployment_utils import (
     assign_tasks,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.fleet_event_logger import FleetEventLogger
 
 
 def parse_args() -> argparse.Namespace:
@@ -256,7 +257,8 @@ def main():
         timestep_seconds=args.cycle_time,
         stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
         stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
-        initial_stochastic_tasks=args.initial_stochastic_tasks
+        initial_stochastic_tasks=args.initial_stochastic_tasks,
+        fleet_event_logger=FleetEventLogger(output_dir / "logs" / "fleet_events.log")   
     )
     env.reset()
     apply_floorplan_layout(env.graph_state)

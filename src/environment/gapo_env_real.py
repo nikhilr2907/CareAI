@@ -148,6 +148,10 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                 task = robot.current_task
 
                 # Pickup / restock logic — identical to base class
+                if task.task_type == 'replenishment' and task.sku_id and task.leg_type == "pickup":
+                    self._refresh_task_inventory_context(task)
+                    task.sku_stock_level_at_collection = task.current_sku_stock_level
+
                 if task.leg_type == "pickup":
                     robot.mark_pickup_complete(task.parent_task_id)
                 elif task.task_type == 'replenishment':
@@ -161,6 +165,10 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                         )
                     else:
                         to_node.restock(task.num_items)
+
+                    if task.sku_id:
+                        self._refresh_task_inventory_context(task)
+                        task.sku_stock_level_at_dropoff = task.current_sku_stock_level
 
                 if task.leg_type == "dropoff":
                     robot.mark_dropoff_complete(task.parent_task_id)

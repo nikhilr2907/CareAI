@@ -29,6 +29,9 @@ class Task:
     sku_stock_level: float = 0.0
     initial_sku_stock_level: Optional[float] = None
     current_sku_stock_level: Optional[float] = None
+    sku_stock_level_at_assign: Optional[float] = None
+    sku_stock_level_at_collection: Optional[float] = None
+    sku_stock_level_at_dropoff: Optional[float] = None
     sku_max_level: float = 0.0
     reorder_point: float = 0.0
     par_level: float = 0.0
