@@ -62,6 +62,11 @@ class TaskLogger:
             'assigned_robot': assigned_robot,
             'assignment_reward': assignment_reward,
             'sim_time_assigned': sim_time,
+            'deadline': getattr(task, 'current_deadline', getattr(task, 'deadline', None)),
+            'num_items': getattr(task, 'num_items', None),
+            'estimated_duration': getattr(task, 'estimated_duration', None),
+            'initial_tts': getattr(task, 'initial_time_to_stockout', getattr(task, 'time_to_stockout', None)),
+            'parent_task_id': getattr(task, 'parent_task_id', None),
             'sku_id': getattr(task, 'sku_id', None),
             'sku_stock_level_at_assign': getattr(
                 task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None)
@@ -91,9 +96,14 @@ class TaskLogger:
             if hasattr(task, 'reorder_point') and task.reorder_point is not None:
                 sku_info += f" reorder={task.reorder_point:.1f}"
 
+        leg_type = getattr(task, 'leg_type', 'full')
+        num_items = getattr(task, 'num_items', 1)
+        deadline = getattr(task, 'current_deadline', getattr(task, 'deadline', None))
+        deadline_str = f"{deadline:.1f}s" if deadline is not None else "?"
         self.logger.info(
             f"ASSIGN task_id={task_id} iter={iteration} sim_time={sim_time:.1f}s "
             f"robot={assigned_robot} location={task.from_location_index}->{to_loc} "
+            f"leg={leg_type} items={num_items} deadline={deadline_str} "
             f"arrival={task.arrival_time:.1f}s "
             f"assign_reward={assignment_reward:.4f} {sku_info} "
             f"(buffer={buffer_size} assignments={num_assignments})"
@@ -106,20 +116,28 @@ class TaskLogger:
                       actual_completion_time: Optional[float],
                       sim_time: float,
                       distance_traveled: float = 0.0,
-                      energy_consumed: float = 0.0):
+                      energy_consumed: float = 0.0,
+                      completed_task=None):
         """Log task completion with cost breakdown (inventory-driven rewards + cost tracking)."""
-        if task_id not in self.task_metadata:
+        completed_task_id = getattr(completed_task, 'task_id', task_id)
+        completed_parent_id = getattr(completed_task, 'parent_task_id', None)
+        completed_leg_type = getattr(completed_task, 'leg_type', None)
+        metadata_key = completed_parent_id if completed_parent_id in self.task_metadata else task_id
+
+        if metadata_key not in self.task_metadata:
             # Task not in our log (maybe predates logging), but still log the completion
             actual_time_str = f"{actual_completion_time:.1f}s" if actual_completion_time is not None else "?"
-            self.logger.warning(
-                f"COMPLT task_id={task_id} [NO METADATA] sim_time={sim_time:.1f}s "
+            self.logger.debug(
+                f"COMPLT task_id={completed_task_id} parent={completed_parent_id} "
+                f"leg={completed_leg_type or '?'} [NO METADATA] sim_time={sim_time:.1f}s "
                 f"completion_reward={completion_reward:.4f} actual_time={actual_time_str}"
             )
             return
 
-        meta = self.task_metadata[task_id]
+        meta = self.task_metadata[metadata_key]
         total_reward = meta['assignment_reward'] + completion_reward
         source = meta.get('source', 'unknown')
+        parent_id = completed_parent_id or meta.get('parent_task_id') or metadata_key
 
         # Compute cost metrics
         robot_hours = (sim_time - meta['sim_time_assigned']) / 3600.0 if sim_time >= meta['sim_time_assigned'] else 0.0
@@ -145,9 +163,20 @@ class TaskLogger:
 
         # Log completion event with cost breakdown
         actual_time_str = f"{actual_completion_time:.1f}s" if actual_completion_time is not None else "?"
+        leg_type_str = completed_leg_type or meta.get('leg_type') or 'full'
+        num_items_str = getattr(completed_task, 'num_items', None) if completed_task is not None else None
+        if num_items_str is None:
+            num_items_str = meta.get('num_items') or 1
+        from_idx = getattr(completed_task, 'from_location_index', None) if completed_task is not None else None
+        to_idx = getattr(completed_task, 'to_location_index', None) if completed_task is not None else None
+        if from_idx is None:
+            from_idx = meta['from_location_idx']
+        if to_idx is None:
+            to_idx = meta['to_location_idx']
         self.logger.info(
-            f"COMPLT task_id={task_id} iter={meta['iteration']} sim_time={sim_time:.1f}s "
-            f"robot={meta['assigned_robot']} source={source} location={meta['from_location_idx']}->{meta['to_location_idx'] or '?'} "
+            f"COMPLT task_id={completed_task_id} parent={parent_id} iter={meta['iteration']} "
+            f"sim_time={sim_time:.1f}s robot={meta['assigned_robot']} source={source} "
+            f"leg={leg_type_str} items={num_items_str} location={from_idx}->{to_idx if to_idx is not None else '?'} "
             f"time_from_assign={sim_time - meta['sim_time_assigned']:.1f}s "
             f"assign_reward={meta['assignment_reward']:.4f} completion_reward={completion_reward:.4f} "
             f"total_reward={total_reward:.4f} actual_time={actual_time_str} "
@@ -155,39 +184,44 @@ class TaskLogger:
             f"total_cost={total_cost:.2f} cost_per_reward={cost_per_reward:.4f} {sku_info}"
         )
 
-        # Track completion for iteration summary
-        iter_num = meta['iteration']
-        robot = meta['assigned_robot']
-        self.iteration_completions[iter_num]['completed'] += 1
-        self.iteration_completions[iter_num]['robots'][robot] += 1
+        # Keep aggregate completion/cost analytics at original-task granularity.
+        # Pickup legs are logged as leg events but should not count as completed
+        # replenishment tasks or zero-reward cost records.
+        if leg_type_str != "pickup":
+            iter_num = meta['iteration']
+            robot = meta['assigned_robot']
+            self.iteration_completions[iter_num]['completed'] += 1
+            self.iteration_completions[iter_num]['robots'][robot] += 1
 
-        # Track source breakdown
-        self.source_breakdown[source]['completed'] += 1
+            # Track source breakdown
+            self.source_breakdown[source]['completed'] += 1
 
-        # Track cost data for analytics
-        self.cost_data.append({
-            'task_id': task_id,
-            'source': source,
-            'robot': robot,
-            'distance_traveled': distance_traveled,
-            'robot_hours': robot_hours,
-            'energy_consumed': energy_consumed,
-            'total_cost': total_cost,
-            'completion_reward': completion_reward,
-            'total_reward': total_reward,
-            'cost_per_reward': cost_per_reward,
-            'sim_time': sim_time,
-            'latency': actual_completion_time,
-            'arrival_time': meta.get('arrival_time'),
-            'from_location_idx': meta.get('from_location_idx'),
-            'to_location_idx': meta.get('to_location_idx'),
-            'task_type': meta.get('task_type'),
-            'leg_type': meta.get('leg_type'),
-            'iteration': meta.get('iteration'),
-        })
+            # Track cost data for analytics
+            self.cost_data.append({
+                'task_id': completed_task_id,
+                'parent_task_id': parent_id,
+                'source': source,
+                'robot': robot,
+                'distance_traveled': distance_traveled,
+                'robot_hours': robot_hours,
+                'energy_consumed': energy_consumed,
+                'total_cost': total_cost,
+                'completion_reward': completion_reward,
+                'total_reward': total_reward,
+                'cost_per_reward': cost_per_reward,
+                'sim_time': sim_time,
+                'latency': actual_completion_time,
+                'arrival_time': meta.get('arrival_time'),
+                'from_location_idx': from_idx,
+                'to_location_idx': to_idx,
+                'task_type': meta.get('task_type'),
+                'leg_type': leg_type_str,
+                'iteration': meta.get('iteration'),
+            })
 
-        # Clean up
-        del self.task_metadata[task_id]
+        # Keep parent metadata after pickup so the later dropoff can reuse it.
+        if leg_type_str != "pickup":
+            del self.task_metadata[metadata_key]
 
     def log_iteration_summary(self, iteration: int):
         """Log summary of iteration completions and robot breakdown."""
@@ -283,10 +317,7 @@ class TaskLogger:
         # Plot 2: Completion rate by source
         self._plot_completion_rates(metrics_dir)
 
-        # Plot 3: Factoriser fallback rate
-        self._plot_fallback_rate(iterations, metrics_dir)
-
-        # Plot 4: A:C ratio trend + robot utilization
+        # Plot 3: A:C ratio trend + robot utilization
         self._plot_ac_ratio_and_robots(iterations, metrics_dir)
 
         # Plot 5: Cost metrics
@@ -310,8 +341,7 @@ class TaskLogger:
         fig, ax = plt.subplots(figsize=(12, 6))
         bottom = np.zeros(len(iterations))
 
-        colors = {'deterministic': '#2E86AB', 'factoriser': '#A23B72',
-                  'random_adhoc_fallback': '#F18F01', 'unknown': '#C73E1D'}
+        colors = {'deterministic': '#2E86AB', 'factoriser': '#A23B72', 'unknown': '#C73E1D'}
 
         for source in sources:
             counts = source_by_iter[source]
@@ -382,45 +412,6 @@ class TaskLogger:
         plt.savefig(output_dir / "02_completion_rates.png", dpi=150, bbox_inches='tight')
         plt.close()
 
-    def _plot_fallback_rate(self, iterations, output_dir):
-        """Plot factoriser fallback rate: fallback / (fallback + factoriser)."""
-        fallback_count = 0
-        factoriser_count = 0
-        fallback_rates = []
-
-        for it in iterations:
-            fallback_count += self.source_breakdown.get('random_adhoc_fallback', {}).get('assigned', 0) if it == 0 else 0
-            factoriser_count += self.source_breakdown.get('factoriser', {}).get('assigned', 0) if it == 0 else 0
-
-        # Compute overall fallback rate
-        fallback_total = self.source_breakdown.get('random_adhoc_fallback', {}).get('assigned', 0)
-        factoriser_total = self.source_breakdown.get('factoriser', {}).get('assigned', 0)
-        total_attempts = fallback_total + factoriser_total
-
-        fallback_rate = fallback_total / total_attempts if total_attempts > 0 else 0
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        categories = ['Factoriser\nSuccess', 'Fallback to\nRandom']
-        counts = [factoriser_total, fallback_total]
-        colors_fb = ['#2E86AB', '#F18F01']
-
-        bars = ax.bar(categories, counts, color=colors_fb, alpha=0.8, width=0.6)
-        ax.set_ylabel('Count', fontsize=12)
-        ax.set_title(f'Factoriser Success vs Fallback Rate ({fallback_rate:.1%} fallback)',
-                     fontsize=14, fontweight='bold')
-        ax.grid(axis='y', alpha=0.3)
-
-        # Add count labels
-        for bar, count in zip(bars, counts):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{int(count)}', ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-        plt.tight_layout()
-        plt.savefig(output_dir / "03_fallback_rate.png", dpi=150, bbox_inches='tight')
-        plt.close()
-
     def _plot_ac_ratio_and_robots(self, iterations, output_dir):
         """Plot A:C ratio trend and final robot utilization breakdown."""
         ac_ratios = []
@@ -472,7 +463,7 @@ class TaskLogger:
                     f'{int(count)}', ha='center', va='bottom', fontsize=10, fontweight='bold')
 
         plt.tight_layout()
-        plt.savefig(output_dir / "04_ac_ratio_and_robots.png", dpi=150, bbox_inches='tight')
+        plt.savefig(output_dir / "03_ac_ratio_and_robots.png", dpi=150, bbox_inches='tight')
         plt.close()
 
     def _plot_cost_metrics(self, output_dir):

@@ -6,6 +6,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from ..environment.graph_helpers import dijkstra_shortest_path
+from ..environment.tasks.task_generator import DEFAULT_MIN_REPLENISHMENT_DEADLINE_S
 
 
 # Candidate feature dimension: matches Task.get_features() output (10 dims)
@@ -461,7 +462,7 @@ class TaskCreationActor(nn.Module):
 
         num_items = max(1, int(room))
         tts_seconds = selected.time_to_stockout * 3600
-        deadline = current_time + max(tts_seconds, 300.0)  # At least 5 minutes
+        deadline = current_time + max(tts_seconds, DEFAULT_MIN_REPLENISHMENT_DEADLINE_S)
 
         task = Task(
             task_id=next_task_id,
@@ -474,7 +475,6 @@ class TaskCreationActor(nn.Module):
             num_items=num_items,
             sku_id=selected.sku_id,
             category_id=selected.category_id,
-            source_stock_level=live_stock,
             time_to_stockout=selected.time_to_stockout,
             sku_stock_level=live_stock,
             sku_max_level=max_stock,

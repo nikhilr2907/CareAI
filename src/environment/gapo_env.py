@@ -65,6 +65,7 @@ class GAPOTaskAssignmentEnv:
         # Per-task completion credits from the most recent timestep (populated by
         # _compute_timestep_reward, consumed by step() info dict and run_training.py).
         self._last_per_task_credits: Dict[int, float] = {}
+        self._last_completed_leg_credits: Dict[int, float] = {}
 
         # Proactive SKU task creation actor (#7 factorizer + #8 scorer)
         # Creates inventory-aware stochastic replenishment tasks instead of blind random.
@@ -271,9 +272,11 @@ class GAPOTaskAssignmentEnv:
             # Per-task completion credits: {parent_task_id: reward}.
             # Used by run_training.py to route rewards to the causal assignment slot.
             'task_completion_credits': self._last_per_task_credits,
+            'completed_leg_credits': self._last_completed_leg_credits,
             # Ambient monitoring stats (not in reward, just for logging).
             'episode_stockouts': self.episode_stockouts,
             'episode_break_stockouts': self.episode_break_stockouts,
+            'completed_task_legs': completed_tasks,
             'emergency_tasks': len(self.emergency_tasks),
             'offline_robots': list(self._offline_robots),
             'robots_charging': [rid for rid, sim in enumerate(self.robot_simulators) if sim.is_charging],
@@ -377,7 +380,6 @@ class GAPOTaskAssignmentEnv:
             estimated_duration=task.estimated_duration,
             task_type=task.task_type,
             num_items=task.num_items,
-            source_stock_level=task.source_stock_level,
             time_to_stockout=task.time_to_stockout,
             initial_time_to_stockout=task.initial_time_to_stockout,
             current_time_to_stockout=task.current_time_to_stockout,
@@ -408,7 +410,6 @@ class GAPOTaskAssignmentEnv:
             estimated_duration=task.estimated_duration,
             task_type=task.task_type,
             num_items=task.num_items,
-            source_stock_level=task.source_stock_level,
             time_to_stockout=task.time_to_stockout,
             initial_time_to_stockout=task.initial_time_to_stockout,
             current_time_to_stockout=task.current_time_to_stockout,
@@ -711,6 +712,7 @@ class GAPOTaskAssignmentEnv:
             Total completion reward scalar (sum of per-task rewards)
         """
         self._last_per_task_credits = {}
+        self._last_completed_leg_credits = {}
         total_reward = 0.0
 
         # Per-task completion rewards
@@ -760,6 +762,7 @@ class GAPOTaskAssignmentEnv:
                     task_reward -= self.battery_critical_task_penalty
 
             parent_id = getattr(task, 'parent_task_id', None)
+            self._last_completed_leg_credits[task.task_id] = task_reward
             if parent_id is not None and task.leg_type == "dropoff":
                 self._last_per_task_credits[parent_id] = task_reward
             total_reward += task_reward

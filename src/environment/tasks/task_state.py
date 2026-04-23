@@ -18,7 +18,6 @@ class Task:
     num_items: int = 1  # Number of items to deliver (for capacity management)
 
     # Inventory context
-    source_stock_level: float = 0.0  # Stock level at destination when task created
     time_to_stockout: float = 999.0  # Legacy alias for initial time-to-stockout, in hours.
     initial_time_to_stockout: Optional[float] = None
     current_time_to_stockout: Optional[float] = None

@@ -189,7 +189,6 @@ def generate_inventory_tasks(
                 estimated_duration=estimated_duration,
                 task_type='replenishment',
                 num_items=num_items,
-                source_stock_level=dest_node.stock_level,
                 time_to_stockout=tts_hours,
                 sku_id=sku_id,
                 category_key=sku_data.get("category"),
