@@ -213,11 +213,12 @@ async def main():
         ranking_max_pairs_per_group=64,
         ranking_min_adv_gap=1e-4,
         task_creation_actor=getattr(env, 'task_creation_actor', None),
+        edge_cost_manager=getattr(env, 'edge_cost_manager', None),
         device=device,
         logger=logger,
     )
 
-    ppo.load(args.checkpoint)
+    ppo.load(args.checkpoint, edge_cost_manager=getattr(env, 'edge_cost_manager', None))
     ppo.policy.eval()
     ppo.policy_old.eval()
     logger.info(f"Policy loaded from: {args.checkpoint}")

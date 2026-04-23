@@ -9,6 +9,7 @@ from .robot.robot_state import RobotState, create_default_robot
 from .robot.robot_simulator import RobotSimulator
 from .tasks.task_state import Task
 from .tasks.task_generator import (
+    DEFAULT_MIN_REPLENISHMENT_DEADLINE_S,
     generate_inventory_tasks,
     _compute_sku_rate,
     update_inventory_levels
@@ -857,7 +858,10 @@ class GAPOTaskAssignmentEnv:
 
         rate = _compute_sku_rate(node, task.sku_id, self.graph_state, self.current_time)
         current_tts = (stock / rate) if rate > 0 else float("inf")
-        current_deadline = self.current_time + max(current_tts * 3600.0, 60.0)
+        current_deadline = self.current_time + max(
+            current_tts * 3600.0,
+            DEFAULT_MIN_REPLENISHMENT_DEADLINE_S,
+        )
 
         task.current_time_to_stockout = current_tts
         task.current_deadline = current_deadline

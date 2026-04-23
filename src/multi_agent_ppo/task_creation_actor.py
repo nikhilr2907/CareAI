@@ -428,7 +428,7 @@ class TaskCreationActor(nn.Module):
         state_np = build_state_summary(pending_tasks, robots, graph_state, current_time)
         state_t = torch.from_numpy(state_np).float().to(self.device)
 
-        feat_np = np.stack([c.features for c in candidates], axis=0)  # [N, 15]
+        feat_np = np.stack([c.features for c in candidates], axis=0)  # [N, 10]
         feat_t = torch.from_numpy(feat_np).float().to(self.device)
 
         with torch.set_grad_enabled(training):

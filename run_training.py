@@ -280,6 +280,7 @@ def main():
         ranking_max_pairs_per_group=ranking_max_pairs_per_group,
         ranking_min_adv_gap=ranking_min_adv_gap,
         task_creation_actor=getattr(env, 'task_creation_actor', None),
+        edge_cost_manager=getattr(env, 'edge_cost_manager', None),
         device=device,
         logger=logger
     )

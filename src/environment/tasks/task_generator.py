@@ -4,6 +4,7 @@ from .task_state import Task, TaskQueue
 from ..graph_helpers import dijkstra_shortest_path
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+DEFAULT_MIN_REPLENISHMENT_DEADLINE_S = 300.0
 
 
 def _parse_time_hhmm(t: str) -> float:
@@ -166,7 +167,7 @@ def generate_inventory_tasks(
             rate = _compute_sku_rate(dest_node, sku_id, graph_state, current_time)
             tts_hours = (stock / rate) if rate > 0 else float('inf')
             tts_seconds = tts_hours * 3600
-            deadline = current_time + max(tts_seconds, 60)
+            deadline = current_time + max(tts_seconds, DEFAULT_MIN_REPLENISHMENT_DEADLINE_S)
 
             if par_level > 0:
                 target = par_level

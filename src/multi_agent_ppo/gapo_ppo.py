@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from typing import List, Dict, Tuple, Optional
+from typing import Any, List, Dict, Tuple, Optional
 import numpy as np
 import logging
 
@@ -73,6 +73,7 @@ class GAPOPPO:
         lambda_creation_scorer: float = 1.0,
         lambda_creation_factorizer: float = 0.1,
         lambda_creation_kl: float = 0.01,
+        edge_cost_manager: Optional[Any] = None,
         device='cpu',
         logger: Optional[logging.Logger] = None
     ):
@@ -174,6 +175,7 @@ class GAPOPPO:
         self.lambda_creation_scorer = lambda_creation_scorer
         self.lambda_creation_factorizer = lambda_creation_factorizer
         self.lambda_creation_kl = lambda_creation_kl
+        self.edge_cost_manager = edge_cost_manager
         if task_creation_actor is not None:
             self.creation_optimizer = optim.Adam(
                 task_creation_actor.parameters(), lr=lr_creation
@@ -667,20 +669,50 @@ class GAPOPPO:
 
         return tensor_dict
 
-    def save(self, filepath: str):
-        """Save policy network."""
+    def save(self, filepath: str, edge_cost_manager: Optional[Any] = None):
+        """Save all trainable system components available to PPO."""
+        edge_cost_manager = edge_cost_manager or self.edge_cost_manager
         payload = {
             'policy_state_dict': self.policy.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
         }
+        if self.task_creation_actor is not None:
+            payload['task_creation_actor_state_dict'] = self.task_creation_actor.state_dict()
+            payload['task_creation_actor_meta'] = {
+                'reward_baseline': getattr(self.task_creation_actor, '_reward_baseline', 0.0),
+                'baseline_alpha': getattr(self.task_creation_actor, '_baseline_alpha', 0.05),
+            }
+            if self.creation_optimizer is not None:
+                payload['creation_optimizer_state_dict'] = self.creation_optimizer.state_dict()
+        if edge_cost_manager is not None and hasattr(edge_cost_manager, 'state_dict'):
+            payload['edge_cost_manager_state_dict'] = edge_cost_manager.state_dict()
         torch.save(payload, filepath)
 
-    def load(self, filepath: str):
-        """Load policy network."""
-        checkpoint = torch.load(filepath, map_location=self.device)
+    def load(self, filepath: str, edge_cost_manager: Optional[Any] = None):
+        """Load checkpoint, accepting older policy-only checkpoints."""
+        edge_cost_manager = edge_cost_manager or self.edge_cost_manager
+        checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
         self.policy.load_state_dict(checkpoint['policy_state_dict'])
         self.policy_old.load_state_dict(checkpoint['policy_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        if self.task_creation_actor is not None and 'task_creation_actor_state_dict' in checkpoint:
+            self.task_creation_actor.load_state_dict(checkpoint['task_creation_actor_state_dict'])
+            meta = checkpoint.get('task_creation_actor_meta', {})
+            self.task_creation_actor._reward_baseline = meta.get('reward_baseline', 0.0)
+            self.task_creation_actor._baseline_alpha = meta.get(
+                'baseline_alpha',
+                getattr(self.task_creation_actor, '_baseline_alpha', 0.05),
+            )
+        elif self.task_creation_actor is not None:
+            self.logger.warning("Checkpoint has no task_creation_actor_state_dict; actor left at initialization")
+
+        if self.creation_optimizer is not None and 'creation_optimizer_state_dict' in checkpoint:
+            self.creation_optimizer.load_state_dict(checkpoint['creation_optimizer_state_dict'])
+
+        if edge_cost_manager is not None and 'edge_cost_manager_state_dict' in checkpoint:
+            edge_cost_manager.load_state_dict(checkpoint['edge_cost_manager_state_dict'])
 
     def get_last_loss_info(self) -> Dict:
         """Get last training loss breakdown."""

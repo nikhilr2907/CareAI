@@ -189,13 +189,14 @@ async def main():
         ranking_max_pairs_per_group=ranking_max_pairs_per_group,
         ranking_min_adv_gap=ranking_min_adv_gap,
         task_creation_actor=getattr(env, 'task_creation_actor', None),
+        edge_cost_manager=getattr(env, 'edge_cost_manager', None),
         device=device,
         logger=logger,
     )
 
     # Load checkpoint if provided (fine-tuning from sim-trained weights)
     if args.checkpoint and Path(args.checkpoint).exists():
-        ppo.load(args.checkpoint)
+        ppo.load(args.checkpoint, edge_cost_manager=getattr(env, 'edge_cost_manager', None))
         logger.info(f"Loaded checkpoint: {args.checkpoint}")
 
     policy_inspector = PolicyInspector(ppo.policy, device=device)

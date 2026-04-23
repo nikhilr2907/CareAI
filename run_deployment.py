@@ -315,12 +315,11 @@ def main():
             queue_feat_dim=16,
             sku_feat_dim=sku_feat_dim,
             sku_embed_dim=sku_embed_dim,
-            # Deployment disables task-creation actor wiring for now.
-            # This keeps inference aligned with allocation-only policy.
-            enable_task_creation_actor=False,
+            task_creation_actor=None,
+            edge_cost_manager=getattr(env, 'edge_cost_manager', None),
             device=device
         )
-        ppo.load(str(checkpoint_path))
+        ppo.load(str(checkpoint_path), edge_cost_manager=getattr(env, 'edge_cost_manager', None))
         logger.info(f"  Policy loaded from: {checkpoint_path}")
     else:
         logger.info("No trained policy: using heuristic task assignment")
