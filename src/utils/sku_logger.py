@@ -16,6 +16,7 @@ CSV columns (analytics-ready, one row per SKU per event):
 
 import csv
 import logging
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -36,7 +37,6 @@ _COLUMNS = [
     "fill_pct",
     "below_reorder",
     "is_stockout",
-    "consumption_rate_per_hour",
 ]
 
 
@@ -68,6 +68,17 @@ class SKULogger:
         self._stockout_active: dict = {}   # (node_idx, sku_id) -> bool
         self._below_reorder_active: dict = {}  # (node_idx, sku_id) -> bool
 
+        # In-memory state — readable by analytics (mirrors task_logger.cost_data pattern)
+        # TODO: add snapshot_data list for full time-series demand analysis (time-of-day, spikes)
+        self.initial_snapshots: dict = {}  # (node_idx, sku_id) -> first snapshot seen
+        self.latest_snapshots: dict = {}   # (node_idx, sku_id) -> most recent snapshot
+        self.restock_events: list = []     # one dict per RESTOCK
+        self.stockout_events: list = []    # one dict per STOCKOUT onset
+        self.reorder_events: list = []     # one dict per REORDER onset
+
+        # Rolling window for demand rate estimation: last 10 (sim_time, stock) pairs per key
+        self._stock_history: dict = {}     # (node_idx, sku_id) -> deque[(sim_time, stock)]
+
         logger.info(f"SKULogger writing to {self._csv_path}")
 
     # ------------------------------------------------------------------
@@ -93,7 +104,6 @@ class SKULogger:
         par: float,
         reorder: float,
         sim_time: float,
-        consumption_rate: float = 0.0,
     ):
         """Write a RESTOCK row when a robot dropoff increases stock."""
         self._write_row(
@@ -108,8 +118,33 @@ class SKULogger:
             max_stock=max_stock,
             par=par,
             reorder=reorder,
-            consumption_rate=consumption_rate,
         )
+
+    def get_rolling_demand_rates(self) -> dict:
+        """Return rolling mean consumption rate (units/hour) per (node_idx, sku_id).
+
+        Uses the last 10 SNAPSHOT observations. Consecutive pairs where stock
+        increased (restock interval) are excluded — only consumption intervals
+        contribute to the average.
+        """
+        rates = {}
+        for key, history in self._stock_history.items():
+            if len(history) < 2:
+                continue
+            pts = list(history)
+            deltas = []
+            for i in range(len(pts) - 1):
+                t0, s0 = pts[i]
+                t1, s1 = pts[i + 1]
+                if s1 >= s0:  # restock or flat — skip
+                    continue
+                hours = (t1 - t0) / 3600.0
+                if hours <= 0:
+                    continue
+                deltas.append((s0 - s1) / hours)
+            if deltas:
+                rates[key] = round(sum(deltas) / len(deltas), 4)
+        return rates
 
     def close(self):
         """Flush and close the CSV file."""
@@ -136,9 +171,6 @@ class SKULogger:
                 reorder = float(sku_data.get("reorder", 0.0))
                 category = sku_data.get("category", "")
 
-                # Consumption rate from cached value if available
-                rate = float(sku_data.get("rate", 0.0))
-
                 self._write_row(
                     event_type="SNAPSHOT",
                     sim_time=sim_time,
@@ -151,7 +183,6 @@ class SKULogger:
                     max_stock=max_stock,
                     par=par,
                     reorder=reorder,
-                    consumption_rate=rate,
                 )
 
                 # Edge-triggered STOCKOUT event
@@ -171,7 +202,6 @@ class SKULogger:
                         max_stock=max_stock,
                         par=par,
                         reorder=reorder,
-                        consumption_rate=rate,
                     )
                 self._stockout_active[key] = now_stockout
 
@@ -191,7 +221,6 @@ class SKULogger:
                         max_stock=max_stock,
                         par=par,
                         reorder=reorder,
-                        consumption_rate=rate,
                     )
                 self._below_reorder_active[key] = now_below
 
@@ -210,10 +239,9 @@ class SKULogger:
         max_stock: float,
         par: float,
         reorder: float,
-        consumption_rate: float,
     ):
         fill_pct = round(stock / max_stock * 100, 2) if max_stock > 0 else 0.0
-        self._writer.writerow({
+        record = {
             "sim_time": round(sim_time, 2),
             "event_type": event_type,
             "node_idx": node_idx,
@@ -228,5 +256,19 @@ class SKULogger:
             "fill_pct": fill_pct,
             "below_reorder": int(stock <= reorder),
             "is_stockout": int(stock <= 0.0),
-            "consumption_rate_per_hour": round(consumption_rate, 6),
-        })
+        }
+        if event_type == "SNAPSHOT":
+            key = (node_idx, sku_id)
+            if key not in self.initial_snapshots:
+                self.initial_snapshots[key] = record
+            self.latest_snapshots[key] = record
+            if key not in self._stock_history:
+                self._stock_history[key] = deque(maxlen=10)
+            self._stock_history[key].append((sim_time, stock))
+        elif event_type == "RESTOCK":
+            self.restock_events.append(record)
+        elif event_type == "STOCKOUT":
+            self.stockout_events.append(record)
+        elif event_type == "REORDER":
+            self.reorder_events.append(record)
+        self._writer.writerow(record)

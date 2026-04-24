@@ -477,6 +477,10 @@ class GAPOTaskAssignmentEnv:
             task: Task to plan path for
             simulator: RobotSimulator for this robot
         """
+        # Stamp execution start the first time a robot begins navigating this task
+        if task.execution_start_time is None:
+            task.execution_start_time = self.current_time
+
         # Get robot's current location
         start_node = robot.current_node_index
         if start_node is None:
@@ -659,7 +663,7 @@ class GAPOTaskAssignmentEnv:
                     if task.sku_id:
                         to_node.restock_sku(task.sku_id, task.num_items)
                         to_node.recalc_category_inventory()
-                        to_node.stock_level = sum(v.get('stock', 0.0) for v in to_node.category_inventory.values())
+                        to_node.stock_level = sum(v.get('stock', 0.0) for v in to_node.sku_inventory.values())
                     else:
                         to_node.restock(task.num_items)
 
@@ -679,7 +683,6 @@ class GAPOTaskAssignmentEnv:
                                 par=float(sku_data.get('par', 0.0)),
                                 reorder=float(sku_data.get('reorder', 0.0)),
                                 sim_time=self.current_time,
-                                consumption_rate=float(sku_data.get('rate', 0.0)),
                             )
 
                 # Unload items from simulator on dropoff

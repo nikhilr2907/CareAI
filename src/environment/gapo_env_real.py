@@ -161,7 +161,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                         to_node.recalc_category_inventory()
                         to_node.stock_level = sum(
                             v.get('stock', 0.0)
-                            for v in to_node.category_inventory.values()
+                            for v in to_node.sku_inventory.values()
                         )
                     else:
                         to_node.restock(task.num_items)
@@ -182,7 +182,6 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                                 par=float(sku_data.get('par', 0.0)),
                                 reorder=float(sku_data.get('reorder', 0.0)),
                                 sim_time=self.current_time,
-                                consumption_rate=float(sku_data.get('rate', 0.0)),
                             )
 
                 if task.leg_type == "dropoff":

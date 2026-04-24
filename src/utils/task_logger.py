@@ -297,6 +297,8 @@ class TaskLogger:
                 'stock_at_assign': meta.get('sku_stock_level_at_assign'),
                 'stock_at_completion': completed_stock,
                 'sku_max_level': completed_stock_max,
+                'sim_time_assigned': meta.get('sim_time_assigned'),
+                'execution_start_time': getattr(completed_task, 'execution_start_time', None) if completed_task is not None else None,
             })
 
         # Keep parent metadata after pickup so the later dropoff can reuse it.

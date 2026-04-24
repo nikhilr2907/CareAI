@@ -233,6 +233,8 @@ def main():
 
     # Create initial environment
     env, current_config_desc = create_env_with_config(current_config_idx)
+    analytics.sku_logger = env.sku_logger
+    analytics.initialize(env.graph_state.nodes)
     if getattr(env.graph_state, "category_order", None):
         base_node_dim = env.graph_state.get_node_features_with_category_stats()[0].shape[1]
         sku_feat_dim = env.graph_state.get_node_sku_features()[0].shape[2]
@@ -834,13 +836,12 @@ def main():
             # Log iteration summary (completions, on-time rates, robot breakdown)
             task_logger.log_iteration_summary(iteration)
 
-            # Analytics: Record periodic telemetry and inventory samples
+            # Analytics: Record periodic telemetry and corridor samples
             if iteration % 10 == 0:
                 analytics.record_robot_telemetry(env.robots, env.current_time)
             if iteration % 50 == 0:
-                analytics.record_inventory_snapshot(env.graph_state.nodes, env.current_time)
                 analytics.record_corridor_state(env.graph_state.edges, env.current_time)
-                analytics.compute_flow_metrics()  # Compute and cache flow analytics
+                analytics.compute_flow_metrics()
 
             # Generate task metrics snapshots periodically
             if iteration % 50 == 0:

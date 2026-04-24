@@ -47,6 +47,9 @@ class Task:
     parent_task_id: Optional[int] = None
     learned_score: float = 0.0
 
+    # Execution timing
+    execution_start_time: Optional[float] = None  # When robot first starts navigating this task
+
     # Task source tracking
     source: str = "unknown"  # 'deterministic', 'factoriser'
 
