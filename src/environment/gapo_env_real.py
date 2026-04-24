@@ -169,6 +169,21 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                     if task.sku_id:
                         self._refresh_task_inventory_context(task)
                         task.sku_stock_level_at_dropoff = task.current_sku_stock_level
+                        if self.sku_logger is not None:
+                            sku_data = to_node.sku_inventory.get(task.sku_id, {})
+                            self.sku_logger.log_restock(
+                                node_idx=task.to_location_index,
+                                node_tag=getattr(to_node, 'location_tag', None) or f"node_{task.to_location_index}",
+                                floor=getattr(to_node, 'floor', None),
+                                sku_id=task.sku_id,
+                                category=sku_data.get('category', ''),
+                                stock_after=task.sku_stock_level_at_dropoff or 0.0,
+                                max_stock=float(sku_data.get('max', 0.0)),
+                                par=float(sku_data.get('par', 0.0)),
+                                reorder=float(sku_data.get('reorder', 0.0)),
+                                sim_time=self.current_time,
+                                consumption_rate=float(sku_data.get('rate', 0.0)),
+                            )
 
                 if task.leg_type == "dropoff":
                     robot.mark_dropoff_complete(task.parent_task_id)
