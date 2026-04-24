@@ -38,6 +38,7 @@ from src.utils.training_utils import (
     run_evaluation,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.robot_sample_logger import RobotSampleLogger
 from src.utils.policy_inspector import PolicyInspector
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 from src.utils.fleet_event_logger import FleetEventLogger
@@ -51,6 +52,7 @@ def main():
 
     # Setup task-specific logging
     task_logger = TaskLogger(output_dir / "logs")
+    robot_sample_logger = RobotSampleLogger(output_dir / "logs")
 
     # Setup real-time analytics collection
     analytics = RealtimeAnalyticsCollector(
@@ -58,6 +60,7 @@ def main():
         mode='sim',
         snapshot_frequency=50,
         task_logger=task_logger,
+        robot_sample_logger=robot_sample_logger,
     )
 
     # Set random seed if provided
@@ -836,11 +839,11 @@ def main():
             # Log iteration summary (completions, on-time rates, robot breakdown)
             task_logger.log_iteration_summary(iteration)
 
-            # Analytics: Record periodic telemetry and corridor samples
+            # Analytics: Record periodic telemetry samples
             if iteration % 10 == 0:
                 analytics.record_robot_telemetry(env.robots, env.current_time)
             if iteration % 50 == 0:
-                analytics.record_corridor_state(env.graph_state.edges, env.current_time)
+                analytics.increment_iteration()
 
             # Generate task metrics snapshots periodically
             if iteration % 50 == 0:
@@ -849,10 +852,8 @@ def main():
                 logger.info(f"Metrics snapshot saved to iter {iteration}")
 
                 # Generate analytics snapshots
-                analytics.increment_iteration()
                 analytics.plot_snapshot(final=False)
                 analytics.save_metrics_json()
-                analytics.save_metrics_csv()
                 logger.info(f"Analytics snapshot saved to iter {iteration}")
 
             logger.info("-" * 80)
@@ -900,7 +901,6 @@ def main():
     analytics.increment_iteration()
     analytics.plot_snapshot(final=True)
     analytics.save_metrics_json()
-    analytics.save_metrics_csv()
     logger.info(f"Final analytics plots saved to {analytics.output_dir / 'plots_final'}")
     logger.info(f"Analytics metrics saved to {analytics.output_dir}")
 

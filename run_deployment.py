@@ -43,6 +43,8 @@ from src.utils.deployment_utils import (
     assign_tasks,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.robot_sample_logger import RobotSampleLogger
+from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 from src.utils.fleet_event_logger import FleetEventLogger
 
 
@@ -215,6 +217,14 @@ def main():
     )
     logger = logging.getLogger(__name__)
     task_logger = TaskLogger(output_dir / "logs")
+    robot_sample_logger = RobotSampleLogger(output_dir / "logs")
+    analytics = RealtimeAnalyticsCollector(
+        output_dir=output_dir / "analytics",
+        mode='sim',
+        snapshot_frequency=50,
+        task_logger=task_logger,
+        robot_sample_logger=robot_sample_logger,
+    )
 
     # Set random seed if provided
     if args.seed is not None:
@@ -258,10 +268,13 @@ def main():
         stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
         stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
         initial_stochastic_tasks=args.initial_stochastic_tasks,
-        fleet_event_logger=FleetEventLogger(output_dir / "logs")
+        fleet_event_logger=FleetEventLogger(output_dir / "logs"),
+        log_dir=output_dir / "logs",
     )
     env.reset()
     apply_floorplan_layout(env.graph_state)
+    analytics.sku_logger = env.sku_logger
+    analytics.initialize(env.graph_state.nodes)
 
     logger.info(f"  Nodes: {num_nodes}")
     logger.info(f"  Robots: {env.num_robots}")
@@ -410,7 +423,14 @@ def main():
             rescore_robot_queues(env, ppo)
 
             # Assign top pending tasks to available robots
-            assigned_this_cycle = assign_tasks(env, ppo, args.max_assignments_per_step, task_logger=task_logger, total_assignments=total_tasks_assigned)
+            assigned_this_cycle = assign_tasks(
+                env,
+                ppo,
+                args.max_assignments_per_step,
+                task_logger=task_logger,
+                total_assignments=total_tasks_assigned,
+                iteration=total_timesteps,
+            )
             total_tasks_assigned += assigned_this_cycle
 
             # Simulation step
@@ -443,6 +463,22 @@ def main():
                         energy_consumed=getattr(task, "energy_consumed_wh", 0.0),
                         completed_task=task,
                     )
+
+            task_logger.log_running_summary(total_timesteps)
+            task_logger.log_iteration_summary(total_timesteps)
+
+            if total_timesteps % 10 == 0:
+                analytics.record_robot_telemetry(env.robots, env.current_time)
+            if total_timesteps % 50 == 0:
+                analytics.increment_iteration()
+
+            if total_timesteps % 50 == 0:
+                snapshot_dir = output_dir / f"metrics_snapshot_step{total_timesteps}"
+                task_logger.plot_metrics(snapshot_dir)
+                logger.info(f"Task metrics snapshot saved to step {total_timesteps}")
+                analytics.plot_snapshot(final=False)
+                analytics.save_metrics_json()
+                logger.info(f"Analytics snapshot saved to step {total_timesteps}")
 
             # Log metrics at specified time interval
             if current_time - last_log_time >= args.log_interval:
@@ -653,7 +689,14 @@ def main():
         logger.error(f"Error during deployment: {e}", exc_info=True)
         raise
     finally:
-        task_logger.plot_metrics(output_dir)
+        final_metrics_dir = output_dir / "metrics_final"
+        task_logger.plot_metrics(final_metrics_dir)
+        logger.info(f"Final task metrics plots saved to {final_metrics_dir}")
+        analytics.increment_iteration()
+        analytics.plot_snapshot(final=True)
+        analytics.save_metrics_json()
+        logger.info(f"Final analytics plots saved to {analytics.output_dir / 'plots_final'}")
+        logger.info(f"Analytics metrics saved to {analytics.output_dir}")
         # Cleanup
         logger.info("\n" + "=" * 80)
         logger.info("DEPLOYMENT SUMMARY")

@@ -1,32 +1,28 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
-from collections import defaultdict
+from collections import defaultdict, deque
 import json
-import csv
 import numpy as np
 import matplotlib.pyplot as plt
 
 # Type hints for objects we'll receive
 from src.environment.robot.robot_state import RobotState
 from src.environment.graph.node import GraphNode
-from src.environment.graph.edge import GraphEdge
 
 
 class RealtimeAnalyticsCollector:
     """
-    Collects and aggregates metrics from simulation/real deployment.
+    Collects and aggregates derived metrics from simulation or real deployment.
 
     Data flow:
     - Task completion data from TaskLogger.cost_data
-    - RobotState/RobotTelemetry → record_robot_telemetry()
-    - GraphNode → record_inventory_snapshot()
-    - GraphEdge → record_corridor_state()
+    - RobotState and RobotTelemetry via record_robot_telemetry()
+    - SKU event and snapshot data from SKULogger
 
     Outputs:
-    - metrics.json (raw events)
-    - metrics_summary.csv (per-iteration aggregates)
-    - plots_final/*.png (6 matplotlib plots)
+    - metrics.json (derived metrics only)
+    - plots/*.png and plots_final/*.png
     """
 
     def __init__(self,
@@ -34,7 +30,8 @@ class RealtimeAnalyticsCollector:
                  mode: str = 'sim',
                  snapshot_frequency: int = 50,
                  task_logger=None,
-                 sku_logger=None):
+                 sku_logger=None,
+                 robot_sample_logger=None):
         """
         Args:
             output_dir: Directory for metrics output (analytics/ subdir)
@@ -42,26 +39,25 @@ class RealtimeAnalyticsCollector:
             snapshot_frequency: Generate plots every N iterations
             task_logger: Reference to TaskLogger for reading task completion data
             sku_logger: Reference to SKULogger for reading SKU event data
+            robot_sample_logger: Reference to RobotSampleLogger for raw robot samples
         """
         self.output_dir = Path(output_dir)
         self.mode = mode
         self.snapshot_frequency = snapshot_frequency
         self.task_logger = task_logger
         self.sku_logger = sku_logger
+        self.robot_sample_logger = robot_sample_logger
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.nodes = None  # Set by initialize()
 
-        # Raw event streams (append-only)
-        # Note: task completion data now read from task_logger.cost_data
-        self.robot_samples = []    # {robot_id, status, battery, position, assigned_tasks}
-        self.corridor_samples = []  # {edge, robot_count, clutter, people}
+        # Keep only a bounded recent window of robot samples per robot in memory.
+        self.robot_samples = defaultdict(lambda: deque(maxlen=1000))
 
         # Iteration tracking
         self.current_iteration = 0
-        self.iteration_summaries = defaultdict(dict)  # iteration → summary stats
 
         # Aggregated metrics (updated per _update_metrics())
         self.metrics = {
@@ -69,7 +65,6 @@ class RealtimeAnalyticsCollector:
             'utilization': {'idle': 0, 'active': 0, 'waiting': 0},
             'replenishment_lag': {'mean': 0, 'max': 0},
             'cost': {'mean': 0, 'min': 0, 'max': 0},
-            'a_c_ratio': 0.0,
         }
 
     # ========== RECORDING METHODS ==========
@@ -83,50 +78,27 @@ class RealtimeAnalyticsCollector:
             robots: List of RobotState objects
             current_time: Current simulation/real time
         """
+        if self.robot_sample_logger is None:
+            raise RuntimeError("RealtimeAnalyticsCollector.record_robot_telemetry() requires robot_sample_logger")
+
         for robot in robots:
             if robot.telemetry is not None:
-                # Task-aware idle detection
-                if len(robot.task_queue) == 0:
-                    status = 'IDLE'
-                elif robot.telemetry.velocity_ms > 0.1:
-                    status = 'ACTIVE'
-                else:
-                    status = 'WAITING_AT_LOCATION'
-
-                self.robot_samples.append({
-                    'robot_id': robot.robot_id,
-                    'status': status,
-                    'battery': robot.battery_level,
-                    'position': robot.current_position,
-                    'assigned_tasks': len(robot.task_queue),
-                    'timestamp': current_time,
-                })
+                sample = self.robot_sample_logger.log_sample(robot, current_time)
+                self.robot_samples[robot.robot_id].append(sample)
 
     def initialize(self, nodes: List[GraphNode]):
         """Store graph nodes for future metric modules. Call once after env creation."""
         self.nodes = nodes
 
-    def record_corridor_state(self, edges: List[GraphEdge], current_time: float):
-        """
-        Sample corridor congestion from GraphEdge objects.
-        Called periodically (e.g., every 50 steps).
-
-        Args:
-            edges: List of GraphEdge objects
-            current_time: Current simulation/real time
-        """
-        for edge in edges:
-            robot_count = len(edge.active_robot_ids) if hasattr(edge, 'active_robot_ids') else 0
-            self.corridor_samples.append({
-                'edge_id': f"{edge.from_node}->{edge.to_node}",
-                'distance': edge.distance_m,
-                'robot_count': robot_count,
-                'clutter': getattr(edge, 'clutter_level', 0),
-                'people': getattr(edge, 'people_count', 0),
-                'timestamp': current_time,
-            })
-
     # ========== METRICS COMPUTATION ==========
+
+    def _iter_robot_samples(self):
+        for samples in self.robot_samples.values():
+            for sample in samples:
+                yield sample
+
+    def _robot_sample_count(self) -> int:
+        return sum(len(samples) for samples in self.robot_samples.values())
 
     def _update_metrics(self):
         """Recompute all aggregated metrics from raw event sources."""
@@ -134,9 +106,8 @@ class RealtimeAnalyticsCollector:
         self._compute_utilization()
         self._compute_cost()
         self._compute_replenishment_lag()
-        self._compute_ac_ratio()
         self._compute_sku_demand()
-        self._compute_stockout_count()
+        self._compute_stockout_metrics()
         self._compute_zone_latency()
 
     def _compute_zone_latency(self):
@@ -164,7 +135,7 @@ class RealtimeAnalyticsCollector:
         if not self.robot_samples:
             return
         statuses = defaultdict(int)
-        for sample in self.robot_samples:
+        for sample in self._iter_robot_samples():
             statuses[sample['status']] += 1
         self.metrics['utilization'] = {
             'idle': int(statuses.get('IDLE', 0)),
@@ -219,13 +190,6 @@ class RealtimeAnalyticsCollector:
             'total':          _agg(totals),
         }
 
-    def _compute_ac_ratio(self):
-        if not self.task_logger:
-            return
-        total_assigned = sum(len(v) for v in self.task_logger.iteration_assignments.values())
-        total_completed = sum(s['completed'] for s in self.task_logger.iteration_completions.values())
-        self.metrics['a_c_ratio'] = total_assigned / total_completed if total_completed > 0 else 0.0
-
     def _compute_sku_demand(self):
         # TODO: time-series analysis (time-of-day variation, demand spikes) once snapshot_data list added
         if not self.sku_logger:
@@ -240,57 +204,165 @@ class RealtimeAnalyticsCollector:
             sku_demand[f"{sku_id}@{node_tag}"] = rate
         self.metrics['sku_demand'] = sku_demand
 
-    def _compute_stockout_count(self):
-        if self.sku_logger:
-            self.metrics['stockout_count'] = len(self.sku_logger.stockout_events)
+    def _compute_stockout_metrics(self):
+        if not self.sku_logger:
+            return
+
+        stockouts = self.sku_logger.stockout_events   # one dict per stockout onset
+        restocks = self.sku_logger.restock_events      # one dict per robot dropoff restock
+
+        if not stockouts:
+            self.metrics['stockouts'] = {'total': 0}
+            return
+
+        # ------------------------------------------------------------------
+        # Build a restock lookup: (node_idx, sku_id) → sorted list of sim_times
+        # at which a restock was delivered. Sorted so we can find the first
+        # restock *after* a given stockout onset with a simple list scan.
+        # ------------------------------------------------------------------
+        restock_times = defaultdict(list)
+        for ev in restocks:
+            restock_times[(ev['node_idx'], ev['sku_id'])].append(ev['sim_time'])
+        for times in restock_times.values():
+            times.sort()
+
+        # ------------------------------------------------------------------
+        # Helper: compute summary stats over a list of numeric values.
+        # Returns zeros when empty so callers never need to guard.
+        # ------------------------------------------------------------------
+        def _agg(vals):
+            if not vals:
+                return {'mean': 0, 'p95': 0, 'max': 0, 'count': 0}
+            arr = np.array(vals, dtype=float)
+            return {
+                'mean': round(float(arr.mean()), 2),
+                'p95': round(float(np.percentile(arr, 95)), 2),
+                'max': round(float(arr.max()), 2),
+                'count': len(vals),
+            }
+
+        # ------------------------------------------------------------------
+        # Level 1 — per (node_tag, sku_id) pair: finest granularity.
+        # Identifies chronic offenders: a specific SKU at a specific shelf
+        # that repeatedly runs out. Time-to-restock here tells us how quickly
+        # the robot system responds to that exact location/item combination.
+        # ------------------------------------------------------------------
+        pair_counts = defaultdict(int)       # (node_tag, sku_id) -> total stockouts
+        pair_ttr = defaultdict(list)         # (node_tag, sku_id) -> [gap_seconds, ...]
+
+        for ev in stockouts:
+            pair_key = (ev['node_tag'], ev['sku_id'])
+            pair_counts[pair_key] += 1
+
+            # Find the earliest restock for this (node_idx, sku_id) that arrived
+            # at or after this stockout — that gap is the shelf's empty duration.
+            lookup_key = (ev['node_idx'], ev['sku_id'])
+            t_out = ev['sim_time']
+            future = [t for t in restock_times[lookup_key] if t >= t_out]
+            if future:
+                pair_ttr[pair_key].append(min(future) - t_out)
+
+        # Sort by stockout frequency descending so the worst offenders are first
+        by_pair = {
+            f"{sku_id}@{node_tag}": {
+                'stockout_count': pair_counts[(node_tag, sku_id)],
+                'time_to_restock': _agg(pair_ttr.get((node_tag, sku_id), [])),
+            }
+            for node_tag, sku_id in sorted(pair_counts, key=lambda k: -pair_counts[k])
+        }
+
+        # ------------------------------------------------------------------
+        # Level 2 — per zone (spatial quadrant: SW/SE/NW/NE).
+        # Aggregates all stockouts across all SKUs within each floor quadrant.
+        # Reveals whether one area of the hospital is systematically under-
+        # served by the robot fleet, regardless of which SKU is affected.
+        # Only computed when nodes are available (initialize() was called).
+        # ------------------------------------------------------------------
+        by_zone = {}
+        if self.nodes:
+            from src.analytics.metrics import MetricHelpers
+            helpers = MetricHelpers(self.nodes)
+
+            zone_counts = defaultdict(int)   # zone_label -> total stockouts
+            zone_ttr = defaultdict(list)     # zone_label -> [gap_seconds, ...]
+
+            for ev in stockouts:
+                # Map this node's physical position to a quadrant label
+                zone_label = helpers.quadrant_label(
+                    helpers.get_location_quadrant(ev['node_idx'])
+                )
+                zone_counts[zone_label] += 1
+
+                lookup_key = (ev['node_idx'], ev['sku_id'])
+                t_out = ev['sim_time']
+                future = [t for t in restock_times[lookup_key] if t >= t_out]
+                if future:
+                    zone_ttr[zone_label].append(min(future) - t_out)
+
+            by_zone = {
+                zone: {
+                    'stockout_count': zone_counts[zone],
+                    'time_to_restock': _agg(zone_ttr.get(zone, [])),
+                }
+                for zone in sorted(zone_counts, key=lambda z: -zone_counts[z])
+            }
+
+        # ------------------------------------------------------------------
+        # Level 3 — per category.
+        # Groups by supply category (e.g. PPE, medication, linen). Answers:
+        # which *type* of item runs out most, and how fast does the system
+        # recover per category. Category is stored directly on each event
+        # so no additional lookup is needed.
+        # ------------------------------------------------------------------
+        cat_counts = defaultdict(int)        # category -> total stockouts
+        cat_ttr = defaultdict(list)          # category -> [gap_seconds, ...]
+
+        for ev in stockouts:
+            cat = ev.get('category') or 'unknown'
+            cat_counts[cat] += 1
+
+            lookup_key = (ev['node_idx'], ev['sku_id'])
+            t_out = ev['sim_time']
+            future = [t for t in restock_times[lookup_key] if t >= t_out]
+            if future:
+                cat_ttr[cat].append(min(future) - t_out)
+
+        by_category = {
+            cat: {
+                'stockout_count': cat_counts[cat],
+                'time_to_restock': _agg(cat_ttr.get(cat, [])),
+            }
+            for cat in sorted(cat_counts, key=lambda c: -cat_counts[c])
+        }
+
+        # ------------------------------------------------------------------
+        # All three levels share the same shape per key:
+        # { stockout_count: int, time_to_restock: {mean, p95, max, count} }
+        # ------------------------------------------------------------------
+        self.metrics['stockouts'] = {
+            'total': len(stockouts),
+            'by_pair': by_pair,
+            'by_zone': by_zone,
+            'by_category': by_category,
+        }
 
     def increment_iteration(self):
         """Call at end of each training iteration to track progress."""
         self.current_iteration += 1
 
-        # Store iteration summary
-        task_count = len(self.task_logger.cost_data) if self.task_logger else 0
-        self.iteration_summaries[self.current_iteration] = {
-            'task_count': task_count,
-            'robot_samples': len(self.robot_samples),
-            'latency_p95': self.metrics['latency'].get('p95', 0),
-        }
-
     # ========== OUTPUT GENERATION ==========
 
     def save_metrics_json(self):
-        """Save all raw events and flow metrics to JSON for later analysis."""
+        """Save derived analytics metrics to JSON."""
         output = {
             'mode': self.mode,
             'iteration': self.current_iteration,
-            'task_completions': self.task_logger.cost_data if self.task_logger else [],
-            'robot_samples': self.robot_samples,
-            'corridor_samples': self.corridor_samples,
             'metrics': self.metrics,
         }
 
         json_path = self.output_dir / 'metrics.json'
         with open(json_path, 'w') as f:
             json.dump(output, f, indent=2)
-
-    def save_metrics_csv(self):
-        """Save iteration summaries to CSV."""
-        csv_path = self.output_dir / 'metrics_summary.csv'
-
-        if not self.iteration_summaries:
-            return
-
-        fieldnames = list(self.iteration_summaries[min(self.iteration_summaries.keys())].keys())
-        fieldnames = ['iteration'] + fieldnames
-
-        with open(csv_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-
-            for iteration in sorted(self.iteration_summaries.keys()):
-                row = {'iteration': iteration}
-                row.update(self.iteration_summaries[iteration])
-                writer.writerow(row)
 
     def plot_snapshot(self, final: bool = False):
         """
@@ -314,6 +386,7 @@ class RealtimeAnalyticsCollector:
         self._plot_replenishment_lag(plots_dir, final)
         self._plot_sku_demand_velocity(plots_dir, final)
         self._plot_cost_metrics(plots_dir, final)
+        self._plot_zone_latency(plots_dir, final)
 
     # ========== PLOT GENERATION ==========
 
@@ -350,7 +423,7 @@ class RealtimeAnalyticsCollector:
             return
 
         statuses = defaultdict(int)
-        for sample in self.robot_samples:
+        for sample in self._iter_robot_samples():
             statuses[sample['status']] += 1
 
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -479,6 +552,63 @@ class RealtimeAnalyticsCollector:
         plt.savefig(output_dir / filename, dpi=150, bbox_inches='tight')
         plt.close()
 
+    def _plot_zone_latency(self, output_dir: Path, final: bool = False):
+        """Plot zone-latency summaries by destination quadrant."""
+        zone_latency = self.metrics.get('zone_latency', {})
+        by_zone = zone_latency.get('by_zone', {}) if zone_latency else {}
+        if not by_zone:
+            return
+
+        zones = [z for z in ['SW', 'SE', 'NW', 'NE'] if by_zone.get(z, {}).get('count', 0) > 0]
+        if not zones:
+            return
+
+        mean_vals = [by_zone[z].get('mean', 0.0) for z in zones]
+        p95_vals = [by_zone[z].get('p95', 0.0) for z in zones]
+        counts = [by_zone[z].get('count', 0) for z in zones]
+        percent_loss = [by_zone[z].get('percent_loss', 0.0) for z in zones]
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        colors = ['#2E86AB', '#F18F01', '#A23B72', '#4ECDC4'][:len(zones)]
+
+        bars1 = ax1.bar(zones, mean_vals, color=colors, alpha=0.85, edgecolor='black')
+        ax1.set_ylabel('Mean Latency (seconds)')
+        ax1.set_title('Zone Latency by Destination Quadrant — Mean', fontweight='bold')
+        ax1.grid(axis='y', alpha=0.3)
+        for bar, val, count, loss in zip(bars1, mean_vals, counts, percent_loss):
+            label = f'{val:.1f}s\nn={count}'
+            if loss:
+                label += f'\n+{loss:.1f}%'
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                label,
+                ha='center',
+                va='bottom',
+                fontsize=9,
+            )
+
+        bars2 = ax2.bar(zones, p95_vals, color=colors, alpha=0.85, edgecolor='black')
+        ax2.set_ylabel('P95 Latency (seconds)')
+        ax2.set_title('Zone Latency by Destination Quadrant — P95', fontweight='bold')
+        ax2.grid(axis='y', alpha=0.3)
+        for bar, val, count in zip(bars2, p95_vals, counts):
+            ax2.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f'{val:.1f}s\nn={count}',
+                ha='center',
+                va='bottom',
+                fontsize=9,
+            )
+
+        # TODO: Add a by_route heatmap using zone_latency['by_route'] once we decide
+        # whether the route-pair view should be shown as mean, p95, or both.
+        plt.tight_layout()
+        filename = '06_zone_latency.png' if final else f'06_zone_latency_iter{self.current_iteration}.png'
+        plt.savefig(output_dir / filename, dpi=150, bbox_inches='tight')
+        plt.close()
+
 
     def get_snapshot(self) -> dict:
         """Return current metrics for dashboard/logging."""
@@ -488,7 +618,7 @@ class RealtimeAnalyticsCollector:
             'metrics': self.metrics,
             'event_counts': {
                 'tasks': task_count,
-                'robot_samples': len(self.robot_samples),
+                'robot_samples': self._robot_sample_count(),
                 'sku_snapshots': len(self.sku_logger.latest_snapshots) if self.sku_logger else 0,
             }
         }

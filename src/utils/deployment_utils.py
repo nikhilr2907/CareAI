@@ -370,7 +370,7 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
     return best_robot if best_robot is not None else 0
 
 
-def assign_tasks(env, ppo, max_assignments, task_logger=None, total_assignments=0):
+def assign_tasks(env, ppo, max_assignments, task_logger=None, total_assignments=0, iteration=0):
     assignments = 0
     while env.pending_tasks and assignments < max_assignments:
         task = env.pending_tasks[0]
@@ -385,7 +385,7 @@ def assign_tasks(env, ppo, max_assignments, task_logger=None, total_assignments=
         if task_logger is not None:
             task_logger.log_assignment(
                 task, action, 0.0,
-                0, env.current_time, total_assignments + assignments, assignments,
+                iteration, env.current_time, total_assignments + assignments, assignments,
             )
 
         # Apply capacity overflow rules immediately after insertion so a full robot

@@ -36,6 +36,7 @@ from src.utils.training_utils import (
     select_nearest_robot,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.robot_sample_logger import RobotSampleLogger
 from src.utils.policy_inspector import PolicyInspector
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 from src.utils.fleet_event_logger import FleetEventLogger
@@ -45,11 +46,13 @@ async def main():
 
     logger, output_dir, _ = setup_logging_and_output(args)
     task_logger = TaskLogger(output_dir / "logs")
-    RealtimeAnalyticsCollector(
+    robot_sample_logger = RobotSampleLogger(output_dir / "logs")
+    analytics = RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
         mode='real',
         snapshot_frequency=50,
         task_logger=task_logger,
+        robot_sample_logger=robot_sample_logger,
     )
 
     if args.seed is not None:
@@ -143,6 +146,9 @@ async def main():
         fleet_event_logger=FleetEventLogger(output_dir / "logs"),
         log_dir=output_dir / "logs"
     )
+
+    analytics.sku_logger = env.sku_logger
+    analytics.initialize(env.graph_state.nodes)
 
    
     logger.info(f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}")
@@ -467,6 +473,12 @@ async def main():
             )
 
         task_logger.log_running_summary(iteration)
+        task_logger.log_iteration_summary(iteration)
+
+        if iteration % 10 == 0:
+            analytics.record_robot_telemetry(env.robots, env.current_time)
+        if iteration % 50 == 0:
+            analytics.increment_iteration()
 
         if iteration % log_interval == 0:
             avg_reward = np.mean(iteration_rewards[-log_interval:])
@@ -536,6 +548,14 @@ async def main():
                     f"records={ec['total_records']} nll_loss={ec['avg_recent_loss']:.4f}"
                 )
 
+        if iteration % 50 == 0:
+            snapshot_dir = output_dir / f"metrics_snapshot_iter{iteration}"
+            task_logger.plot_metrics(snapshot_dir)
+            logger.info(f"Task metrics snapshot saved to iter {iteration}")
+            analytics.plot_snapshot(final=False)
+            analytics.save_metrics_json()
+            logger.info(f"Analytics snapshot saved to iter {iteration}")
+
         # ---- Checkpoint ----
         if iteration % save_interval == 0:
             ckpt_path = checkpoint_dir / f"gapo_real_iter{iteration}.pth"
@@ -545,6 +565,14 @@ async def main():
 
     # ---- Final checkpoint + teardown ----
     ppo.save(str(checkpoint_dir / "gapo_real_final.pth"))
+    final_metrics_dir = output_dir / "metrics_final"
+    task_logger.plot_metrics(final_metrics_dir)
+    logger.info(f"Final task metrics plots saved to {final_metrics_dir}")
+    analytics.increment_iteration()
+    analytics.plot_snapshot(final=True)
+    analytics.save_metrics_json()
+    logger.info(f"Final analytics plots saved to {analytics.output_dir / 'plots_final'}")
+    logger.info(f"Analytics metrics saved to {analytics.output_dir}")
     logger.info(f"\nTraining complete. Total wall time: {(time.time() - start_time) / 3600:.2f}h")
     await robot_backend.stop()
 

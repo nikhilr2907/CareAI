@@ -39,6 +39,7 @@ from src.utils.training_utils import (
     select_nearest_robot,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.robot_sample_logger import RobotSampleLogger
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 from src.utils.fleet_event_logger import FleetEventLogger
 
@@ -116,11 +117,13 @@ async def main():
     logger = logging.getLogger(__name__)
 
     task_logger = TaskLogger(output_dir / "logs")
+    robot_sample_logger = RobotSampleLogger(output_dir / "logs")
     analytics = RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
         mode='real',
         snapshot_frequency=50,
         task_logger=task_logger,
+        robot_sample_logger=robot_sample_logger,
     )
 
     # --- Validate inputs ---
@@ -164,9 +167,12 @@ async def main():
         stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
         stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
         initial_stochastic_tasks=args.initial_stochastic_tasks,
-        fleet_event_logger=FleetEventLogger(output_dir / "logs")
+        fleet_event_logger=FleetEventLogger(output_dir / "logs"),
+        log_dir=output_dir / "logs",
     )
     logger.info(f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}")
+    analytics.sku_logger = env.sku_logger
+    analytics.initialize(env.graph_state.nodes)
 
     # --- Build and load policy ---
     if getattr(env.graph_state, "category_order", None):
@@ -318,6 +324,22 @@ async def main():
                     completed_task=task,
                 )
 
+            task_logger.log_running_summary(total_steps)
+            task_logger.log_iteration_summary(total_steps)
+
+            if total_steps % 10 == 0:
+                analytics.record_robot_telemetry(env.robots, env.current_time)
+            if total_steps % 50 == 0:
+                analytics.increment_iteration()
+
+            if total_steps % 50 == 0:
+                snapshot_dir = output_dir / f"metrics_snapshot_step{total_steps}"
+                task_logger.plot_metrics(snapshot_dir)
+                logger.info(f"Task metrics snapshot saved to step {total_steps}")
+                analytics.plot_snapshot(final=False)
+                analytics.save_metrics_json()
+                logger.info(f"Analytics snapshot saved to step {total_steps}")
+
             # Periodic logging
             if total_steps % args.log_interval == 0:
                 wall_hours = (time.time() - start_time) / 3600
@@ -352,7 +374,14 @@ async def main():
     if completion_time_history:
         logger.info(f"  Avg completion:    {float(np.mean(completion_time_history)) / 60:.1f}min")
 
-    task_logger.plot_metrics(output_dir)
+    final_metrics_dir = output_dir / "metrics_final"
+    task_logger.plot_metrics(final_metrics_dir)
+    logger.info(f"Final task metrics plots saved to {final_metrics_dir}")
+    analytics.increment_iteration()
+    analytics.plot_snapshot(final=True)
+    analytics.save_metrics_json()
+    logger.info(f"Final analytics plots saved to {analytics.output_dir / 'plots_final'}")
+    logger.info(f"Analytics metrics saved to {analytics.output_dir}")
 
     if twin_publisher:
         twin_publisher.stop()
