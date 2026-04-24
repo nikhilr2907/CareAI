@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List
 from collections import defaultdict
 import json
 import csv
@@ -52,11 +52,7 @@ class RealtimeAnalyticsCollector:
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # ===== Flow Metrics Infrastructure =====
-        self.nodes = None                    # Set by record_inventory_snapshot()
-        self.metric_helpers = None           # Set by _initialize_metrics()
-        self.metric_modules: Dict = {}       # {metric_name: metric_instance}
-        self.flow_metrics_cache: Dict = {}   # Cached results from last compute()
+        self.nodes = None  # Set by initialize()
 
         # Raw event streams (append-only)
         # Note: task completion data now read from task_logger.cost_data
@@ -73,7 +69,6 @@ class RealtimeAnalyticsCollector:
             'utilization': {'idle': 0, 'active': 0, 'waiting': 0},
             'replenishment_lag': {'mean': 0, 'max': 0},
             'cost': {'mean': 0, 'min': 0, 'max': 0},
-            'failure_rate': 0.0,
             'a_c_ratio': 0.0,
         }
 
@@ -108,10 +103,8 @@ class RealtimeAnalyticsCollector:
                 })
 
     def initialize(self, nodes: List[GraphNode]):
-        """Set graph nodes and initialize flow metric modules. Call once after env creation."""
-        if self.nodes is None:
-            self.nodes = nodes
-            self._initialize_metrics()
+        """Store graph nodes for future metric modules. Call once after env creation."""
+        self.nodes = nodes
 
     def record_corridor_state(self, edges: List[GraphEdge], current_time: float):
         """
@@ -133,67 +126,6 @@ class RealtimeAnalyticsCollector:
                 'timestamp': current_time,
             })
 
-    def record_cost_per_task(self, task_id: int, total_cost: float, total_reward: float):
-        """
-        Record cost breakdown for a task (from task_logger).
-
-        Args:
-            task_id: Task ID
-            total_cost: Total cost in dollars
-            total_reward: Total reward
-        """
-        # Store for later aggregation (cost computation happens in task_logger)
-        self.task_events_with_cost = getattr(self, 'task_events_with_cost', {})
-        self.task_events_with_cost[task_id] = {
-            'cost': total_cost,
-            'reward': total_reward,
-            'cost_per_reward': total_cost / total_reward if total_reward > 0 else 0,
-        }
-
-    # ========== FLOW METRICS ORCHESTRATION ==========
-
-    def _initialize_metrics(self):
-        """Instantiate all flow metric modules (called on first inventory snapshot)."""
-        try:
-            from src.analytics.metrics import (
-                MetricHelpers, ZoneLatencyMetric, RoutePerformanceMetric,
-                TaskCompletionDistributionMetric, EfficiencyComparisonMetric,
-            )
-            self.metric_helpers = MetricHelpers(self.nodes)
-            self.metric_modules = {
-                'zone_latency': ZoneLatencyMetric(self.task_logger, self.nodes, self.metric_helpers),
-                'route_performance': RoutePerformanceMetric(self.task_logger, self.nodes, self.metric_helpers),
-                'task_completion_dist': TaskCompletionDistributionMetric(self.task_logger, self.nodes, self.metric_helpers),
-                'efficiency_comparison': EfficiencyComparisonMetric(self.task_logger, self.nodes, self.metric_helpers),
-            }
-        except Exception:
-            self.metric_modules = {}
-
-    def compute_flow_metrics(self) -> Dict:
-        """
-        Orchestrate computation of all flow metrics.
-
-        Returns:
-            {
-                'zone_latency': {...},
-                'route_performance': {...},
-                'task_completion_dist': {...},
-                'efficiency_comparison': {...},
-            }
-        """
-        if not self.metric_modules:
-            return {}
-
-        result = {}
-        for name, metric in self.metric_modules.items():
-            try:
-                result[name] = metric.compute()
-            except Exception:
-                result[name] = {}
-
-        self.flow_metrics_cache = result
-        return result
-
     # ========== METRICS COMPUTATION ==========
 
     def _update_metrics(self):
@@ -205,7 +137,6 @@ class RealtimeAnalyticsCollector:
         self._compute_ac_ratio()
         self._compute_sku_demand()
         self._compute_stockout_count()
-        self.metrics['failure_rate'] = 0.0  # TODO: wire up once failure tracking exists
 
     def _compute_latency(self):
         if not (self.task_logger and self.task_logger.cost_data):
@@ -314,7 +245,6 @@ class RealtimeAnalyticsCollector:
             'task_count': task_count,
             'robot_samples': len(self.robot_samples),
             'latency_p95': self.metrics['latency'].get('p95', 0),
-            'failure_rate': self.metrics['failure_rate'],
         }
 
     # ========== OUTPUT GENERATION ==========
@@ -328,7 +258,6 @@ class RealtimeAnalyticsCollector:
             'robot_samples': self.robot_samples,
             'corridor_samples': self.corridor_samples,
             'metrics': self.metrics,
-            'flow_metrics': self.flow_metrics_cache,
         }
 
         json_path = self.output_dir / 'metrics.json'
@@ -376,7 +305,6 @@ class RealtimeAnalyticsCollector:
         self._plot_replenishment_lag(plots_dir, final)
         self._plot_sku_demand_velocity(plots_dir, final)
         self._plot_cost_metrics(plots_dir, final)
-        self._plot_failure_recovery(plots_dir, final)
 
     # ========== PLOT GENERATION ==========
 
@@ -542,28 +470,6 @@ class RealtimeAnalyticsCollector:
         plt.savefig(output_dir / filename, dpi=150, bbox_inches='tight')
         plt.close()
 
-    def _plot_failure_recovery(self, output_dir: Path, final: bool = False):
-        """Plot failure rate and recovery metrics."""
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        failure_rate = self.metrics.get('failure_rate', 0)
-        success_rate = 1.0 - failure_rate
-
-        categories = ['Success', 'Failure']
-        values = [success_rate * 100, failure_rate * 100]
-        colors = ['#4ECDC4', '#FF6B6B']
-
-        wedges, texts, autotexts = ax.pie(values, labels=categories, autopct='%1.1f%%',
-                                           colors=colors, startangle=90)
-        ax.set_title(f'Robot Failure Rate ({failure_rate:.2%})')
-
-        for autotext in autotexts:
-            autotext.set_color('white')
-            autotext.set_fontweight('bold')
-
-        filename = '06_failure_recovery.png' if final else f'06_failure_iter{self.current_iteration}.png'
-        plt.savefig(output_dir / filename, dpi=150, bbox_inches='tight')
-        plt.close()
 
     def get_snapshot(self) -> dict:
         """Return current metrics for dashboard/logging."""
@@ -571,7 +477,6 @@ class RealtimeAnalyticsCollector:
         return {
             'iteration': self.current_iteration,
             'metrics': self.metrics,
-            'flow_metrics': self.flow_metrics_cache,
             'event_counts': {
                 'tasks': task_count,
                 'robot_samples': len(self.robot_samples),

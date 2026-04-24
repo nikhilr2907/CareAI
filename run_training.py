@@ -841,7 +841,6 @@ def main():
                 analytics.record_robot_telemetry(env.robots, env.current_time)
             if iteration % 50 == 0:
                 analytics.record_corridor_state(env.graph_state.edges, env.current_time)
-                analytics.compute_flow_metrics()
 
             # Generate task metrics snapshots periodically
             if iteration % 50 == 0:
