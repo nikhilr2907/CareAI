@@ -137,6 +137,15 @@ class RealtimeAnalyticsCollector:
         self._compute_ac_ratio()
         self._compute_sku_demand()
         self._compute_stockout_count()
+        self._compute_zone_latency()
+
+    def _compute_zone_latency(self):
+        if not (self.nodes and self.task_logger):
+            return
+        from src.analytics.metrics import ZoneLatencyMetric, MetricHelpers
+        self.metrics['zone_latency'] = ZoneLatencyMetric(
+            self.task_logger, self.nodes, MetricHelpers(self.nodes)
+        ).compute()
 
     def _compute_latency(self):
         if not (self.task_logger and self.task_logger.cost_data):

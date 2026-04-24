@@ -19,6 +19,13 @@ class ZoneLatencyMetric:
         self.nodes = nodes
         self.helpers = helpers
 
+    def compute(self) -> dict:
+        """Return both zone and route views."""
+        return {
+            'by_zone': self.compute_by_zone(),
+            'by_route': self.compute_by_route(),
+        }
+
     # ------------------------------------------------------------------
 
     def compute_by_zone(self) -> dict:
