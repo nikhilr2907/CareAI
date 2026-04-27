@@ -85,7 +85,6 @@ class RobotBridgeWebSocketClient:
         self.on_system_state: Optional[Callable] = None
         self.on_connection_lost: Optional[Callable] = None
         self.on_emergency_stop: Optional[Callable] = None
-
         logger.info(f"ROS Bridge Client initialized (not connected) - bridge URL: {bridge_url}")
 
     async def connect(self):

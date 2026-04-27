@@ -133,6 +133,41 @@ async def main():
     await robot_backend.start()
     logger.info("ROS bridge backend started")
 
+    # Wait for first telemetry from each robot before env.reset() runs.
+    # Yields so the WebSocket listener task can connect + receive its first
+    # robot_state message. Logs progress every second; reports if the
+    # listener task itself died (e.g. wrong URL, connection refused).
+    _loop = asyncio.get_running_loop()
+    _wait_start = _loop.time()
+    _deadline = _wait_start + 10.0
+    _last_log = _wait_start
+    _expected_robots = num_robots if num_robots else 1
+    while _loop.time() < _deadline:
+        if all(robot_backend.get_telemetry(r) is not None for r in range(_expected_robots)):
+            logger.info(f"Telemetry confirmed for all robots after {_loop.time() - _wait_start:.2f}s")
+            break
+        if _loop.time() - _last_log > 1.0:
+            logger.info(
+                f"Waiting for telemetry... bridge_url={robot_backend._bridge_url}, "
+                f"elapsed={_loop.time() - _wait_start:.1f}s"
+            )
+            # Surface listener-task failures (e.g. connection refused, wrong URL).
+            for rid, task in robot_backend._listen_tasks.items():
+                if task.done():
+                    try:
+                        exc = task.exception()
+                        logger.error(f"Listener for robot_id={rid} terminated with: {exc!r}")
+                    except asyncio.CancelledError:
+                        logger.error(f"Listener for robot_id={rid} was cancelled")
+            _last_log = _loop.time()
+        await asyncio.sleep(0.1)
+    else:
+        raise RuntimeError(
+            f"No telemetry received within 10s. "
+            f"bridge_url={robot_backend._bridge_url}. "
+            f"Verify with: curl http://localhost:8765/health"
+        )
+
     # --- Create environment ---
     env, num_nodes = create_real_env_from_config_file(
         config_path,

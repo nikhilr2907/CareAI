@@ -367,7 +367,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
             active_task_id=raw.active_task_id,
             remaining_path=list(path),
             eta_to_next_node=raw.eta_to_next_node,
-            is_charging=False,
+            is_charging=(robot.robot_id in self._robots_routing_to_charge),
             needs_charging=False,
         )
 

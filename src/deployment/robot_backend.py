@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
+from datetime import datetime
 from abc import ABC, abstractmethod
 from collections import deque
 import logging
@@ -7,6 +8,24 @@ import asyncio
 import math
 import os
 import signal
+
+
+def _to_epoch_seconds(ts) -> float:
+    """Coerce a timestamp into Unix-epoch seconds.
+
+    Accepts: float / int (already epoch), ISO-8601 string (e.g. from the
+    WebSocket bridge), None / empty. Falls back to 0.0 on parse failure.
+    """
+    if ts is None or ts == "":
+        return 0.0
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts.rstrip("Z")).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 @dataclass
@@ -513,7 +532,7 @@ class ROSBridgeRobotBackend(RobotBackend):
 
         return RobotTelemetryData(
             robot_id=robot_id,
-            timestamp=float(raw.timestamp or 0.0),
+            timestamp=_to_epoch_seconds(raw.timestamp),
             x=float(pos[0]),
             y=float(pos[1]),
             heading=heading,

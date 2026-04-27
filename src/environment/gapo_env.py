@@ -290,7 +290,10 @@ class GAPOTaskAssignmentEnv:
             'completed_task_legs': completed_tasks,
             'emergency_tasks': len(self.emergency_tasks),
             'offline_robots': list(self._offline_robots),
-            'robots_charging': [rid for rid, sim in enumerate(self.robot_simulators) if sim.is_charging],
+            'robots_charging': [
+                rid for rid, robot in enumerate(self.robots)
+                if robot.telemetry is not None and robot.telemetry.is_charging
+            ],
         }
 
         return state_dict, reward, done, info
@@ -866,8 +869,8 @@ class GAPOTaskAssignmentEnv:
 
             # F: Depletion penalty - deduct if robot is critically low on battery at task end
             if task.leg_type == 'dropoff' and robot:
-                sim = self.robot_simulators[robot.robot_id]
-                if sim.battery_level < self.battery_critical_threshold:
+                battery = robot.telemetry.battery_level if robot.telemetry is not None else 1.0
+                if battery < self.battery_critical_threshold:
                     task_reward -= self.battery_critical_task_penalty
 
             parent_id = getattr(task, 'parent_task_id', None)
