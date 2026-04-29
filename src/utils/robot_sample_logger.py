@@ -86,7 +86,6 @@ class RobotSampleLogger:
             eta_next = None
 
         task_id = getattr(current_task, "task_id", None) if current_task is not None else None
-        parent_id = getattr(current_task, "parent_task_id", None) if current_task is not None else None
         leg_type = getattr(current_task, "leg_type", None) if current_task is not None else None
         task_type = getattr(current_task, "task_type", None) if current_task is not None else None
 
@@ -119,7 +118,6 @@ class RobotSampleLogger:
             "remaining_path_len": len(remaining_path),
             "eta_to_next_node": eta_next,
             "task_id": task_id,
-            "parent_task_id": parent_id,
             "leg_type": leg_type,
             "task_type": task_type,
             "task_age": task_age,
@@ -147,7 +145,6 @@ class RobotSampleLogger:
             f"rem_path={self._fmt_int(sample.get('remaining_path_len'))} "
             f"eta_next={self._fmt_float(sample.get('eta_to_next_node'), 1)}s "
             f"task={self._fmt_int(sample.get('task_id'))} "
-            f"parent={self._fmt_int(sample.get('parent_task_id'))} "
             f"leg={sample.get('leg_type') or '?'} "
             f"task_type={sample.get('task_type') or '?'} "
             f"task_age={self._fmt_float(sample.get('task_age'), 1)}s "

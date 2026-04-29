@@ -370,26 +370,41 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
     return best_robot if best_robot is not None else 0
 
 
-def assign_tasks(env, ppo, max_assignments, task_logger=None, total_assignments=0, iteration=0):
+def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=None, total_assignments=0, iteration=0):
     assignments = 0
     while env.pending_tasks and assignments < max_assignments:
         task = env.pending_tasks[0]
         robot_mask = np.ones(env.num_robots, dtype=bool)
+
+        heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+
         if ppo is not None:
             state_dict = env._get_state_dict()
             action = ppo.select_action_greedy(state_dict, robot_mask)
+            task.source = "policy"
         else:
-            action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
-        env.assign_task_to_robot(action, task)
+            action = heuristic_action
+            task.source = "heuristic"
+
+        legs = env.assign_task_to_robot(action, task)
+        if not legs:
+            break
+
         assignments += 1
-        if task_logger is not None:
-            task_logger.log_assignment(
-                task, action, 0.0,
-                iteration, env.current_time, total_assignments + assignments, assignments,
+
+        if decision_logger is not None:
+            decision_logger.log(
+                task, action, heuristic_action, env, env.current_time,
             )
 
-        # Apply capacity overflow rules immediately after insertion so a full robot
-        # does not accumulate pickup legs in the main queue.
+        if task_logger is not None:
+            for leg in legs:
+                task_logger.log_assignment(
+                    leg, action, 0.0,
+                    iteration, env.current_time,
+                    total_assignments + assignments, assignments,
+                )
+
         if 0 <= action < len(env.robots):
             robot = env.robots[action]
             robot.enforce_capacity_limits()

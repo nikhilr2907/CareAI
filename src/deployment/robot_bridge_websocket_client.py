@@ -149,6 +149,8 @@ class RobotBridgeWebSocketClient:
             await self._handle_system_state(data)
         elif msg_type == 'emergency_stop':
             await self._handle_emergency_stop(data)
+        elif msg_type in ('task_response', 'connected', 'heartbeat'):
+            logger.debug(f"Bridge message: {msg_type} status={data.get('status')}")
         else:
             logger.warning(f"Unknown message type: {msg_type}")
 
@@ -244,6 +246,12 @@ class RobotBridgeWebSocketClient:
                     sku_inventory=loc.get('sku_inventory', {}),
                     category_inventory=loc.get('category_inventory', {})
                 )
+
+            # Mirror to the standalone-message cache so get_all_inventories()
+            # sees these even when the bridge buffers inventory into system_state
+            # (i.e. buffer_inventory_updates=true; in that mode no standalone
+            # location_inventory messages ever arrive).
+            self.location_inventories = inventories.copy()
 
             # Update system state
             self.system_state = SystemState(

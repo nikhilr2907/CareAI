@@ -43,6 +43,7 @@ from src.utils.deployment_utils import (
     assign_tasks,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.decision_logger import DecisionLogger
 from src.utils.robot_sample_logger import RobotSampleLogger
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 from src.utils.fleet_event_logger import FleetEventLogger
@@ -217,6 +218,7 @@ def main():
     )
     logger = logging.getLogger(__name__)
     task_logger = TaskLogger(output_dir / "logs")
+    decision_logger = DecisionLogger(output_dir / "logs")
     robot_sample_logger = RobotSampleLogger(output_dir / "logs")
     analytics = RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
@@ -428,6 +430,7 @@ def main():
                 ppo,
                 args.max_assignments_per_step,
                 task_logger=task_logger,
+                decision_logger=decision_logger,
                 total_assignments=total_tasks_assigned,
                 iteration=total_timesteps,
             )
@@ -556,10 +559,10 @@ def main():
                 for robot, simulator in zip(env.robots, env.robot_simulators):
                     current_task = robot.current_task
                     leg_type = getattr(current_task, "leg_type", None) if current_task else None
-                    parent_id = getattr(current_task, "parent_task_id", None) if current_task else None
+                    cur_task_id = current_task.task_id if current_task else None
                     pickup_done = (
-                        robot.is_pickup_complete(parent_id)
-                        if (parent_id is not None and hasattr(robot, 'is_pickup_complete'))
+                        robot.is_pickup_complete(cur_task_id)
+                        if (cur_task_id is not None and hasattr(robot, 'is_pickup_complete'))
                         else None
                     )
                     battery_level = getattr(simulator, 'battery_level', 1.0)
@@ -643,12 +646,18 @@ def main():
                 for node in env.graph_state.nodes:
                     if node.node_type != "recovery":
                         continue
-                    line = f"{node.node_id}: {node.stock_level:.0f}/{node.max_stock:.0f} tts={node.time_to_stockout:.1f}h"
+                    stockout = " STOCKOUT" if node.is_stockout else ""
+                    line = (
+                        f"{node.node_id}: "
+                        f"{node.stock_level:.0f}/{node.max_stock:.0f}{stockout}"
+                    )
                     if node.category_inventory:
-                        cat_name = next(iter(node.category_inventory.keys()))
-                        cat_stock = node.get_category_stock_level(cat_name)
-                        cat_max = node.get_category_max_stock(cat_name)
-                        line += f" | {cat_name}:{cat_stock:.0f}/{cat_max:.0f}"
+                        cat_parts = [
+                            f"{cat}:{node.get_category_stock_level(cat):.0f}/"
+                            f"{node.get_category_max_stock(cat):.0f}"
+                            for cat in node.category_inventory.keys()
+                        ]
+                        line += " | " + " ".join(cat_parts)
                     hud_lines.append(line)
                     if len(hud_lines) >= 12:
                         break

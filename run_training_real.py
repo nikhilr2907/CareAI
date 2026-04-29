@@ -36,6 +36,7 @@ from src.utils.training_utils import (
     select_nearest_robot,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.decision_logger import DecisionLogger
 from src.utils.robot_sample_logger import RobotSampleLogger
 from src.utils.policy_inspector import PolicyInspector
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
@@ -46,6 +47,7 @@ async def main():
 
     logger, output_dir, _ = setup_logging_and_output(args)
     task_logger = TaskLogger(output_dir / "logs")
+    decision_logger = DecisionLogger(output_dir / "logs")
     robot_sample_logger = RobotSampleLogger(output_dir / "logs")
     analytics = RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
@@ -322,9 +324,12 @@ async def main():
                 robot_mask = np.ones(env.num_robots, dtype=bool)
                 mem_idx_before = len(memory.actions)
 
+                heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                _used_heuristic = False
                 try:
                     if iteration <= warmup_iters and np.random.random() < warmup_mix:
-                        action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                        action = heuristic_action
+                        _used_heuristic = True
                         state_tensor = ppo._state_dict_to_tensor(state_dict)
                         mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
                         with torch.no_grad():
@@ -344,8 +349,15 @@ async def main():
                     logger.error(f"Action selection error iter {iteration} step {step}: {e}")
                     raise
 
+                task.source = "heuristic" if _used_heuristic else "policy"
                 step_memory_indices.append(mem_idx_before)
                 env.assign_task_to_robot(action, task)
+
+                decision_logger.log(
+                    task, action, heuristic_action, env, env.current_time,
+                    is_warmup=(iteration <= warmup_iters),
+                    used_heuristic=_used_heuristic,
+                )
 
                 num_assignments += 1
                 assignments_this_step += 1
@@ -388,12 +400,12 @@ async def main():
             completed_leg_credits: dict = info.get('completed_leg_credits', {})
 
             for leg_task in completed_task_legs:
-                raw_leg_reward = float(completed_leg_credits.get(leg_task.task_id, 0.0))
+                raw_leg_reward = float(completed_leg_credits.get((leg_task.task_id, leg_task.leg_type), 0.0))
                 scaled_leg_reward = raw_leg_reward * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_leg_reward = float(np.clip(scaled_leg_reward, -reward_clip, reward_clip))
                 task_logger.log_completion(
-                    getattr(leg_task, "parent_task_id", leg_task.task_id),
+                    leg_task.task_id,
                     scaled_leg_reward,
                     env.current_time - leg_task.arrival_time if leg_task.arrival_time is not None else None,
                     env.current_time,

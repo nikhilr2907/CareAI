@@ -38,7 +38,8 @@ class TaskLogger:
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
 
-        self.task_metadata = {}  # task_id -> metadata
+        self.task_metadata = {}  # (task_id, leg_type) -> metadata
+                                 # leg_type defaults to 'full' for non-split tasks
         # Track per-iteration stats
         self.iteration_assignments = defaultdict(list)  # iter -> [robot_ids]
         self.iteration_completions = defaultdict(lambda: {'completed': 0, 'robots': defaultdict(int)})  # iter -> stats
@@ -61,10 +62,13 @@ class TaskLogger:
                       iteration: int, sim_time: float, num_assignments: int, buffer_size: int):
         """Log task assignment."""
         task_id = task.task_id
+        leg_type = getattr(task, 'leg_type', None) or 'full'
         source = getattr(task, 'source', 'unknown')
 
-        # Store metadata for completion later
-        self.task_metadata[task_id] = {
+        # Store metadata for completion later, keyed by (task_id, leg_type) so that
+        # pickup and dropoff legs of the same parent (which now share task_id) don't
+        # overwrite each other.
+        self.task_metadata[(task_id, leg_type)] = {
             'iteration': iteration,
             'arrival_time': task.arrival_time,
             'from_location_idx': task.from_location_index,
@@ -76,7 +80,6 @@ class TaskLogger:
             'num_items': getattr(task, 'num_items', None),
             'estimated_duration': getattr(task, 'estimated_duration', None),
             'initial_tts': getattr(task, 'initial_time_to_stockout', getattr(task, 'time_to_stockout', None)),
-            'parent_task_id': getattr(task, 'parent_task_id', None),
             'sku_id': getattr(task, 'sku_id', None),
             'sku_stock_level_at_assign': getattr(
                 task, 'sku_stock_level_at_assign',
@@ -135,15 +138,16 @@ class TaskLogger:
                       completed_task=None):
         """Log task completion with cost breakdown (inventory-driven rewards + cost tracking)."""
         completed_task_id = getattr(completed_task, 'task_id', task_id)
-        completed_parent_id = getattr(completed_task, 'parent_task_id', None)
         completed_leg_type = getattr(completed_task, 'leg_type', None)
-        metadata_key = completed_parent_id if completed_parent_id in self.task_metadata else task_id
+        # Look up metadata by the same (task_id, leg_type) key used at assignment time.
+        leg_key = completed_leg_type or 'full'
+        metadata_key = (completed_task_id, leg_key)
 
         if metadata_key not in self.task_metadata:
             # Task not in our log (maybe predates logging), but still log the completion
             actual_time_str = f"{actual_completion_time:.1f}s" if actual_completion_time is not None else "?"
             self.logger.debug(
-                f"COMPLT task_id={completed_task_id} parent={completed_parent_id} "
+                f"COMPLT task_id={completed_task_id} "
                 f"leg={completed_leg_type or '?'} [NO METADATA] sim_time={sim_time:.1f}s "
                 f"completion_reward={completion_reward:.4f} actual_time={actual_time_str}"
             )
@@ -152,7 +156,6 @@ class TaskLogger:
         meta = self.task_metadata[metadata_key]
         total_reward = meta['assignment_reward'] + completion_reward
         source = meta.get('source', 'unknown')
-        parent_id = completed_parent_id or meta.get('parent_task_id') or metadata_key
 
         # Compute cost metrics
         robot_hours = (sim_time - meta['sim_time_assigned']) / 3600.0 if sim_time >= meta['sim_time_assigned'] else 0.0
@@ -246,7 +249,7 @@ class TaskLogger:
         route_str = f"route={planned_path} route_nodes={len(planned_path)}" if planned_path else "route=unknown"
         priority_score = meta.get('learned_score', 0.0)
         self.logger.info(
-            f"COMPLT task_id={completed_task_id} parent={parent_id} iter={meta['iteration']} "
+            f"COMPLT task_id={completed_task_id} iter={meta['iteration']} "
             f"sim_time={sim_time:.1f}s robot={meta['assigned_robot']} source={source} "
             f"leg={leg_type_str} items={num_items_str} location={from_idx}->{to_idx if to_idx is not None else '?'} "
             f"time_from_assign={sim_time - meta['sim_time_assigned']:.1f}s "
@@ -276,7 +279,6 @@ class TaskLogger:
             # Track cost data for analytics
             self.cost_data.append({
                 'task_id': completed_task_id,
-                'parent_task_id': parent_id,
                 'source': source,
                 'robot': robot,
                 'distance_traveled': distance_traveled,
@@ -301,9 +303,9 @@ class TaskLogger:
                 'execution_start_time': getattr(completed_task, 'execution_start_time', None) if completed_task is not None else None,
             })
 
-        # Keep parent metadata after pickup so the later dropoff can reuse it.
-        if leg_type_str != "pickup":
-            del self.task_metadata[metadata_key]
+        # Each (task_id, leg_type) entry is now self-contained, so always free this leg's
+        # metadata at completion. Pickup and dropoff have separate keys; they don't share state.
+        del self.task_metadata[metadata_key]
 
     def log_iteration_summary(self, iteration: int):
         """Log summary of iteration completions and robot breakdown."""

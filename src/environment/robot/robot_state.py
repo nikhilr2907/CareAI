@@ -33,12 +33,12 @@ class RobotState:
 
     @property
     def num_queued_tasks(self) -> int:
-        """Get number of original (parent) tasks queued, not counting pickup+dropoff legs separately."""
-        seen = set()
-        for task in self.task_queue:
-            pid = task.parent_task_id if task.leg_type in ("pickup", "dropoff") else task.task_id
-            seen.add(pid)
-        return len(seen)
+        """Get number of distinct tasks queued, not counting pickup+dropoff legs separately.
+
+        Pickup and dropoff legs of the same parent share task_id since the leg-ID
+        collapse, so a set of task_ids gives the unique-task count directly.
+        """
+        return len({task.task_id for task in self.task_queue})
 
     @property
     def current_task(self) -> Optional['Task']:
@@ -119,7 +119,7 @@ class RobotState:
         """
         pickup_pending = (
             1 if getattr(t, "leg_type", None) == "dropoff"
-            and t.parent_task_id not in self.picked_up_task_ids
+            and t.task_id not in self.picked_up_task_ids
             else 0
         )
         return (pickup_pending, -t.learned_score, t.arrival_time)
@@ -156,14 +156,13 @@ class RobotState:
             for task in remaining:
                 if getattr(task, "leg_type", "full") == "pickup":
                     self.overflow_queue.append(task)
-                    if task.parent_task_id is not None:
-                        deferred_parent_ids.add(task.parent_task_id)
+                    deferred_parent_ids.add(task.task_id)
                 else:
                     keep.append(task)
             if deferred_parent_ids:
                 still_keep = []
                 for task in keep:
-                    if getattr(task, "leg_type", "full") == "dropoff" and task.parent_task_id in deferred_parent_ids:
+                    if getattr(task, "leg_type", "full") == "dropoff" and task.task_id in deferred_parent_ids:
                         self.overflow_queue.append(task)
                     else:
                         still_keep.append(task)
@@ -194,20 +193,18 @@ class RobotState:
         for task in self.task_queue:
             if getattr(task, "leg_type", "full") == "pickup":
                 pickup_count += task.num_items
-                if task.parent_task_id is not None:
-                    pickup_ready_parents.add(task.parent_task_id)
+                pickup_ready_parents.add(task.task_id)
 
         for task in self.overflow_queue:
             if getattr(task, "leg_type", "full") == "pickup":
                 if pickup_count + task.num_items <= available_slots:
                     promoted.append(task)
                     pickup_count += task.num_items  # count items, not tasks
-                    if task.parent_task_id is not None:
-                        pickup_ready_parents.add(task.parent_task_id)
+                    pickup_ready_parents.add(task.task_id)
                 else:
                     deferred.append(task)
             else:
-                if task.parent_task_id is None or task.parent_task_id in pickup_ready_parents:
+                if task.task_id in pickup_ready_parents:
                     promoted.append(task)
                 else:
                     deferred.append(task)
@@ -274,15 +271,14 @@ class RobotState:
                     pickup_count += task.num_items
                 else:
                     self.overflow_queue.append(task)
-                    if task.parent_task_id is not None:
-                        deferred_parent_ids.add(task.parent_task_id)
+                    deferred_parent_ids.add(task.task_id)
             else:
                 kept.append(task)
 
         if deferred_parent_ids:
             still_keep = []
             for task in kept:
-                if getattr(task, "leg_type", "full") == "dropoff" and task.parent_task_id in deferred_parent_ids:
+                if getattr(task, "leg_type", "full") == "dropoff" and task.task_id in deferred_parent_ids:
                     self.overflow_queue.append(task)
                 else:
                     still_keep.append(task)
@@ -290,21 +286,21 @@ class RobotState:
 
         self.task_queue = [current_task] + kept
 
-    def mark_pickup_complete(self, parent_task_id: Optional[int]):
-        """Record that a pickup leg for a parent task is complete."""
-        if parent_task_id is not None:
-            self.picked_up_task_ids.add(parent_task_id)
+    def mark_pickup_complete(self, task_id: Optional[int]):
+        """Record that the pickup leg for this task_id has completed."""
+        if task_id is not None:
+            self.picked_up_task_ids.add(task_id)
 
-    def mark_dropoff_complete(self, parent_task_id: Optional[int]):
-        """Record that a dropoff leg for a parent task is complete."""
-        if parent_task_id is not None and parent_task_id in self.picked_up_task_ids:
-            self.picked_up_task_ids.remove(parent_task_id)
+    def mark_dropoff_complete(self, task_id: Optional[int]):
+        """Record that the dropoff leg for this task_id has completed."""
+        if task_id is not None and task_id in self.picked_up_task_ids:
+            self.picked_up_task_ids.remove(task_id)
 
-    def is_pickup_complete(self, parent_task_id: Optional[int]) -> bool:
-        """Check if pickup for parent task has completed."""
-        if parent_task_id is None:
+    def is_pickup_complete(self, task_id: Optional[int]) -> bool:
+        """Check if the pickup leg for this task_id has completed."""
+        if task_id is None:
             return True
-        return parent_task_id in self.picked_up_task_ids
+        return task_id in self.picked_up_task_ids
 
     def complete_current_task(self) -> Optional['Task']:
         """

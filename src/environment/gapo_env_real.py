@@ -90,7 +90,19 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         """
         inventories = self.robot_backend.get_location_inventories()
         if not inventories:
+            # DEBUG: log every time we have no inventory
+            if int(self.current_time) % 10 == 0:
+                print(f"[_update_inventory t={self.current_time:.0f}] NO inventories from bridge")
             return  # Bridge not connected or no system_state received yet
+
+        # DEBUG: log received inventory keys + sample stock_levels every 10 sim-sec
+        if int(self.current_time) % 10 == 0:
+            sample = {
+                lid: {sku: round(s.get('stock_level', 0), 1)
+                      for sku, s in (inv.sku_inventory or {}).items()}
+                for lid, inv in inventories.items()
+            }
+            print(f"[_update_inventory t={self.current_time:.0f}] received {len(inventories)} locations: {sample}")
 
         for node in self.graph_state.nodes:
             inv_data = inventories.get(node.node_id)
@@ -106,6 +118,11 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
             node.stock_level = sum(
                 v.get('stock', 0.0) for v in node.sku_inventory.values()
             )
+
+        # Mirror sim-mode behavior: write a periodic SNAPSHOT row to the SKU
+        # logger so post-run analytics has time-series inventory data.
+        if self.sku_logger is not None:
+            self.sku_logger.maybe_snapshot(self.graph_state, self.current_time)
 
     # ------------------------------------------------------------------
     # Robot positions
@@ -153,7 +170,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                     task.sku_stock_level_at_collection = task.current_sku_stock_level
 
                 if task.leg_type == "pickup":
-                    robot.mark_pickup_complete(task.parent_task_id)
+                    robot.mark_pickup_complete(task.task_id)
                 elif task.task_type == 'replenishment':
                     to_node = self.graph_state.nodes[task.to_location_index]
                     if task.sku_id:
@@ -185,7 +202,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                             )
 
                 if task.leg_type == "dropoff":
-                    robot.mark_dropoff_complete(task.parent_task_id)
+                    robot.mark_dropoff_complete(task.task_id)
 
                 completed_task = robot.complete_current_task()
                 if completed_task:
@@ -202,7 +219,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                         and robot.current_task
                         and robot.current_task.leg_type == "dropoff"
                         and not robot.is_pickup_complete(
-                            robot.current_task.parent_task_id
+                            robot.current_task.task_id
                         )
                     ):
                         robot.demote_current_task()
@@ -210,7 +227,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                     if robot.current_task and not (
                         robot.current_task.leg_type == "dropoff"
                         and not robot.is_pickup_complete(
-                            robot.current_task.parent_task_id
+                            robot.current_task.task_id
                         )
                     ):
                         self._plan_path_for_robot(robot, robot.current_task, None)

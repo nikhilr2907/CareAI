@@ -44,7 +44,6 @@ class Task:
     is_assigned: bool = False
     assigned_robot_id: Optional[int] = None
     leg_type: str = "full"  # "pickup", "dropoff", or "full"
-    parent_task_id: Optional[int] = None
     learned_score: float = 0.0
 
     # Execution timing

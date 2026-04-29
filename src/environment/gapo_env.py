@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +71,12 @@ class GAPOTaskAssignmentEnv:
         # Per-task completion credits from the most recent timestep (populated by
         # _compute_timestep_reward, consumed by step() info dict and run_training.py).
         self._last_per_task_credits: Dict[int, float] = {}
-        self._last_completed_leg_credits: Dict[int, float] = {}
-        # Battery level snapshotted when each leg starts navigating, keyed by task_id.
-        # Used to compute per-leg distance and energy at completion.
-        self._task_battery_snapshots: Dict[int, float] = {}
+        # Keyed by (task_id, leg_type) because pickup and dropoff legs share task_id
+        # after the leg-ID collapse. Without the composite key they would stomp each other.
+        self._last_completed_leg_credits: Dict[Tuple[int, str], float] = {}
+        # Battery level snapshotted when each leg starts navigating, keyed by (task_id, leg_type)
+        # for the same reason. Used to compute per-leg distance and energy at completion.
+        self._task_battery_snapshots: Dict[Tuple[int, str], float] = {}
         self.BATTERY_CAPACITY_WH = 500.0  # nominal robot battery capacity
 
         # Proactive SKU task creation actor (#7 factorizer + #8 scorer)
@@ -229,10 +231,23 @@ class GAPOTaskAssignmentEnv:
 
         # 2. Generate tasks from low-stock nodes
         if self.current_time - self.last_inventory_check >= self.inventory_check_interval:
+            covered = self._build_covered_replenishment_keys()
             new_tasks, self.next_task_id = generate_inventory_tasks(
                 self.graph_state, self.current_time, self.next_task_id,
-                existing_task_keys=self._build_covered_replenishment_keys()
+                existing_task_keys=covered
             )
+
+            # DEBUG: report task generation outcome each inventory check
+            print(f"[task-gen t={self.current_time:.0f}] generated={len(new_tasks)}, "
+                  f"covered={len(covered)}, pending_after={len(self.pending_tasks) + len(new_tasks)}")
+
+            # DEBUG: show what the env actually has in graph_state for each node
+            for nidx, n in enumerate(self.graph_state.nodes):
+                stocks = {sid: round(float(s.get('stock', -1)), 2) for sid, s in n.sku_inventory.items()}
+                rorders = {sid: float(s.get('reorder', -1)) for sid, s in n.sku_inventory.items()}
+                maxes = {sid: float(s.get('max', -1)) for sid, s in n.sku_inventory.items()}
+                print(f"  node{nidx} type={n.node_type!r} cons_en={n.consumption_enabled} "
+                      f"stock={stocks} reorder={rorders} max={maxes}")
 
             if new_tasks:
                 for task in new_tasks:
@@ -280,8 +295,9 @@ class GAPOTaskAssignmentEnv:
             'stockouts': sum(1 for n in self.graph_state.nodes if n.is_stockout),
             'cumulative_reward': self.cumulative_reward,
             'edge_cost_model': self.edge_cost_manager.get_stats(),
-            # Per-task completion credits: {parent_task_id: reward}.
-            # Used by run_training.py to route rewards to the causal assignment slot.
+            # Per-task completion credits: {task_id: reward}, where task_id is the
+            # shared id of the parent's pickup+dropoff legs. Routes rewards back to
+            # the causal assignment slot in run_training.py.
             'task_completion_credits': self._last_per_task_credits,
             'completed_leg_credits': self._last_completed_leg_credits,
             # Ambient monitoring stats (not in reward, just for logging).
@@ -354,7 +370,7 @@ class GAPOTaskAssignmentEnv:
         else:
             logger.debug("task_creation_actor found no eligible SKU candidates — no stochastic task generated")
 
-    def assign_task_to_robot(self, robot_id: int, task: Task) -> bool:
+    def assign_task_to_robot(self, robot_id: int, task: Task) -> List[Task]:
         """
         Assign a task to a robot (called by policy/controller).
 
@@ -366,18 +382,20 @@ class GAPOTaskAssignmentEnv:
             task: Task object to assign
 
         Returns:
-            True if assignment successful, False otherwise
+            List of leg Task objects created from the split (pickup, dropoff) on success.
+            Empty list if a gate rejected the assignment (bounds, offline, charging).
+            Callers can treat the empty list as falsy to detect rejection.
         """
         if robot_id < 0 or robot_id >= len(self.robots):
-            return False
+            return []
 
         # Gate: offline robots cannot accept tasks
         if robot_id in self._offline_robots:
-            return False
+            return []
 
         # Gate: robot needs to charge first
         if self._should_robot_charge(robot_id):
-            return False
+            return []
 
         robot = self.robots[robot_id]
         simulator = self.robot_simulators[robot_id]
@@ -388,9 +406,10 @@ class GAPOTaskAssignmentEnv:
         assignment_stock_level = getattr(task, 'current_sku_stock_level', getattr(task, 'sku_stock_level', None))
         task.sku_stock_level_at_assign = assignment_stock_level
 
-        # Split into pickup + dropoff legs
+        # Split into pickup + dropoff legs. Both legs reuse the parent's task_id;
+        # they are distinguished by leg_type alone.
         pickup_task = Task(
-            task_id=self.next_task_id,
+            task_id=task.task_id,
             from_location_index=task.from_location_index,
             to_location_index=task.from_location_index,
             deadline=task.deadline,
@@ -415,13 +434,11 @@ class GAPOTaskAssignmentEnv:
             par_level=task.par_level,
             demand_location_index=task.demand_location_index,
             leg_type="pickup",
-            parent_task_id=task.task_id,
             learned_score=task.learned_score
         )
-        self.next_task_id += 1
 
         dropoff_task = Task(
-            task_id=self.next_task_id,
+            task_id=task.task_id,
             from_location_index=task.from_location_index,
             to_location_index=task.to_location_index,
             deadline=task.deadline,
@@ -446,10 +463,8 @@ class GAPOTaskAssignmentEnv:
             par_level=task.par_level,
             demand_location_index=task.demand_location_index,
             leg_type="dropoff",
-            parent_task_id=task.task_id,
             learned_score=task.learned_score
         )
-        self.next_task_id += 1
 
         # Add legs to robot's queue (auto-sorted by priority)
         robot.add_task(pickup_task)
@@ -469,7 +484,7 @@ class GAPOTaskAssignmentEnv:
         if was_idle:
             self._plan_path_for_robot(robot, pickup_task, simulator)
 
-        return True
+        return [pickup_task, dropoff_task]
 
     def _plan_path_for_robot(self, robot: RobotState, task: Task, simulator):
         """
@@ -504,7 +519,7 @@ class GAPOTaskAssignmentEnv:
         task.planned_path = path
 
         # Snapshot battery at leg start so completion can compute distance/energy delta
-        self._task_battery_snapshots[task.task_id] = simulator.battery_level
+        self._task_battery_snapshots[(task.task_id, task.leg_type)] = simulator.battery_level
 
         # Set path in simulator
         simulator.set_path(path, task.task_id, task.num_items)
@@ -600,12 +615,12 @@ class GAPOTaskAssignmentEnv:
                 _demotes = 0
                 while (_demotes < _max_demotes and
                         robot.current_task and robot.current_task.leg_type == "dropoff" and
-                        not robot.is_pickup_complete(robot.current_task.parent_task_id)):
+                        not robot.is_pickup_complete(robot.current_task.task_id)):
                     robot.demote_current_task()
                     _demotes += 1
                 if robot.current_task and not (
                     robot.current_task.leg_type == "dropoff" and
-                    not robot.is_pickup_complete(robot.current_task.parent_task_id)
+                    not robot.is_pickup_complete(robot.current_task.task_id)
                 ):
                     self._plan_path_for_robot(robot, robot.current_task, simulator)
 
@@ -660,7 +675,7 @@ class GAPOTaskAssignmentEnv:
                 # Complete delivery
                 if task.leg_type == "pickup":
                     simulator.load_items(task.num_items)
-                    robot.mark_pickup_complete(task.parent_task_id)
+                    robot.mark_pickup_complete(task.task_id)
                 elif task.task_type == 'replenishment':
                     to_node = self.graph_state.nodes[task.to_location_index]
                     if task.sku_id:
@@ -691,10 +706,10 @@ class GAPOTaskAssignmentEnv:
                 # Unload items from simulator on dropoff
                 if task.leg_type == "dropoff":
                     simulator.complete_task(task.num_items)
-                    robot.mark_dropoff_complete(task.parent_task_id)
+                    robot.mark_dropoff_complete(task.task_id)
 
                 # Compute per-leg distance and energy from battery delta
-                battery_start = self._task_battery_snapshots.pop(task.task_id, simulator.battery_level)
+                battery_start = self._task_battery_snapshots.pop((task.task_id, task.leg_type), simulator.battery_level)
                 battery_delta = max(0.0, battery_start - simulator.battery_level)
                 drain_rate = simulator.battery_drain_rate if simulator.battery_drain_rate > 0 else 1e-9
                 task.distance_traveled = battery_delta / drain_rate
@@ -715,12 +730,12 @@ class GAPOTaskAssignmentEnv:
                     _demotes = 0
                     while (_demotes < _max_demotes and
                             robot.current_task and robot.current_task.leg_type == "dropoff" and
-                            not robot.is_pickup_complete(robot.current_task.parent_task_id)):
+                            not robot.is_pickup_complete(robot.current_task.task_id)):
                         robot.demote_current_task()
                         _demotes += 1
                     if robot.current_task and not (
                         robot.current_task.leg_type == "dropoff" and
-                        not robot.is_pickup_complete(robot.current_task.parent_task_id)
+                        not robot.is_pickup_complete(robot.current_task.task_id)
                     ):
                         self._plan_path_for_robot(robot, robot.current_task, simulator)
 
@@ -730,7 +745,7 @@ class GAPOTaskAssignmentEnv:
                     simulator.active_task_id == -1 and
                     robot.current_node_index is not None):
                 node = self.graph_state.nodes[robot.current_node_index]
-                if node.node_type == 'hub' and not simulator.is_charging:
+                if node.node_type in ('hub', 'storage') and not simulator.is_charging:
                     simulator.start_charging()
                     if self.fleet_event_logger:
                         self.fleet_event_logger.log_charge_start(
@@ -873,10 +888,9 @@ class GAPOTaskAssignmentEnv:
                 if battery < self.battery_critical_threshold:
                     task_reward -= self.battery_critical_task_penalty
 
-            parent_id = getattr(task, 'parent_task_id', None)
-            self._last_completed_leg_credits[task.task_id] = task_reward
-            if parent_id is not None and task.leg_type == "dropoff":
-                self._last_per_task_credits[parent_id] = task_reward
+            self._last_completed_leg_credits[(task.task_id, task.leg_type)] = task_reward
+            if task.leg_type == "dropoff":
+                self._last_per_task_credits[task.task_id] = task_reward
             total_reward += task_reward
 
         # ── Ambient monitoring (NOT included in reward) ─────────────────────────
@@ -1252,10 +1266,12 @@ class GAPOTaskAssignmentEnv:
                 if edge_idx is not None and 0 <= edge_idx < len(self.graph_state.edges):
                     edge = self.graph_state.edges[edge_idx]
                     edge.active_robot_ids.append(robot.robot_id)
+                    current_node = simulator.current_node_index if simulator is not None else robot.telemetry.current_node_index
+                    target_node = simulator.current_target_node if simulator is not None else (robot.telemetry.remaining_path[0] if robot.telemetry.remaining_path else None)
                     edge.active_robot_progress[robot.robot_id] = (
                         robot.telemetry.edge_progress,
-                        simulator.current_node_index,
-                        simulator.current_target_node
+                        current_node,
+                        target_node
                     )
             else:
                 # Robot is at a node — update node occupancy
@@ -1306,32 +1322,29 @@ class GAPOTaskAssignmentEnv:
             if task.task_type == 'replenishment':
                 keys.add((task.sku_id, task.to_location_index))
 
-        # Build a map of parent_task_id -> destination for split tasks
-        # This lets us find the real destination even when only the pickup leg is in a robot queue
+        # Build a map of task_id -> destination for split tasks. After the leg-ID
+        # collapse, both legs of the same parent share task_id, so this groups them.
         parent_to_destination = {}
 
         for robot in self.robots:
             for task in robot.task_queue:
                 if task.task_type == 'replenishment':
-                    parent_id = getattr(task, 'parent_task_id', None)
-                    if parent_id is not None:
-                        # Map parent to its real destination (from dropoff leg if available)
-                        leg_type = getattr(task, 'leg_type', 'full')
-                        if leg_type == 'dropoff':
-                            parent_to_destination[parent_id] = (task.sku_id, task.to_location_index)
-                        elif parent_id not in parent_to_destination:
-                            # Pickup leg: store placeholder, will be overwritten by dropoff if found
-                            parent_to_destination[parent_id] = (task.sku_id, None)
+                    parent_id = task.task_id
+                    leg_type = getattr(task, 'leg_type', 'full')
+                    if leg_type == 'dropoff':
+                        parent_to_destination[parent_id] = (task.sku_id, task.to_location_index)
+                    elif parent_id not in parent_to_destination:
+                        # Pickup leg: store placeholder, will be overwritten by dropoff if found
+                        parent_to_destination[parent_id] = (task.sku_id, None)
 
             for task in robot.overflow_queue:
                 if task.task_type == 'replenishment':
-                    parent_id = getattr(task, 'parent_task_id', None)
-                    if parent_id is not None:
-                        leg_type = getattr(task, 'leg_type', 'full')
-                        if leg_type == 'dropoff':
-                            parent_to_destination[parent_id] = (task.sku_id, task.to_location_index)
-                        elif parent_id not in parent_to_destination:
-                            parent_to_destination[parent_id] = (task.sku_id, None)
+                    parent_id = task.task_id
+                    leg_type = getattr(task, 'leg_type', 'full')
+                    if leg_type == 'dropoff':
+                        parent_to_destination[parent_id] = (task.sku_id, task.to_location_index)
+                    elif parent_id not in parent_to_destination:
+                        parent_to_destination[parent_id] = (task.sku_id, None)
 
         # Now add all destinations for split tasks, skipping None destinations
         for (sku_id, dest_idx) in parent_to_destination.values():
@@ -1375,8 +1388,17 @@ class GAPOTaskAssignmentEnv:
     # ===== BATTERY MANAGEMENT =====
 
     def _get_hub_node_indices(self) -> list:
-        """Get indices of all hub nodes in the graph."""
-        return [i for i, n in enumerate(self.graph_state.nodes) if n.node_type == 'hub']
+        """Get indices of all charge-point nodes in the graph.
+
+        Treats both 'hub' and 'storage' nodes as charge points. In small pilots
+        (e.g. ILC) the storage room *is* the charge station — there is no
+        standalone hub — so 'storage' must be included. Larger configs that
+        define explicit 'hub' nodes still work because both types qualify.
+        """
+        return [
+            i for i, n in enumerate(self.graph_state.nodes)
+            if n.node_type in ('hub', 'storage')
+        ]
 
     def _should_robot_charge(self, robot_id: int) -> bool:
         """
@@ -1477,7 +1499,7 @@ class GAPOTaskAssignmentEnv:
         requeued_ids = []
         emergency_ids = []
         for task in robot.task_queue:
-            parent_id = getattr(task, 'parent_task_id', None)
+            parent_id = task.task_id
             if parent_id in in_transit_parents:
                 task.task_type = 'emergency_manual'
                 self.emergency_tasks.append(task)

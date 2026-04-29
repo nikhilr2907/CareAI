@@ -38,6 +38,7 @@ from src.utils.training_utils import (
     run_evaluation,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.decision_logger import DecisionLogger
 from src.utils.robot_sample_logger import RobotSampleLogger
 from src.utils.policy_inspector import PolicyInspector
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
@@ -52,6 +53,7 @@ def main():
 
     # Setup task-specific logging
     task_logger = TaskLogger(output_dir / "logs")
+    decision_logger = DecisionLogger(output_dir / "logs")
     robot_sample_logger = RobotSampleLogger(output_dir / "logs")
 
     # Setup real-time analytics collection
@@ -311,7 +313,7 @@ def main():
     # Training metrics
     memory = Memory()
     task_to_memory_idx: dict = {}  # task_id -> memory index at assignment; routes completion bonuses to causal slot
-    open_assignments: dict = {}    # parent_task_id -> {state, action, logprob, mask, reward, born_iter}; survives clear_memory()
+    open_assignments: dict = {}    # task_id -> {state, action, logprob, mask, reward, born_iter}; survives clear_memory()
     closed_buffer: list = []       # completed open_assignment entries ready for next PPO update
     OPEN_ASSIGNMENT_TTL = 5        # discard open_assignments entries older than this many rollouts (stuck/lost tasks)
     running_reward = 0
@@ -405,9 +407,12 @@ def main():
                 mem_idx_before = len(memory.actions)
 
                 # Select action
+                heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                _used_heuristic = False
                 try:
                     if iteration <= warmup_iters and np.random.random() < warmup_mix:
-                        action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                        action = heuristic_action
+                        _used_heuristic = True
                         state_tensor = ppo._state_dict_to_tensor(state_dict)
                         mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
                         with torch.no_grad():
@@ -433,11 +438,17 @@ def main():
                     )
                     raise
 
-                # Track this assignment's memory index
+                task.source = "heuristic" if _used_heuristic else "policy"
                 step_memory_indices.append(mem_idx_before)
 
-                # Assign task to robot
                 env.assign_task_to_robot(action, task)
+
+                decision_logger.log(
+                    task, action, heuristic_action, env, env.current_time,
+                    is_warmup=(iteration <= warmup_iters),
+                    used_heuristic=_used_heuristic,
+                )
+
                 num_assignments += 1
                 assignments_this_step += 1
                 # Record which memory slot this task was assigned from, so
@@ -491,12 +502,12 @@ def main():
             completed_leg_credits: dict = info.get('completed_leg_credits', {})
 
             for leg_task in completed_task_legs:
-                raw_leg_reward = float(completed_leg_credits.get(leg_task.task_id, 0.0))
+                raw_leg_reward = float(completed_leg_credits.get((leg_task.task_id, leg_task.leg_type), 0.0))
                 scaled_leg_reward = raw_leg_reward * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_leg_reward = float(np.clip(scaled_leg_reward, -reward_clip, reward_clip))
                 task_logger.log_completion(
-                    getattr(leg_task, "parent_task_id", leg_task.task_id),
+                    leg_task.task_id,
                     scaled_leg_reward,
                     env.current_time - leg_task.arrival_time if leg_task.arrival_time is not None else None,
                     env.current_time,
@@ -700,11 +711,11 @@ def main():
                 current_task = robot.current_task
                 if not current_task:
                     continue
-                parent_id = getattr(current_task, "parent_task_id", None)
-                pickup_done = robot.is_pickup_complete(parent_id) if parent_id is not None else None
+                cur_task_id = current_task.task_id
+                pickup_done = robot.is_pickup_complete(cur_task_id)
                 idle_reasons.append(
                     f"R{robot.robot_id} leg={getattr(current_task, 'leg_type', None)} "
-                    f"parent={parent_id} pickup_done={pickup_done} "
+                    f"task={cur_task_id} pickup_done={pickup_done} "
                     f"cur_node={robot.current_node_index} target={simulator.current_target_node} "
                     f"pathq={len(simulator.path_queue)} q={robot.num_queued_tasks} ov={len(robot.overflow_queue)}"
                 )
