@@ -238,16 +238,16 @@ class GAPOTaskAssignmentEnv:
             )
 
             # DEBUG: report task generation outcome each inventory check
-            print(f"[task-gen t={self.current_time:.0f}] generated={len(new_tasks)}, "
-                  f"covered={len(covered)}, pending_after={len(self.pending_tasks) + len(new_tasks)}")
+            # print(f"[task-gen t={self.current_time:.0f}] generated={len(new_tasks)}, "
+            #       f"covered={len(covered)}, pending_after={len(self.pending_tasks) + len(new_tasks)}")
 
             # DEBUG: show what the env actually has in graph_state for each node
-            for nidx, n in enumerate(self.graph_state.nodes):
-                stocks = {sid: round(float(s.get('stock', -1)), 2) for sid, s in n.sku_inventory.items()}
-                rorders = {sid: float(s.get('reorder', -1)) for sid, s in n.sku_inventory.items()}
-                maxes = {sid: float(s.get('max', -1)) for sid, s in n.sku_inventory.items()}
-                print(f"  node{nidx} type={n.node_type!r} cons_en={n.consumption_enabled} "
-                      f"stock={stocks} reorder={rorders} max={maxes}")
+            # for nidx, n in enumerate(self.graph_state.nodes):
+            #     stocks = {sid: round(float(s.get('stock', -1)), 2) for sid, s in n.sku_inventory.items()}
+            #     rorders = {sid: float(s.get('reorder', -1)) for sid, s in n.sku_inventory.items()}
+            #     maxes = {sid: float(s.get('max', -1)) for sid, s in n.sku_inventory.items()}
+            #     print(f"  node{nidx} type={n.node_type!r} cons_en={n.consumption_enabled} "
+            #           f"stock={stocks} reorder={rorders} max={maxes}")
 
             if new_tasks:
                 for task in new_tasks:
