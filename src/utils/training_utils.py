@@ -375,7 +375,7 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
             if use_baseline:
                 action = select_nearest_robot(task, eval_env.robots, eval_env.graph_state, robot_mask)
             else:
-                action = policy.select_action_greedy(eval_env._get_state_dict(), robot_mask)
+                action, _, _ = policy.select_action_greedy(eval_env._get_state_dict(), robot_mask)
             success = eval_env.assign_task_to_robot(action, task)
             if success:
                 eval_assignments += 1

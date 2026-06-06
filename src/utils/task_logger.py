@@ -80,6 +80,7 @@ class TaskLogger:
             'num_items': getattr(task, 'num_items', None),
             'estimated_duration': getattr(task, 'estimated_duration', None),
             'initial_tts': getattr(task, 'initial_time_to_stockout', getattr(task, 'time_to_stockout', None)),
+            'current_tts': task.get_current_time_to_stockout(),
             'sku_id': getattr(task, 'sku_id', None),
             'sku_stock_level_at_assign': getattr(
                 task, 'sku_stock_level_at_assign',
@@ -118,12 +119,14 @@ class TaskLogger:
         deadline = getattr(task, 'current_deadline', getattr(task, 'deadline', None))
         deadline_str = f"{deadline:.1f}s" if deadline is not None else "?"
         learned_score = getattr(task, 'learned_score', 0.0)
+        current_tts = task.get_current_time_to_stockout()
+        tts_str = f" tts={current_tts:.2f}h"
         self.logger.info(
             f"ASSIGN task_id={task_id} iter={iteration} sim_time={sim_time:.1f}s "
             f"robot={assigned_robot} location={task.from_location_index}->{to_loc} "
             f"leg={leg_type} items={num_items} deadline={deadline_str} "
             f"arrival={task.arrival_time:.1f}s priority_score={learned_score:.4f} "
-            f"assign_reward={assignment_reward:.4f} {sku_info} "
+            f"assign_reward={assignment_reward:.4f}{tts_str} {sku_info} "
             f"(buffer={buffer_size} assignments={num_assignments})"
         )
 

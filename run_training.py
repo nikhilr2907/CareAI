@@ -39,6 +39,7 @@ from src.utils.training_utils import (
 )
 from src.utils.task_logger import TaskLogger
 from src.utils.decision_logger import DecisionLogger
+from src.utils.ranking_snapshot_logger import RankingSnapshotLogger
 from src.utils.robot_sample_logger import RobotSampleLogger
 from src.utils.policy_inspector import PolicyInspector
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
@@ -54,6 +55,7 @@ def main():
     # Setup task-specific logging
     task_logger = TaskLogger(output_dir / "logs")
     decision_logger = DecisionLogger(output_dir / "logs")
+    ranking_logger = RankingSnapshotLogger(output_dir / "logs")
     robot_sample_logger = RobotSampleLogger(output_dir / "logs")
 
     # Setup real-time analytics collection
@@ -409,6 +411,8 @@ def main():
                 # Select action
                 heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
                 _used_heuristic = False
+                robot_logits = None
+                action_entropy = None
                 try:
                     if iteration <= warmup_iters and np.random.random() < warmup_mix:
                         action = heuristic_action
@@ -427,7 +431,7 @@ def main():
                         memory.robot_masks.append(robot_mask)
                         ppo.policy.record_action(action)
                     else:
-                        action = ppo.select_action(state_dict, memory, robot_mask)
+                        action, robot_logits, action_entropy = ppo.select_action(state_dict, memory, robot_mask)
                 except Exception as e:
                     logger.error(
                         f"Action selection error at iter={iteration} step={step}: {type(e).__name__}: {e} | "
@@ -443,10 +447,14 @@ def main():
 
                 env.assign_task_to_robot(action, task)
 
+                ranking_logger.log_snapshot(task, env.pending_tasks, env.current_time, iteration)
                 decision_logger.log(
                     task, action, heuristic_action, env, env.current_time,
                     is_warmup=(iteration <= warmup_iters),
                     used_heuristic=_used_heuristic,
+                    queue_features=state_dict.get('queue_features'),
+                    robot_logits=robot_logits,
+                    action_entropy=action_entropy,
                 )
 
                 num_assignments += 1
@@ -525,6 +533,13 @@ def main():
                     f"parent_ids=[{', '.join(str(p) for p in list(task_completion_credits.keys())[:5])}...]"
                 )
 
+            # Build deadline_met per task from completed dropoff legs
+            deadline_met_by_task = {}
+            for leg in completed_task_legs:
+                if leg.leg_type == 'dropoff':
+                    dl = getattr(leg, 'current_deadline', None) or getattr(leg, 'deadline', None)
+                    deadline_met_by_task[leg.task_id] = (env.current_time <= dl) if dl is not None else None
+
             # Route each completion bonus to the causal memory slot; cross-rollout completions go via closed_buffer.
             for parent_id, bonus in task_completion_credits.items():
                 scaled_bonus = bonus * reward_scale
@@ -534,6 +549,10 @@ def main():
                 # Route completion signal to task creation actor buffer (#7/#8 training)
                 if env.task_creation_actor is not None:
                     env.task_creation_actor.record_completion(parent_id, scaled_bonus)
+                decision_logger.queue_outcome(
+                    parent_id, scaled_bonus,
+                    deadline_met=deadline_met_by_task.get(parent_id),
+                )
                 iteration_reward += scaled_bonus
                 orig_idx = task_to_memory_idx.get(parent_id)
                 if orig_idx is not None:
@@ -551,6 +570,7 @@ def main():
 
 
             if done:
+                decision_logger.flush_outcomes()
                 state_dict = env.reset()
                 task_to_memory_idx.clear()    # task IDs reused after reset
                 open_assignments.clear()      # episode boundary invalidates all open assignments

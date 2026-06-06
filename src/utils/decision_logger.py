@@ -5,9 +5,14 @@ Captures demand context, robot state, and decision features at the moment
 of assignment. When a policy is loaded, also records policy confidence and
 heuristic comparison. When running heuristic only, captures ground-truth
 context data for later policy validation.
+
+Outcome columns (reward, deadline_met) are written as None at decision time
+and back-filled in batch via queue_outcome() + flush_outcomes() once tasks
+complete, avoiding per-completion file I/O.
 """
 
 import csv
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -20,7 +25,9 @@ _FIELDS = [
     "task_id", "sku_id", "leg_type", "task_type",
     "from_node", "to_node", "num_items",
     # Demand / stock at decision time
-    "stock_level", "stock_pct", "reorder_point", "par_level",
+    "stock_level", "stock_pct", "reorder_point", "par_level", "current_tts",
+    # Task timing (allows offline reconstruction of age and time_to_deadline)
+    "arrival_time", "current_deadline", "estimated_duration",
     # Task ranking
     "task_rank", "num_pending", "task_score",
     "second_task_id", "second_stock_pct", "score_margin",
@@ -34,6 +41,16 @@ _FIELDS = [
     "num_pending_tasks", "time_of_day_h", "priority_score",
     # Warmup (training only)
     "is_warmup", "used_heuristic",
+    # Queue/fleet state at decision time (critic context)
+    "q_num_pending", "q_avg_priority", "q_num_urgent", "q_oldest_age",
+    "q_num_near_deadline", "q_main_pickups", "q_main_dropoffs",
+    "q_overflow_pickups", "q_overflow_dropoffs", "q_avg_free_slots",
+    "q_avg_overflow", "q_time_sin", "q_time_cos", "q_day_norm",
+    "q_fleet_busy_ratio", "q_num_robots",
+    # Per-robot assignment scores at decision time
+    "robot_logits",
+    # Outcomes (back-filled after task completion)
+    "reward", "deadline_met",
 ]
 
 
@@ -54,6 +71,7 @@ class DecisionLogger:
         self._fh = open(self._path, "w", newline="")
         self._writer = csv.DictWriter(self._fh, fieldnames=_FIELDS)
         self._writer.writeheader()
+        self._outcome_buffer: dict[int, dict] = {}  # task_id -> {reward, deadline_met}
 
     def log(
         self,
@@ -67,6 +85,8 @@ class DecisionLogger:
         action_logprob: Optional[float] = None,
         action_entropy: Optional[float] = None,
         top_robot_prob: Optional[float] = None,
+        queue_features=None,
+        robot_logits=None,
     ):
         robot = env.robots[action] if 0 <= action < len(env.robots) else None
 
@@ -111,6 +131,10 @@ class DecisionLogger:
             "stock_pct": stock_pct,
             "reorder_point": getattr(task, "reorder_point", None),
             "par_level": getattr(task, "par_level", None),
+            "current_tts": round(task.get_current_time_to_stockout(), 2),
+            "arrival_time": getattr(task, "arrival_time", None),
+            "current_deadline": getattr(task, "current_deadline", getattr(task, "deadline", None)),
+            "estimated_duration": getattr(task, "estimated_duration", None),
             "task_rank": task_rank,
             "num_pending": num_pending,
             "task_score": task_score,
@@ -132,10 +156,51 @@ class DecisionLogger:
             "priority_score": round(getattr(task, "learned_score", 0.0), 4),
             "is_warmup": int(is_warmup),
             "used_heuristic": int(used_heuristic),
+            "q_num_pending":       round(float(queue_features[0]), 4) if queue_features is not None else None,
+            "q_avg_priority":      round(float(queue_features[1]), 4) if queue_features is not None else None,
+            "q_num_urgent":        round(float(queue_features[2]), 4) if queue_features is not None else None,
+            "q_oldest_age":        round(float(queue_features[3]), 4) if queue_features is not None else None,
+            "q_num_near_deadline": round(float(queue_features[4]), 4) if queue_features is not None else None,
+            "q_main_pickups":      round(float(queue_features[5]), 4) if queue_features is not None else None,
+            "q_main_dropoffs":     round(float(queue_features[6]), 4) if queue_features is not None else None,
+            "q_overflow_pickups":  round(float(queue_features[7]), 4) if queue_features is not None else None,
+            "q_overflow_dropoffs": round(float(queue_features[8]), 4) if queue_features is not None else None,
+            "q_avg_free_slots":    round(float(queue_features[9]), 4) if queue_features is not None else None,
+            "q_avg_overflow":      round(float(queue_features[10]), 4) if queue_features is not None else None,
+            "q_time_sin":          round(float(queue_features[11]), 4) if queue_features is not None else None,
+            "q_time_cos":          round(float(queue_features[12]), 4) if queue_features is not None else None,
+            "q_day_norm":          round(float(queue_features[13]), 4) if queue_features is not None else None,
+            "q_fleet_busy_ratio":  round(float(queue_features[14]), 4) if queue_features is not None else None,
+            "q_num_robots":        round(float(queue_features[15]), 4) if queue_features is not None else None,
+            "robot_logits": json.dumps([round(p, 4) for p in robot_logits]) if robot_logits is not None else None,
+            "reward": None,
+            "deadline_met": None,
         })
         self._fh.flush()
 
+    def queue_outcome(self, task_id: int, reward: float, deadline_met: Optional[bool] = None):
+        """Buffer an outcome for task_id. Flushed to disk in batch by flush_outcomes()."""
+        self._outcome_buffer[task_id] = {
+            "reward": round(reward, 4),
+            "deadline_met": int(deadline_met) if deadline_met is not None else None,
+        }
+
+    def flush_outcomes(self):
+        """Back-fill buffered outcomes into the CSV in a single read-write pass."""
+        if not self._outcome_buffer:
+            return
+        import pandas as pd
+        self._fh.flush()
+        df = pd.read_csv(self._path)
+        for task_id, outcomes in self._outcome_buffer.items():
+            mask = df["task_id"] == task_id
+            for col, val in outcomes.items():
+                df.loc[mask, col] = val
+        df.to_csv(self._path, index=False)
+        self._outcome_buffer.clear()
+
     def close(self):
+        self.flush_outcomes()
         self._fh.close()
 
     @property

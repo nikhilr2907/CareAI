@@ -310,10 +310,11 @@ class GAPOPolicyNetwork(nn.Module):
             dist = torch.distributions.Categorical(action_probs)
             action = dist.sample().item()
 
-        # Compute log probability
+        # Compute log probability and entropy on GPU before transfer
         log_prob = F.log_softmax(action_logits, dim=-1)[action]
+        entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8)).item()
 
-        return action, log_prob
+        return action, log_prob, action_probs.cpu().tolist(), entropy
 
     def evaluate_actions(
         self,

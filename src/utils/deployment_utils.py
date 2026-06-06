@@ -370,7 +370,7 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
     return best_robot if best_robot is not None else 0
 
 
-def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=None, total_assignments=0, iteration=0):
+def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=None, ranking_logger=None, total_assignments=0, iteration=0):
     assignments = 0
     while env.pending_tasks and assignments < max_assignments:
         task = env.pending_tasks[0]
@@ -378,9 +378,11 @@ def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=No
 
         heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
 
+        state_dict = env._get_state_dict()
+        robot_logits = None
+        action_entropy = None
         if ppo is not None:
-            state_dict = env._get_state_dict()
-            action = ppo.select_action_greedy(state_dict, robot_mask)
+            action, robot_logits, action_entropy = ppo.select_action_greedy(state_dict, robot_mask)
             task.source = "policy"
         else:
             action = heuristic_action
@@ -392,9 +394,14 @@ def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=No
 
         assignments += 1
 
+        if ranking_logger is not None:
+            ranking_logger.log_snapshot(task, env.pending_tasks, env.current_time, iteration)
         if decision_logger is not None:
             decision_logger.log(
                 task, action, heuristic_action, env, env.current_time,
+                queue_features=state_dict.get('queue_features'),
+                robot_logits=robot_logits,
+                action_entropy=action_entropy,
             )
 
         if task_logger is not None:

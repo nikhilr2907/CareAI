@@ -44,6 +44,7 @@ from src.utils.deployment_utils import (
 )
 from src.utils.task_logger import TaskLogger
 from src.utils.decision_logger import DecisionLogger
+from src.utils.ranking_snapshot_logger import RankingSnapshotLogger
 from src.utils.robot_sample_logger import RobotSampleLogger
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 from src.utils.fleet_event_logger import FleetEventLogger
@@ -219,6 +220,7 @@ def main():
     logger = logging.getLogger(__name__)
     task_logger = TaskLogger(output_dir / "logs")
     decision_logger = DecisionLogger(output_dir / "logs")
+    ranking_logger = RankingSnapshotLogger(output_dir / "logs")
     robot_sample_logger = RobotSampleLogger(output_dir / "logs")
     analytics = RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
@@ -431,6 +433,7 @@ def main():
                 args.max_assignments_per_step,
                 task_logger=task_logger,
                 decision_logger=decision_logger,
+                ranking_logger=ranking_logger,
                 total_assignments=total_tasks_assigned,
                 iteration=total_timesteps,
             )

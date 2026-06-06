@@ -211,7 +211,7 @@ class GAPOPPO:
 
         # Select action
         with torch.no_grad():
-            action, log_prob = self.policy_old.select_action(
+            action, log_prob, action_probs, entropy = self.policy_old.select_action(
                 state_dict_tensor,
                 robot_mask_tensor
             )
@@ -225,7 +225,7 @@ class GAPOPPO:
         # Record action for de-biasing
         self.policy.record_action(action)
 
-        return action
+        return action, action_probs, entropy
 
     def select_action_greedy(
         self,
@@ -253,13 +253,13 @@ class GAPOPPO:
 
         # Select action greedily
         with torch.no_grad():
-            action, _ = self.policy.select_action(
+            action, _, action_probs, entropy = self.policy.select_action(
                 state_dict_tensor,
                 robot_mask_tensor,
                 deterministic=True
             )
 
-        return action
+        return action, action_probs, entropy
 
     def score_and_rank_tasks(
         self,
