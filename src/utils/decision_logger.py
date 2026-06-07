@@ -13,9 +13,12 @@ complete, avoiding per-completion file I/O.
 
 import csv
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 _FIELDS = [
@@ -190,14 +193,28 @@ class DecisionLogger:
         if not self._outcome_buffer:
             return
         import pandas as pd
+
+        # Close the write handle before pandas reads the file; leaving it open
+        # causes a stale file position after df.to_csv() overwrites the file,
+        # which corrupts subsequent writerow() calls.
         self._fh.flush()
-        df = pd.read_csv(self._path)
-        for task_id, outcomes in self._outcome_buffer.items():
-            mask = df["task_id"] == task_id
-            for col, val in outcomes.items():
-                df.loc[mask, col] = val
-        df.to_csv(self._path, index=False)
-        self._outcome_buffer.clear()
+        self._fh.close()
+        self._fh = None
+
+        try:
+            df = pd.read_csv(self._path)
+            for task_id, outcomes in self._outcome_buffer.items():
+                mask = df["task_id"] == task_id
+                for col, val in outcomes.items():
+                    df.loc[mask, col] = val
+            df.to_csv(self._path, index=False)
+            self._outcome_buffer.clear()
+        except Exception as e:
+            logger.warning(f"flush_outcomes: failed to back-fill outcomes — {e}")
+        finally:
+            # Reopen in append mode so subsequent writerow() calls go to the end
+            self._fh = open(self._path, "a", newline="")
+            self._writer = csv.DictWriter(self._fh, fieldnames=_FIELDS)
 
     def close(self):
         self.flush_outcomes()

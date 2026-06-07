@@ -1,24 +1,4 @@
-"""
-GAPO Training Script with De-biasing.
 
-Trains ILC pilot robot task allocation using:
-- Graph Attention-Based Policy Optimization (GAPO)
-- Graph Neural Networks for graph + robot encoding
-- Cross-attention for task-robot-node
-- De-biasing mechanisms for autoregressive decisions
-- Continuous time simulation with telemetry
-- Supports both single-config and multi-config curriculum learning
-
-Usage:
-    # Single config training
-    python run_training.py --config configs/hospital_3nodes_consumables.json
-
-    # Multi-config curriculum learning
-    python run_training.py --configs-dir configs --curriculum adaptive
-
-    # Custom multi-config
-    python run_training.py --config-list configs/small.json configs/medium.json configs/large.json
-"""
 import torch
 import numpy as np
 from pathlib import Path
@@ -443,9 +423,39 @@ def main():
                     raise
 
                 task.source = "heuristic" if _used_heuristic else "policy"
-                step_memory_indices.append(mem_idx_before)
 
-                env.assign_task_to_robot(action, task)
+                assigned_legs = env.assign_task_to_robot(action, task)
+                if not assigned_legs:
+                    # Policy's chosen robot was rejected (charging, offline, etc.).
+                    # Check if any other robot is available; if so, try the heuristic fallback.
+                    other_available = [
+                        rid for rid in range(env.num_robots)
+                        if rid != action
+                        and rid not in env._offline_robots
+                        and not env._should_robot_charge(rid)
+                    ]
+                    fallback_assigned = False
+                    if other_available:
+                        fallback_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                        if fallback_action != action and not env._should_robot_charge(fallback_action):
+                            fallback_legs = env.assign_task_to_robot(fallback_action, task)
+                            if fallback_legs:
+                                action = fallback_action
+                                assigned_legs = fallback_legs
+                                fallback_assigned = True
+
+                    if not fallback_assigned:
+                        # No robot can take this task right now — roll back the memory entry
+                        # that action selection already appended (actions/logprobs/state_dicts/
+                        # robot_masks). rewards and is_terminals are appended later and have
+                        # NOT been added yet, so do NOT pop them.
+                        memory.actions.pop()
+                        memory.logprobs.pop()
+                        memory.state_dicts.pop()
+                        memory.robot_masks.pop()
+                        break
+
+                step_memory_indices.append(mem_idx_before)
 
                 ranking_logger.log_snapshot(task, env.pending_tasks, env.current_time, iteration)
                 decision_logger.log(
@@ -490,7 +500,7 @@ def main():
 
             # Simulation time step
             prev_completed = len(env.completed_tasks)
-            state_dict, _, done, info = env.step(dt=timesteps_per_decision)
+            state_dict, _, _, info = env.step(dt=timesteps_per_decision)
 
             # --- Per-task completion credit attribution ---
             # Credits are computed by _compute_timestep_reward() and returned via info.
@@ -569,14 +579,7 @@ def main():
 
 
 
-            if done:
-                decision_logger.flush_outcomes()
-                state_dict = env.reset()
-                task_to_memory_idx.clear()    # task IDs reused after reset
-                open_assignments.clear()      # episode boundary invalidates all open assignments
-                task_logger.task_metadata.clear()
-                if len(memory.is_terminals) > 0:
-                    memory.is_terminals[-1] = True  # only true episode ends are terminals (not rollout boundaries)
+            # No episode resets — simulation runs continuously.
 
         # Inject cross-rollout entries; is_terminals=True gives single-step GAE without bootstrapping.
         for entry in closed_buffer:

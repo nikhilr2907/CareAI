@@ -515,11 +515,15 @@ class GAPOTaskAssignmentEnv:
             all_robots=self.robots,
         )
 
-        # Store planned route on task so logger can record it at completion
-        task.planned_path = path
-
-        # Snapshot battery at leg start so completion can compute distance/energy delta
-        self._task_battery_snapshots[(task.task_id, task.leg_type)] = simulator.battery_level
+        # Store planned route on task so logger can record it at completion.
+        # Only set once — the idle check can re-call this after arrival (trivial path),
+        # which would overwrite the actual route with a single-node path.
+        if not task.planned_path:
+            task.planned_path = list(path)
+        # Snapshot battery at leg start so completion can compute distance/energy delta.
+        # Guard against post-arrival idle-check re-calls overwriting the start value.
+        if (task.task_id, task.leg_type) not in self._task_battery_snapshots:
+            self._task_battery_snapshots[(task.task_id, task.leg_type)] = simulator.battery_level
 
         # Set path in simulator
         simulator.set_path(path, task.task_id, task.num_items)
@@ -715,6 +719,9 @@ class GAPOTaskAssignmentEnv:
                 task.distance_traveled = battery_delta / drain_rate
                 task.energy_consumed_wh = battery_delta * self.BATTERY_CAPACITY_WH
 
+                if not getattr(task, 'planned_path', None) and robot.planned_path:
+                    task.planned_path = list(robot.planned_path)
+
                 # Remove task from robot queue
                 completed_task = robot.complete_current_task()
                 if completed_task:
@@ -739,8 +746,33 @@ class GAPOTaskAssignmentEnv:
                     ):
                         self._plan_path_for_robot(robot, robot.current_task, simulator)
 
-            # Handle charging arrival
+            # Handle charging completion — runs BEFORE arrival so arrival cannot
+            # restart charging on the same step that charging finishes.
+            # Requires the robot to be at a hub/storage node so this never fires
+            # while the robot is still en route (active_task_id==-1 but not yet
+            # at hub) or at a non-hub destination.
             robot_id = robot.robot_id
+            _at_hub = (
+                robot.current_node_index is not None and
+                self.graph_state.nodes[robot.current_node_index].node_type in ('hub', 'storage')
+            )
+            if (simulator.is_charging is False and robot_id in self._robots_routing_to_charge and
+                    simulator.active_task_id == -1 and _at_hub):
+                # Charging just finished
+                if self.fleet_event_logger:
+                    self.fleet_event_logger.log_charge_complete(
+                        robot_id=robot_id,
+                        sim_time=self.current_time,
+                        battery_level=simulator.battery_level,
+                        hub_node=robot.current_node_index,
+                    )
+                self._robots_routing_to_charge.discard(robot_id)
+                if robot.task_queue:
+                    self._plan_path_for_robot(robot, robot.current_task, simulator)
+
+            # Handle charging arrival — runs AFTER completion so a robot that
+            # just finished charging is already removed from _robots_routing_to_charge
+            # and won't be restarted here.
             if (robot_id in self._robots_routing_to_charge and
                     simulator.active_task_id == -1 and
                     robot.current_node_index is not None):
@@ -754,21 +786,6 @@ class GAPOTaskAssignmentEnv:
                             battery_level=simulator.battery_level,
                             hub_node=robot.current_node_index,
                         )
-
-            # Handle charging completion
-            if (simulator.is_charging is False and robot_id in self._robots_routing_to_charge and
-                    simulator.active_task_id == -1):
-                # Charging just finished
-                if self.fleet_event_logger:
-                    self.fleet_event_logger.log_charge_complete(
-                        robot_id=robot_id,
-                        sim_time=self.current_time,
-                        battery_level=simulator.battery_level,
-                        hub_node=robot.current_node_index,
-                    )
-                self._robots_routing_to_charge.discard(robot_id)
-                if robot.task_queue:
-                    self._plan_path_for_robot(robot, robot.current_task, simulator)
 
         return completed_tasks
 
@@ -1438,6 +1455,15 @@ class GAPOTaskAssignmentEnv:
         if simulator.active_task_id is None or simulator.active_task_id == -1:
             return False
         if not self._should_robot_charge(robot_id):
+            return False
+
+        # Don't interrupt if robot just arrived at its task destination — the completion
+        # check hasn't run yet. Let it complete first; idle charge logic fires after.
+        if (robot.current_task is not None and
+                robot.current_node_index is not None and
+                robot.current_node_index == robot.target_node_index and
+                not simulator.path_queue and
+                simulator.current_target_node is None):
             return False
 
         # Interrupt: _send_robot_to_charge overwrites simulator path_queue and

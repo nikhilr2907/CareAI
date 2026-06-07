@@ -147,14 +147,19 @@ class TaskLogger:
         metadata_key = (completed_task_id, leg_key)
 
         if metadata_key not in self.task_metadata:
-            # Task not in our log (maybe predates logging), but still log the completion
-            actual_time_str = f"{actual_completion_time:.1f}s" if actual_completion_time is not None else "?"
-            self.logger.debug(
-                f"COMPLT task_id={completed_task_id} "
-                f"leg={completed_leg_type or '?'} [NO METADATA] sim_time={sim_time:.1f}s "
-                f"completion_reward={completion_reward:.4f} actual_time={actual_time_str}"
-            )
-            return
+            # Assignment was logged against the unsplit parent task (leg_type='full').
+            # Fall back to that key when the leg-specific key isn't found.
+            fallback_key = (completed_task_id, 'full')
+            if fallback_key in self.task_metadata:
+                metadata_key = fallback_key
+            else:
+                actual_time_str = f"{actual_completion_time:.1f}s" if actual_completion_time is not None else "?"
+                self.logger.debug(
+                    f"COMPLT task_id={completed_task_id} "
+                    f"leg={completed_leg_type or '?'} [NO METADATA] sim_time={sim_time:.1f}s "
+                    f"completion_reward={completion_reward:.4f} actual_time={actual_time_str}"
+                )
+                return
 
         meta = self.task_metadata[metadata_key]
         total_reward = meta['assignment_reward'] + completion_reward
@@ -306,9 +311,11 @@ class TaskLogger:
                 'execution_start_time': getattr(completed_task, 'execution_start_time', None) if completed_task is not None else None,
             })
 
-        # Each (task_id, leg_type) entry is now self-contained, so always free this leg's
-        # metadata at completion. Pickup and dropoff have separate keys; they don't share state.
-        del self.task_metadata[metadata_key]
+        # Free metadata after the final leg completes.
+        # Pickup is never final (a dropoff leg always follows), so if the resolved key is the
+        # shared 'full' fallback, keep it alive for the upcoming dropoff completion.
+        if leg_type_str != "pickup":
+            del self.task_metadata[metadata_key]
 
     def log_iteration_summary(self, iteration: int):
         """Log summary of iteration completions and robot breakdown."""

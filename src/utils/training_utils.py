@@ -73,8 +73,8 @@ def parse_args():
     # Environment
     parser.add_argument('--num-robots', type=int, default=None,
                         help='Number of robots (default: read from config or 5)')
-    parser.add_argument('--max-episode-time', type=float, default=28800.0,
-                        help='Max episode time in seconds (default: 28800 = 8 hours)')
+    parser.add_argument('--max-episode-time', type=float, default=float('inf'),
+                        help='Max episode time in seconds (default: inf = no episode resets)')
     parser.add_argument('--stochastic-tasks-per-hour', type=float, default=0.0,
                         help='Expected stochastic ad-hoc task generation rate per simulated hour (default: 0.0 for ILC)')
     parser.add_argument('--stochastic-task-cap-per-hour', type=int, default=2,
@@ -377,6 +377,20 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
             else:
                 action, _, _ = policy.select_action_greedy(eval_env._get_state_dict(), robot_mask)
             success = eval_env.assign_task_to_robot(action, task)
+            if not success:
+                # Primary robot rejected — check for other available robots and try heuristic.
+                other_available = [
+                    rid for rid in range(eval_env.num_robots)
+                    if rid != action
+                    and rid not in eval_env._offline_robots
+                    and not eval_env._should_robot_charge(rid)
+                ]
+                if other_available:
+                    fallback = select_nearest_robot(task, eval_env.robots, eval_env.graph_state, robot_mask)
+                    if fallback != action and not eval_env._should_robot_charge(fallback):
+                        success = eval_env.assign_task_to_robot(fallback, task)
+                if not success:
+                    break  # No robot available; stop assigning this step
             if success:
                 eval_assignments += 1
                 assignments_this_step += 1

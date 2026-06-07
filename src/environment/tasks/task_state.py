@@ -39,6 +39,7 @@ class Task:
 
     # Computed fields (set by environment)
     queue_position: int = 0  # Position in sorted queue (0 = most urgent)
+    planned_path: List[int] = field(default_factory=list)  # Inclusive node path for the current leg
 
     # Assignment tracking
     is_assigned: bool = False

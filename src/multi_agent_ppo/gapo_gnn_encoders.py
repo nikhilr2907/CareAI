@@ -63,7 +63,7 @@ class ILCGraphEncoder(nn.Module):
         # Categorical embeddings for each feature
         self.node_type_embedding = nn.Embedding(num_node_types, node_type_embedding_dim)
         self.location_tag_embedding = nn.Embedding(num_location_tags + 1, location_tag_embedding_dim)  # +1 for -1 (unknown)
-        self.school_period_embedding = nn.Embedding(num_school_periods, school_period_embedding_dim)
+        self.school_period_embedding = nn.Embedding(num_school_periods + 1, school_period_embedding_dim)  # +1 for outside-schedule slot
         self.day_type_embedding = nn.Embedding(num_day_types, day_type_embedding_dim)
 
         # Total node feature dimension after concatenating continuous + all embedded categoricals
@@ -144,7 +144,9 @@ class ILCGraphEncoder(nn.Module):
         loc_tag_ids[loc_tag_ids == -1] = self.location_tag_embedding.num_embeddings - 1
         loc_tag_embeds = self.location_tag_embedding(loc_tag_ids)  # [num_nodes, 16]
 
-        school_period_embeds = self.school_period_embedding(node_categorical[:, 2])  # [num_nodes, 4]
+        school_period_ids = node_categorical[:, 2].clone()
+        school_period_ids[school_period_ids < 0] = self.school_period_embedding.num_embeddings - 1
+        school_period_embeds = self.school_period_embedding(school_period_ids)  # [num_nodes, 4]
         day_type_embeds = self.day_type_embedding(node_categorical[:, 3])  # [num_nodes, 4]
 
         # Concatenate continuous + all embedded categoricals
