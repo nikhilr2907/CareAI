@@ -579,6 +579,11 @@ def main():
 
 
 
+            # Log robot telemetry every step into robot_samples.log
+            analytics.record_robot_telemetry(
+                env.robots, env.current_time, iteration=iteration, step=step
+            )
+
             # No episode resets — simulation runs continuously.
 
         # Inject cross-rollout entries; is_terminals=True gives single-step GAE without bootstrapping.
@@ -686,12 +691,18 @@ def main():
 
         loss_info_current = ppo.get_last_loss_info()
         if loss_info_current:
+            robot_states_str = " | ".join(
+                f"R{r.robot_id}:{'CHARGING' if s.is_charging else ('ROUTING_TO_CHARGE' if r.robot_id in env._robots_routing_to_charge else 'AVAIL' if s.active_task_id is None else 'BUSY')} bat={s.battery_level:.3f}"
+                for r, s in zip(env.robots, env.robot_simulators)
+            )
             logger.info(
                 f"[ITER {iteration}] Reward={iteration_reward:.2f} | "
                 f"Actor={loss_info_current.get('actor_loss', 0):.4f} | "
                 f"Clip={loss_info_current.get('clip_fraction', 0):.4f} | "
                 f"GradNorm={loss_info_current.get('grad_norm', 0):.2f} | "
-                f"Assigned={num_assignments} Pending={len(env.pending_tasks)}"
+                f"Buf={buffer_size} | "
+                f"Assigned={num_assignments} Pending={len(env.pending_tasks)} | "
+                f"{robot_states_str}"
             )
 
         # Log cumulative running summary EVERY iteration
@@ -873,9 +884,6 @@ def main():
             # Log iteration summary (completions, on-time rates, robot breakdown)
             task_logger.log_iteration_summary(iteration)
 
-            # Analytics: Record periodic telemetry samples
-            if iteration % 10 == 0:
-                analytics.record_robot_telemetry(env.robots, env.current_time)
             if iteration % 50 == 0:
                 analytics.increment_iteration()
 

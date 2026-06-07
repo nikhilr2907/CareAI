@@ -126,8 +126,10 @@ class RobotSampleLogger:
 
     def format_sample(self, sample: dict) -> str:
         """Format a robot sample as a single log line."""
+        iter_str = f"iter={sample['iteration']} " if sample.get('iteration') is not None else ""
+        step_str = f"step={sample['step']} " if sample.get('step') is not None else ""
         return (
-            f"SAMPLE robot={sample['robot_id']} "
+            f"SAMPLE {iter_str}{step_str}robot={sample['robot_id']} "
             f"sim_time={self._fmt_float(sample.get('sim_time'), 1)}s "
             f"status={sample.get('status', '?')} "
             f"pos=({self._fmt_float(sample.get('x'), 2)},{self._fmt_float(sample.get('y'), 2)}) "
@@ -151,13 +153,17 @@ class RobotSampleLogger:
             f"leg_time={self._fmt_float(sample.get('leg_time'), 1)}s"
         )
 
-    def log_sample(self, robot, sim_time: float) -> dict:
+    def log_sample(self, robot, sim_time: float,
+                   iteration: int = None, step: int = None) -> dict:
         """Log one execution-state sample for a single robot."""
         sample = self.build_sample(robot, sim_time)
+        sample['iteration'] = iteration
+        sample['step'] = step
         self.logger.info(self.format_sample(sample))
         return sample
 
-    def log_samples(self, robots: Iterable, sim_time: float):
+    def log_samples(self, robots: Iterable, sim_time: float,
+                    iteration: int = None, step: int = None):
         """Log one sample line per robot."""
         for robot in robots:
-            self.log_sample(robot, sim_time)
+            self.log_sample(robot, sim_time, iteration=iteration, step=step)

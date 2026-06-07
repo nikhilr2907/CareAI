@@ -333,22 +333,38 @@ class GAPOPPO:
         Returns:
             ranking_loss: Scalar loss
         """
-        if not memory.step_assignment_groups:
-            return torch.tensor(0.0, device=self.device)
-
         total_loss = torch.tensor(0.0, device=self.device)
         num_pairs = 0
 
-        for group_indices in memory.step_assignment_groups:
-            valid = [idx for idx in group_indices if 0 <= idx < len(advantages) and idx < len(state_dict_tensors)]
-            if len(valid) < 2:
+        # Build groups: prefer same-step groups (tasks competing at the same moment).
+        # Fall back to a single cross-rollout group when no same-step pairs exist —
+        # this happens in single-robot settings where tasks arrive one at a time.
+        all_indices = list(range(min(len(advantages), len(state_dict_tensors))))
+        if memory.step_assignment_groups:
+            groups = [
+                [idx for idx in g if 0 <= idx < len(advantages) and idx < len(state_dict_tensors)]
+                for g in memory.step_assignment_groups
+            ]
+            # Check if any same-step group has ≥2 valid members
+            has_same_step_pairs = any(len(g) >= 2 for g in groups)
+        else:
+            groups = []
+            has_same_step_pairs = False
+
+        if not has_same_step_pairs and len(all_indices) >= 2:
+            # TEMPORARY: single-robot fallback — tasks arrive one at a time so
+            # same-step groups never form. Cross-rollout pairs are noisier (different
+            # world states) but give the scorer a gradient rather than nothing.
+            # Remove once running multi-robot, where same-step pairs form naturally.
+            groups = [all_indices]
+
+        for group_indices in groups:
+            if len(group_indices) < 2:
                 continue
 
-            # Compute each score ONCE per assignment in this group.
-            # Use cached (graph_emb, fleet_emb) when available to skip encode_context.
             group_scores = []
             group_advs = []
-            for idx in valid:
+            for idx in group_indices:
                 sd = state_dict_tensors[idx]
                 if context_cache is not None and idx in context_cache:
                     graph_emb, fleet_emb = context_cache[idx]
@@ -366,7 +382,7 @@ class GAPOPPO:
             advs = torch.stack(group_advs, dim=0)
 
             pair_indices = self._sample_group_pairs(
-                group_size=len(valid),
+                group_size=len(group_indices),
                 max_pairs=self.ranking_max_pairs_per_group
             )
             for i, j in pair_indices:

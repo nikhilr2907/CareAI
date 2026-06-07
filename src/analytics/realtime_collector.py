@@ -69,7 +69,8 @@ class RealtimeAnalyticsCollector:
 
     # ========== RECORDING METHODS ==========
 
-    def record_robot_telemetry(self, robots: List[RobotState], current_time: float):
+    def record_robot_telemetry(self, robots: List[RobotState], current_time: float,
+                               iteration: int = None, step: int = None):
         """
         Sample robot telemetry from RobotState + RobotTelemetry.
         Called periodically during training (e.g., every 10 steps).
@@ -83,7 +84,9 @@ class RealtimeAnalyticsCollector:
 
         for robot in robots:
             if robot.telemetry is not None:
-                sample = self.robot_sample_logger.log_sample(robot, current_time)
+                sample = self.robot_sample_logger.log_sample(
+                    robot, current_time, iteration=iteration, step=step
+                )
                 self.robot_samples[robot.robot_id].append(sample)
 
     def initialize(self, nodes: List[GraphNode]):
