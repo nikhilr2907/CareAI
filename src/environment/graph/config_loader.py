@@ -130,6 +130,13 @@ def get_num_robots_from_config(config_path: str) -> int:
     return data.get('metadata', {}).get('num_robots', 1)
 
 
+def get_robot_max_capacity_from_config(config_path: str) -> int:
+    """Return the configured robot carrying capacity or a default of 12."""
+    with open(config_path, 'r') as f:
+        data = json.load(f)
+    return data.get('metadata', {}).get('robot_max_capacity', 12)
+
+
 def list_available_configs(configs_dir: str = "configs") -> List[str]:
     configs_path = Path(configs_dir)
     if not configs_path.exists():

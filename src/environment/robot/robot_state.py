@@ -347,12 +347,9 @@ class RobotState:
         return np.array(distances, dtype=np.float32)
 
 
-def create_default_robot(robot_id: int) -> RobotState:
-    """
-    Create a robot with default state.
-    Telemetry will be populated by robot simulator.
-    """
+def create_default_robot(robot_id: int, max_capacity: int = 12) -> RobotState:
+    """Create a robot with default state. Telemetry will be populated by robot simulator."""
     return RobotState(
         robot_id=robot_id,
-        max_capacity=12
+        max_capacity=max_capacity
     )

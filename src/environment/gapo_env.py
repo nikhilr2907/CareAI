@@ -35,6 +35,7 @@ class GAPOTaskAssignmentEnv:
         initial_stochastic_tasks: int = 0,
         use_task_creation_actor: bool = True,
         device: str = 'cpu',
+        robot_max_capacity: int = 12,
         fleet_event_logger: Optional['FleetEventLogger'] = None,
         log_dir: Optional[str] = None,
     ):
@@ -42,6 +43,7 @@ class GAPOTaskAssignmentEnv:
 
         self.num_robots = num_robots
         self.num_nodes = num_nodes
+        self.robot_max_capacity = robot_max_capacity
         self.max_episode_time = max_episode_time
         self.timestep_seconds = timestep_seconds
         self.fleet_event_logger = fleet_event_logger
@@ -164,10 +166,11 @@ class GAPOTaskAssignmentEnv:
         for i in range(self.num_robots):
             initial_node = np.random.randint(0, self.num_nodes)
 
-            simulator = RobotSimulator(i, self.graph_state, initial_node)
+            simulator = RobotSimulator(i, self.graph_state, initial_node,
+                                      max_capacity=self.robot_max_capacity)
             self.robot_simulators.append(simulator)
 
-            robot_state = create_default_robot(i)
+            robot_state = create_default_robot(i, max_capacity=self.robot_max_capacity)
             telemetry = simulator.get_telemetry()
             telemetry.timestamp = self.current_time
             robot_state.update_telemetry(telemetry)
@@ -757,7 +760,8 @@ class GAPOTaskAssignmentEnv:
                 self.graph_state.nodes[robot.current_node_index].node_type in ('hub', 'storage')
             )
             if (simulator.is_charging is False and robot_id in self._robots_routing_to_charge and
-                    simulator.active_task_id == -1 and _at_hub):
+                    simulator.active_task_id == -1 and _at_hub and
+                    simulator.battery_level >= 0.99):
                 # Charging just finished
                 if self.fleet_event_logger:
                     self.fleet_event_logger.log_charge_complete(

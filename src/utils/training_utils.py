@@ -12,7 +12,7 @@ import torch
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.environment.graph.graph_state import GraphState
 from src.environment.graph.edge import GraphEdge
-from src.environment.graph.config_loader import load_config_from_file, get_num_robots_from_config
+from src.environment.graph.config_loader import load_config_from_file, get_num_robots_from_config, get_robot_max_capacity_from_config
 
 
 def parse_args():
@@ -188,6 +188,7 @@ def create_env_from_config_file(config_path: str, num_robots: Optional[int] = No
     nodes, edge_pairs, meta = load_config_from_file(config_path)
     if num_robots is None:
         num_robots = get_num_robots_from_config(config_path)
+    robot_max_capacity = get_robot_max_capacity_from_config(config_path)
     graph_state = _build_graph_state(nodes, edge_pairs, meta)
     env = GAPOTaskAssignmentEnv(
         num_robots=num_robots,
@@ -197,6 +198,7 @@ def create_env_from_config_file(config_path: str, num_robots: Optional[int] = No
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
+        robot_max_capacity=robot_max_capacity,
         fleet_event_logger=fleet_event_logger,
         log_dir=log_dir,
     )

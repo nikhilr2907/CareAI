@@ -8,6 +8,7 @@
     "num_shelves": 2,
     "num_skus": 4,
     "num_robots": 1,
+    "robot_max_capacity": 2,
     "episode_duration_s": 28800,
     "pilot_location": "Independent Learning Centre, Sixth Form",
     "pilot_dates": "June 6–19 2026",
