@@ -143,7 +143,7 @@ async def main():
     # listener task itself died (e.g. wrong URL, connection refused).
     _loop = asyncio.get_running_loop()
     _wait_start = _loop.time()
-    _deadline = _wait_start + 10.0
+    _deadline = _wait_start + 20.0
     _last_log = _wait_start
     _expected_robots = num_robots if num_robots else 1
     while _loop.time() < _deadline:
@@ -167,7 +167,7 @@ async def main():
         await asyncio.sleep(0.1)
     else:
         raise RuntimeError(
-            f"No telemetry received within 10s. "
+            f"No telemetry received within 20s. "
             f"bridge_url={robot_backend._bridge_url}. "
             f"Verify with: curl http://localhost:8765/health"
         )
@@ -323,7 +323,12 @@ async def main():
             step_memory_indices = []
             while len(env.pending_tasks) > 0 and assignments_this_step < max_assignments_per_step:
                 task = env.pending_tasks[0]
-                robot_mask = np.ones(env.num_robots, dtype=bool)
+                robot_mask = env.get_robot_availability_mask(task)
+                if not robot_mask.any():
+                    # Every robot is offline or must charge — nothing can take work
+                    # this step. Leave the task pending and retry on a later step
+                    # rather than spinning out phantom assignments to a blocked robot.
+                    break
                 mem_idx_before = len(memory.actions)
 
                 heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
@@ -353,9 +358,20 @@ async def main():
                     logger.error(f"Action selection error iter {iteration} step {step}: {e}")
                     raise
 
+                legs = env.assign_task_to_robot(action, task)
+                if not legs:
+                    # Env rejected the assignment (robot offline / must charge).
+                    # No need for it to be added if it fails: discard the memory
+                    # entry the action-selection step just appended so no phantom
+                    # sample enters the rollout buffer or the decision logs.
+                    del memory.state_dicts[mem_idx_before:]
+                    del memory.actions[mem_idx_before:]
+                    del memory.logprobs[mem_idx_before:]
+                    del memory.robot_masks[mem_idx_before:]
+                    break
+
                 task.source = "heuristic" if _used_heuristic else "policy"
                 step_memory_indices.append(mem_idx_before)
-                env.assign_task_to_robot(action, task)
 
                 ranking_logger.log_snapshot(task, env.pending_tasks, env.current_time, iteration)
                 decision_logger.log(
@@ -455,6 +471,8 @@ async def main():
 
             # May need episode termination for future consistency
 
+            analytics.record_robot_telemetry(env.robots, env.current_time, iteration=iteration, step=step)
+
             # Pace to 1 Hz — yields control so backend WebSocket tasks can process messages
             elapsed = time.monotonic() - step_wall_start
             await asyncio.sleep(max(0.0, 1.0 - elapsed))
@@ -540,8 +558,7 @@ async def main():
         task_logger.log_running_summary(iteration)
         task_logger.log_iteration_summary(iteration)
 
-        if iteration % 10 == 0:
-            analytics.record_robot_telemetry(env.robots, env.current_time)
+
         if iteration % 50 == 0:
             analytics.increment_iteration()
 
@@ -560,6 +577,19 @@ async def main():
             logger.info(f"  Total Timesteps: {total_timesteps}")
             logger.info(f"  Wall Time: {env.current_time / 3600:.2f} hours")
             logger.info(f"  Pending: {len(env.pending_tasks)} | Completed: {len(env.completed_tasks)}")
+            # Real env has no RobotSimulator objects (robot_simulators is all None);
+            # derive status from telemetry + env charge-tracking sets instead.
+            def _robot_status(r):
+                if r.is_charging:
+                    return 'CHARGING'
+                if r.robot_id in env._robots_routing_to_charge:
+                    return 'ROUTING_TO_CHARGE'
+                return 'AVAIL' if r.current_task is None else 'BUSY'
+            robot_states_str = " | ".join(
+                f"R{r.robot_id}:{_robot_status(r)} bat={r.battery_level:.3f}"
+                for r in env.robots
+            )
+            logger.info(f"  Robots: {robot_states_str}")
             logger.info(f"  Iteration Time: {iteration_time:.2f}s  CPU Util: {cpu_util:.1f}%")
 
             if iteration_completion_times:

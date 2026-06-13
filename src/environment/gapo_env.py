@@ -715,15 +715,13 @@ class GAPOTaskAssignmentEnv:
                     simulator.complete_task(task.num_items)
                     robot.mark_dropoff_complete(task.task_id)
 
-                # Compute per-leg distance and energy from battery delta
-                battery_start = self._task_battery_snapshots.pop((task.task_id, task.leg_type), simulator.battery_level)
-                battery_delta = max(0.0, battery_start - simulator.battery_level)
-                drain_rate = simulator.battery_drain_rate if simulator.battery_drain_rate > 0 else 1e-9
-                task.distance_traveled = battery_delta / drain_rate
-                task.energy_consumed_wh = battery_delta * self.BATTERY_CAPACITY_WH
-
                 if not getattr(task, 'planned_path', None) and robot.planned_path:
                     task.planned_path = list(robot.planned_path)
+
+                task.distance_traveled = self._path_distance_m(task.planned_path or [])
+                battery_start = self._task_battery_snapshots.pop((task.task_id, task.leg_type), simulator.battery_level)
+                battery_delta = max(0.0, battery_start - simulator.battery_level)
+                task.energy_consumed_wh = battery_delta * self.BATTERY_CAPACITY_WH
 
                 # Remove task from robot queue
                 completed_task = robot.complete_current_task()
@@ -1021,20 +1019,30 @@ class GAPOTaskAssignmentEnv:
         task.par_level = par_level
         task.demand_location_index = demand_idx
 
-    def get_robot_availability_mask(self, task: Task) -> np.ndarray:
+    def get_robot_availability_mask(self, task: Task = None) -> np.ndarray:
         """
-        Get boolean mask for which robots can accept a task.
+        Get boolean mask for which robots can accept a task right now.
 
-        In continuous mode, robots can accept tasks even when busy
-        if they have capacity.
+        A robot is masked out (False) only when assign_task_to_robot() would
+        reject it outright: it is powered off (_offline_robots) or its battery
+        is low enough that it must route to a hub to charge (_should_robot_charge).
+        Busy-but-chargeable robots stay available — in continuous mode they can
+        still accept work even while carrying tasks (overflow handles capacity).
+
+        Masking here keeps the policy from proposing — and the training loop
+        from recording — assignments the env would silently reject.
 
         Args:
-            task: Task to check availability for
+            task: Unused; kept for signature compatibility.
 
         Returns:
             Boolean numpy array [num_robots]
         """
-        return np.ones(len(self.robots), dtype=bool)
+        mask = np.ones(len(self.robots), dtype=bool)
+        for rid in range(len(self.robots)):
+            if rid in self._offline_robots or self._should_robot_charge(rid):
+                mask[rid] = False
+        return mask
 
     def _get_state_dict(self) -> Dict[str, np.ndarray]:
         """
@@ -1236,6 +1244,21 @@ class GAPOTaskAssignmentEnv:
             'robot_positions': robot_positions,
             'queue_features': queue_features
         }
+
+    def _path_distance_m(self, path: list) -> float:
+        """Sum edge distances along a planned path (list of node indices)."""
+        if not path or len(path) < 2:
+            return 0.0
+        nodes = self.graph_state.nodes
+        edge_lookup = {
+            (e.from_node, e.to_node): e.distance_m
+            for e in self.graph_state.edges
+        }
+        total = 0.0
+        for from_idx, to_idx in zip(path, path[1:]):
+            key = (nodes[from_idx].node_id, nodes[to_idx].node_id)
+            total += edge_lookup.get(key, 0.0)
+        return total
 
     def _build_edge_index(self) -> np.ndarray:
         """

@@ -42,6 +42,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         # Fixed drain rate estimate for battery threshold calculations.
         # Matches RobotSimulator.battery_drain_rate default (0.001 per metre).
         self._real_battery_drain_rate = 0.001
+        self._real_robots_charging: set = set()  # tracks robots actively charging at hub
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -90,19 +91,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         """
         inventories = self.robot_backend.get_location_inventories()
         if not inventories:
-            # DEBUG: log every time we have no inventory
-            if int(self.current_time) % 10 == 0:
-                print(f"[_update_inventory t={self.current_time:.0f}] NO inventories from bridge")
             return  # Bridge not connected or no system_state received yet
-
-        # DEBUG: log received inventory keys + sample stock_levels every 10 sim-sec
-        if int(self.current_time) % 10 == 0:
-            sample = {
-                lid: {sku: round(s.get('stock_level', 0), 1)
-                      for sku, s in (inv.sku_inventory or {}).items()}
-                for lid, inv in inventories.items()
-            }
-            print(f"[_update_inventory t={self.current_time:.0f}] received {len(inventories)} locations: {sample}")
 
         for node in self.graph_state.nodes:
             inv_data = inventories.get(node.node_id)
@@ -206,6 +195,15 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
 
                 completed_task = robot.complete_current_task()
                 if completed_task:
+                    completed_task.distance_traveled = self._path_distance_m(
+                        completed_task.planned_path or []
+                    )
+                    battery_start = self._task_battery_snapshots.pop(
+                        (completed_task.task_id, completed_task.leg_type), None
+                    )
+                    if battery_start is not None and robot.telemetry:
+                        battery_delta = max(0.0, battery_start - robot.telemetry.battery_level)
+                        completed_task.energy_consumed_wh = battery_delta * self.BATTERY_CAPACITY_WH
                     completed_tasks.append(completed_task)
                     if completed_task.leg_type == "dropoff":
                         self.completed_tasks.append(completed_task)
@@ -231,6 +229,44 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                         )
                     ):
                         self._plan_path_for_robot(robot, robot.current_task, None)
+
+        # Charge start / complete detection (replaces simulator-based logic in base class)
+        for robot in self.robots:
+            robot_id = robot.robot_id
+            if robot_id not in self._robots_routing_to_charge:
+                continue
+            if robot.current_node_index is None or robot.telemetry is None:
+                continue
+            _at_hub = self.graph_state.nodes[robot.current_node_index].node_type in ('hub', 'storage')
+            if not _at_hub:
+                continue
+
+            battery = robot.telemetry.battery_level
+
+            # Charge complete
+            if robot_id in self._real_robots_charging and battery >= 0.99:
+                self._real_robots_charging.discard(robot_id)
+                self._robots_routing_to_charge.discard(robot_id)
+                if self.fleet_event_logger:
+                    self.fleet_event_logger.log_charge_complete(
+                        robot_id=robot_id,
+                        sim_time=self.current_time,
+                        battery_level=battery,
+                        hub_node=robot.current_node_index,
+                    )
+                if robot.current_task:
+                    self._plan_path_for_robot(robot, robot.current_task, None)
+
+            # Charge start
+            elif robot_id not in self._real_robots_charging and robot.current_task is None:
+                self._real_robots_charging.add(robot_id)
+                if self.fleet_event_logger:
+                    self.fleet_event_logger.log_charge_start(
+                        robot_id=robot_id,
+                        sim_time=self.current_time,
+                        battery_level=battery,
+                        hub_node=robot.current_node_index,
+                    )
 
         return completed_tasks
 
@@ -264,9 +300,14 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
             robot.robot_id, path, task.task_id, task.num_items
         )
 
+        task.planned_path = path
         robot.planned_path = path
         robot.target_node_index = task.to_location_index
         robot.travel_start_time = self.current_time
+
+        if (task.task_id, task.leg_type) not in self._task_battery_snapshots:
+            battery = robot.telemetry.battery_level if robot.telemetry else 1.0
+            self._task_battery_snapshots[(task.task_id, task.leg_type)] = battery
 
     # ------------------------------------------------------------------
     # Traversal records (future work)
@@ -367,6 +408,14 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                     node_idx = i
                     break
 
+        # Trim planned path to remaining nodes from current position
+        remaining_path = list(path)
+        if node_idx is not None and path:
+            for i, n in enumerate(path):
+                if n == node_idx:
+                    remaining_path = path[i:]
+                    break
+
         return RobotTelemetry(
             timestamp=raw.timestamp,
             robot_id=raw.robot_id,
@@ -382,9 +431,9 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
             current_capacity=raw.current_capacity,
             is_available=raw.is_available,
             active_task_id=raw.active_task_id,
-            remaining_path=list(path),
+            remaining_path=remaining_path,
             eta_to_next_node=raw.eta_to_next_node,
-            is_charging=(robot.robot_id in self._robots_routing_to_charge),
+            is_charging=(robot.robot_id in self._real_robots_charging),
             needs_charging=False,
         )
 
