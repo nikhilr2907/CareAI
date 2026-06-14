@@ -87,6 +87,21 @@ class FleetEventLogger:
             f"battery={battery_level:.3f} hub_node={hub_node}"
         )
 
+    def log_task_failed(
+        self,
+        robot_id: int,
+        sim_time: float,
+        task_id: int,
+        action: str,
+        retry_count: int,
+        current_node: Optional[int],
+    ):
+        """A navigation goal failed/canceled. action is 'retry' or 'abort'."""
+        self.logger.info(
+            f"TASK_FAILED robot={robot_id} sim_time={sim_time:.1f}s task={task_id} "
+            f"action={action} retry_count={retry_count} current_node={current_node}"
+        )
+
     def log_robot_offline(
         self,
         robot_id: int,

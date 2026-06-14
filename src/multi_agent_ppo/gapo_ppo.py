@@ -227,6 +227,42 @@ class GAPOPPO:
 
         return action, action_probs, entropy
 
+    def select_action_no_store(
+        self,
+        state_dict: Dict[str, np.ndarray],
+        robot_mask: np.ndarray = None
+    ) -> Tuple[int, float, list, float]:
+        """
+        Select a stochastic action WITHOUT writing to a Memory buffer.
+
+        Mirrors select_action() but returns the log-prob so the caller can defer
+        committing the experience until the assignment is actually accepted by the
+        env. Use this when an action may be rejected (e.g. the chosen robot must
+        charge) and only successful assignments should enter the rollout buffer.
+
+        Note: this does not call record_action() either — the caller records the
+        action after a confirmed assignment so de-biasing stays consistent.
+
+        Returns:
+            action: selected robot index
+            logprob: float log-probability of the action under policy_old
+            action_probs: per-robot probability list (for logging)
+            entropy: policy entropy at this state (for logging)
+        """
+        state_dict_tensor = self._state_dict_to_tensor(state_dict)
+        if robot_mask is not None:
+            robot_mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(self.device)
+        else:
+            robot_mask_tensor = None
+
+        with torch.no_grad():
+            action, log_prob, action_probs, entropy = self.policy_old.select_action(
+                state_dict_tensor,
+                robot_mask_tensor
+            )
+
+        return action, log_prob.item(), action_probs, entropy
+
     def select_action_greedy(
         self,
         state_dict: Dict[str, np.ndarray],

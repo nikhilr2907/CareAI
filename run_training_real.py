@@ -329,12 +329,13 @@ async def main():
                     # this step. Leave the task pending and retry on a later step
                     # rather than spinning out phantom assignments to a blocked robot.
                     break
-                mem_idx_before = len(memory.actions)
-
                 heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
                 _used_heuristic = False
                 robot_logits = None
                 action_entropy = None
+                # Select an action but do NOT write to the rollout buffer yet — we
+                # commit the experience only once the env actually accepts the
+                # assignment, so a rejected action never enters memory or the logs.
                 try:
                     if iteration <= warmup_iters and np.random.random() < warmup_mix:
                         action = heuristic_action
@@ -342,33 +343,34 @@ async def main():
                         state_tensor = ppo._state_dict_to_tensor(state_dict)
                         mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
                         with torch.no_grad():
-                            logprob, _, _, _, _, _ = ppo.policy_old.evaluate_actions(
+                            logprob_t, _, _, _, _, _ = ppo.policy_old.evaluate_actions(
                                 [state_tensor],
                                 torch.tensor([action], dtype=torch.long).to(ppo.device),
                                 [mask_tensor],
                             )
-                        memory.state_dicts.append(state_dict)
-                        memory.actions.append(action)
-                        memory.logprobs.append(logprob.item())
-                        memory.robot_masks.append(robot_mask)
-                        ppo.policy.record_action(action)
+                        logprob = logprob_t.item()
                     else:
-                        action, robot_logits, action_entropy = ppo.select_action(state_dict, memory, robot_mask)
+                        action, logprob, robot_logits, action_entropy = ppo.select_action_no_store(
+                            state_dict, robot_mask
+                        )
                 except Exception as e:
                     logger.error(f"Action selection error iter {iteration} step {step}: {e}")
                     raise
 
                 legs = env.assign_task_to_robot(action, task)
                 if not legs:
-                    # Env rejected the assignment (robot offline / must charge).
-                    # No need for it to be added if it fails: discard the memory
-                    # entry the action-selection step just appended so no phantom
-                    # sample enters the rollout buffer or the decision logs.
-                    del memory.state_dicts[mem_idx_before:]
-                    del memory.actions[mem_idx_before:]
-                    del memory.logprobs[mem_idx_before:]
-                    del memory.robot_masks[mem_idx_before:]
+                    # Robot rejected the assignment (offline / must charge). Nothing
+                    # was written to memory, so just stop assigning this step; the
+                    # task stays pending for a later step.
                     break
+
+                # Assignment accepted — only now commit the experience to the buffer.
+                mem_idx_before = len(memory.actions)
+                memory.state_dicts.append(state_dict)
+                memory.actions.append(action)
+                memory.logprobs.append(logprob)
+                memory.robot_masks.append(robot_mask)
+                ppo.policy.record_action(action)
 
                 task.source = "heuristic" if _used_heuristic else "policy"
                 step_memory_indices.append(mem_idx_before)

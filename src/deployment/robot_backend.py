@@ -215,6 +215,9 @@ class ROSBridgeRobotBackend(RobotBackend):
 
         # Per-robot completion queue — drained each step by gapo_env_real
         self._completed_task_queue: Dict[int, Any] = {i: deque() for i in range(num_robots)}
+        # Per-robot failure queue — failed/canceled navigation goals, drained each
+        # step by gapo_env_real so the env can recover instead of freezing.
+        self._failed_task_queue: Dict[int, Any] = {i: deque() for i in range(num_robots)}
 
         # Emergency stop state — set True when an active emergency_stop is received.
         # The deployment loop can also poll this flag before sending new commands.
@@ -320,9 +323,12 @@ class ROSBridgeRobotBackend(RobotBackend):
                 else:
                     self.on_task_completed(robot_id, task_id)
 
-        elif status == "failed":
+        elif status in ("failed", "canceled"):
             error = data.get("error")
-            self._logger.error(f"Robot {robot_id}: task {task_id} failed: {error}")
+            self._logger.error(f"Robot {robot_id}: task {task_id} {status}: {error}")
+            # Buffer for gapo_env_real to drain synchronously each step (recovery).
+            if task_id is not None:
+                self._failed_task_queue[robot_id].append(task_id)
             if self.on_task_failed:
                 if asyncio.iscoroutinefunction(self.on_task_failed):
                     await self.on_task_failed(robot_id, task_id, error)
@@ -488,6 +494,24 @@ class ROSBridgeRobotBackend(RobotBackend):
             List of completed task IDs (empty if none since last call)
         """
         q = self._completed_task_queue.get(robot_id)
+        if not q:
+            return []
+        result = list(q)
+        q.clear()
+        return result
+
+    def pop_failed_tasks(self, robot_id: int) -> List[int]:
+        """
+        Drain and return all task IDs that failed/canceled since the last call.
+
+        Called once per step by gapo_env_real._check_task_completions() so a
+        failed navigation goal triggers recovery instead of silently wedging the
+        robot. Same drain-on-read semantics as pop_completed_tasks().
+
+        Returns:
+            List of failed task IDs (empty if none since last call)
+        """
+        q = self._failed_task_queue.get(robot_id)
         if not q:
             return []
         result = list(q)

@@ -222,6 +222,7 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
     nodes, edge_pairs, meta = load_config_from_file(config_path)
     if num_robots is None:
         num_robots = get_num_robots_from_config(config_path)
+    robot_max_capacity = get_robot_max_capacity_from_config(config_path)
     graph_state = _build_graph_state(nodes, edge_pairs, meta)
     env = GAPOTaskAssignmentEnvReal(
         robot_backend=robot_backend,
@@ -232,6 +233,7 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
+        robot_max_capacity=robot_max_capacity,
         fleet_event_logger=fleet_event_logger,
         log_dir=log_dir,
     )

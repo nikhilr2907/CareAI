@@ -103,7 +103,6 @@ class GAPOTaskAssignmentEnv:
         self._robots_routing_to_charge: set = set()
         self.battery_safety_margin = 1.5
         self.battery_critical_threshold = 0.10
-        self.battery_low_step_penalty = 0.05
         self.battery_critical_task_penalty = 1.0
         self.emergency_tasks: list = []
 

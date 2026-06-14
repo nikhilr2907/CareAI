@@ -43,6 +43,10 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         # Matches RobotSimulator.battery_drain_rate default (0.001 per metre).
         self._real_battery_drain_rate = 0.001
         self._real_robots_charging: set = set()  # tracks robots actively charging at hub
+        # Navigation-failure recovery: retry a failed real task a few times
+        # (transient Nav2 failures), then abort it and free the robot.
+        self._task_failure_counts: dict = {}  # task_id -> consecutive failure count
+        self._max_task_retries: int = 3
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -131,6 +135,39 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                 continue
             robot.update_telemetry(self._bridge_to_env_telemetry(robot, raw))
 
+        for robot in self.robots:
+            rid = robot.robot_id
+            if (rid in self._offline_robots
+                    or rid in self._robots_routing_to_charge
+                    or rid in self._real_robots_charging):
+                continue
+            if not self._should_robot_charge(rid):
+                continue
+
+            if self.fleet_event_logger:
+                hub_idx = self._nearest_hub_index(rid)
+                if robot.task_queue:
+                    self.fleet_event_logger.log_charge_interrupt(
+                        robot_id=rid,
+                        sim_time=self.current_time,
+                        battery_level=robot.battery_level,
+                        interrupted_task_id=(
+                            robot.current_task.task_id if robot.current_task else None
+                        ),
+                        queued_task_ids=[t.task_id for t in robot.task_queue],
+                        current_node=robot.current_node_index,
+                        hub_node=hub_idx,
+                    )
+                else:
+                    self.fleet_event_logger.log_charge_dispatch_idle(
+                        robot_id=rid,
+                        sim_time=self.current_time,
+                        battery_level=robot.battery_level,
+                        current_node=robot.current_node_index,
+                        hub_node=hub_idx,
+                    )
+            self._send_robot_to_charge(rid)
+
     # ------------------------------------------------------------------
     # Task completions
     # ------------------------------------------------------------------
@@ -148,6 +185,25 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
 
         for robot in self.robots:
             for task_id in self.robot_backend.pop_completed_tasks(robot.robot_id):
+                if task_id == -1:
+                    # Charge-trip navigation finished → robot has docked at the hub.
+                    # We use the bridge's own completion event as the arrival signal
+                    # instead of snapping (x, y) to the nearest node. Only honoured
+                    # for robots we actually dispatched to charge.
+                    if (robot.robot_id in self._robots_routing_to_charge
+                            and robot.robot_id not in self._real_robots_charging):
+                        self._real_robots_charging.add(robot.robot_id)
+                        if self.fleet_event_logger:
+                            self.fleet_event_logger.log_charge_start(
+                                robot_id=robot.robot_id,
+                                sim_time=self.current_time,
+                                battery_level=(
+                                    robot.telemetry.battery_level
+                                    if robot.telemetry else 0.0
+                                ),
+                                hub_node=robot.current_node_index,
+                            )
+                    continue
                 if not robot.current_task or robot.current_task.task_id != task_id:
                     continue
 
@@ -230,21 +286,38 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                     ):
                         self._plan_path_for_robot(robot, robot.current_task, None)
 
-        # Charge start / complete detection (replaces simulator-based logic in base class)
+        # Navigation-failure recovery. Drain failed/canceled goals and either
+        # reset charge state (failed charge trip), ignore an expected charge
+        # preemption, or retry/abort a genuinely failed real task.
+        for robot in self.robots:
+            for task_id in self.robot_backend.pop_failed_tasks(robot.robot_id):
+                if task_id == -1:
+                    # Charge-trip navigation failed/aborted → clear charge state so
+                    # the next dispatch can re-route the robot to a hub.
+                    self._robots_routing_to_charge.discard(robot.robot_id)
+                    self._real_robots_charging.discard(robot.robot_id)
+                    continue
+                if robot.robot_id in self._robots_routing_to_charge:
+                    # Expected preemption: we diverted this robot to charge, so Nav2
+                    # aborted its in-flight real task. The task stays queued and
+                    # resumes after charging — not a genuine failure.
+                    continue
+                self._handle_failed_task(robot, task_id)
+
+        # Charge-complete detection.
+        # Charge START is event-driven (handled above: the bridge reports the
+        # task_id=-1 charge-trip navigation as completed once the robot docks).
+        # Charge COMPLETE is battery-driven: a robust scalar threshold on
+        # telemetry, with no fragile nearest-node snap required.
         for robot in self.robots:
             robot_id = robot.robot_id
-            if robot_id not in self._robots_routing_to_charge:
+            if robot_id not in self._real_robots_charging:
                 continue
-            if robot.current_node_index is None or robot.telemetry is None:
-                continue
-            _at_hub = self.graph_state.nodes[robot.current_node_index].node_type in ('hub', 'storage')
-            if not _at_hub:
+            if robot.telemetry is None:
                 continue
 
             battery = robot.telemetry.battery_level
-
-            # Charge complete
-            if robot_id in self._real_robots_charging and battery >= 0.99:
+            if battery >= 0.99:
                 self._real_robots_charging.discard(robot_id)
                 self._robots_routing_to_charge.discard(robot_id)
                 if self.fleet_event_logger:
@@ -257,18 +330,62 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                 if robot.current_task:
                     self._plan_path_for_robot(robot, robot.current_task, None)
 
-            # Charge start
-            elif robot_id not in self._real_robots_charging and robot.current_task is None:
-                self._real_robots_charging.add(robot_id)
-                if self.fleet_event_logger:
-                    self.fleet_event_logger.log_charge_start(
-                        robot_id=robot_id,
-                        sim_time=self.current_time,
-                        battery_level=battery,
-                        hub_node=robot.current_node_index,
-                    )
-
         return completed_tasks
+
+    def _handle_failed_task(self, robot, task_id: int) -> None:
+        """
+        Recover from a genuine navigation failure on a real task.
+
+        Retries the task (re-issues the path command) up to _max_task_retries to
+        ride out transient Nav2 failures. Once the cap is exceeded, the task's
+        legs are dropped and the robot is freed; the periodic inventory check
+        regenerates an equivalent replenishment task if the demand still exists.
+        """
+        # Act only on the robot's active task; ignore stale failures for tasks
+        # that have already completed or been removed.
+        if not robot.current_task or robot.current_task.task_id != task_id:
+            return
+
+        count = self._task_failure_counts.get(task_id, 0) + 1
+        self._task_failure_counts[task_id] = count
+
+        if count <= self._max_task_retries:
+            # Transient failure — re-dispatch the same task.
+            if self.fleet_event_logger:
+                self.fleet_event_logger.log_task_failed(
+                    robot_id=robot.robot_id,
+                    sim_time=self.current_time,
+                    task_id=task_id,
+                    action="retry",
+                    retry_count=count,
+                    current_node=robot.current_node_index,
+                )
+            self._plan_path_for_robot(robot, robot.current_task, None)
+            return
+
+        # Retry cap exceeded — abort the task and free the robot.
+        if self.fleet_event_logger:
+            self.fleet_event_logger.log_task_failed(
+                robot_id=robot.robot_id,
+                sim_time=self.current_time,
+                task_id=task_id,
+                action="abort",
+                retry_count=count,
+                current_node=robot.current_node_index,
+            )
+        robot.task_queue[:] = [t for t in robot.task_queue if t.task_id != task_id]
+        robot.overflow_queue[:] = [t for t in robot.overflow_queue if t.task_id != task_id]
+        robot.picked_up_task_ids.discard(task_id)
+        self._task_failure_counts.pop(task_id, None)
+        self._task_battery_snapshots.pop((task_id, "pickup"), None)
+        self._task_battery_snapshots.pop((task_id, "dropoff"), None)
+
+        # Dispatch the next queued task if any remain, else clear the robot's path.
+        if robot.current_task:
+            self._plan_path_for_robot(robot, robot.current_task, None)
+        else:
+            robot.planned_path = []
+            robot.target_node_index = None
 
     # ------------------------------------------------------------------
     # Path planning
