@@ -265,7 +265,7 @@ class GAPOPolicyNetwork(nn.Module):
         state_dict: Dict[str, torch.Tensor],
         robot_availability_mask: Optional[torch.Tensor] = None,
         deterministic: bool = False
-    ) -> Tuple[int, torch.Tensor]:
+    ) -> Tuple[int, torch.Tensor, List[float], float]:
         """
         Select action using current policy.
 
@@ -277,6 +277,8 @@ class GAPOPolicyNetwork(nn.Module):
         Returns:
             action: Selected action index
             log_prob: Log probability of selected action
+            action_probs: Per-robot probabilities (for logging)
+            entropy: Policy entropy at this state (for logging)
         """
         with torch.no_grad():
             action_logits, _, _ = self.forward(
@@ -299,10 +301,11 @@ class GAPOPolicyNetwork(nn.Module):
             dist = torch.distributions.Categorical(action_probs)
             action = dist.sample().item()
 
-        # Compute log probability
+        # Compute log probability and entropy on GPU before transfer
         log_prob = F.log_softmax(action_logits, dim=-1)[action]
+        entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8)).item()
 
-        return action, log_prob
+        return action, log_prob, action_probs.cpu().tolist(), entropy
 
     def evaluate_actions(
         self,

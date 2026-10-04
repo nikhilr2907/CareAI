@@ -5,6 +5,8 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from ..environment.graph_helpers import dijkstra_shortest_path
+from ..environment.tasks.task_generator import DEFAULT_MIN_REPLENISHMENT_DEADLINE_S
 
 
 # Candidate feature dimension: matches Task.get_features() output (15 dims)
@@ -237,9 +239,13 @@ def build_candidate_universe(
                 stock_ratio = stock / max_stock
                 reorder_ratio = reorder / max_stock if max_stock > 0 else 0.0
 
+                _, path_cost = dijkstra_shortest_path(
+                    source_node_idx, node_idx, graph_state, len(graph_state.nodes)
+                )
+
                 feat = np.array([
                     float(source_node_idx), float(node_idx),
-                    120.0,           # estimated_duration (seconds)
+                    path_cost,       # estimated_duration: dijkstra(hub → destination)
                     0.0,             # age (not in queue yet)
                     tts * 3600,      # time_to_deadline (proxy from tts)
                     0.0,             # queue_position (not in queue yet)
@@ -262,43 +268,6 @@ def build_candidate_universe(
                     features=feat,
                 ))
 
-        else:
-            # Node-level fallback
-            stock = node.stock_level
-            max_stock = node.max_stock
-            rate = node.consumption_rate
-            reorder = rate * getattr(node, 'buffer_time', 2.0)
-
-            if stock <= reorder or rate <= 0 or max_stock <= 0 or stock >= max_stock:
-                continue
-            if (node_idx, None) in covered:
-                continue
-
-            tts = stock / rate
-            room = max_stock - stock
-            num_items = max(1, int(room))
-            stock_ratio = stock / max_stock
-            reorder_ratio = reorder / max_stock if max_stock > 0 else 0.0
-
-            feat = np.array([
-                float(source_node_idx), float(node_idx),
-                120.0, 0.0, tts * 3600, 0.0, float(num_items), tts,
-                1.0, 0.0, 0.0, 0.0,
-                -1.0, stock_ratio, reorder_ratio,
-            ], dtype=np.float32)
-
-            candidates.append(CandidateSpec(
-                from_node_idx=source_node_idx,
-                to_node_idx=node_idx,
-                sku_id=None,
-                category_id=-1.0,
-                stock=stock,
-                reorder=reorder,
-                max_stock=max_stock,
-                rate=rate,
-                time_to_stockout=tts,
-                features=feat,
-            ))
 
     if not candidates:
         return []
@@ -325,7 +294,7 @@ def build_state_summary(
         1: fraction of robots with empty task queues (idle)
         2: fraction of current simulated hour elapsed
         3: mean pending task age, normalised by 5 minutes
-        4: fraction of pending tasks with manual_priority >= 4
+        4: fraction of pending tasks with time_to_stockout < 1.0 hour (urgent)
         5: mean (stock_level / max_stock) across all nodes
         6: fraction of robots currently moving (from telemetry)
         7: queue fill ratio (duplicate of dim 0 for feature symmetry)
@@ -342,7 +311,10 @@ def build_state_summary(
     if pending_tasks:
         avg_age = float(np.mean([current_time - t.arrival_time for t in pending_tasks]))
         avg_age_norm = avg_age / 300.0  # normalise by 5 minutes
-        frac_urgent = sum(1 for t in pending_tasks if t.manual_priority >= 4) / num_pending
+        frac_urgent = sum(
+            1 for t in pending_tasks
+            if t.get_current_time_to_stockout() < 1.0
+        ) / num_pending
     else:
         avg_age_norm = 0.0
         frac_urgent = 0.0
@@ -458,7 +430,7 @@ class TaskCreationActor(nn.Module):
         state_np = build_state_summary(pending_tasks, robots, graph_state, current_time)
         state_t = torch.from_numpy(state_np).float().to(self.device)
 
-        feat_np = np.stack([c.features for c in candidates], axis=0)  # [N, 15]
+        feat_np = np.stack([c.features for c in candidates], axis=0)  # [N, CANDIDATE_FEAT_DIM]
         feat_t = torch.from_numpy(feat_np).float().to(self.device)
 
         with torch.set_grad_enabled(training):
@@ -491,21 +463,19 @@ class TaskCreationActor(nn.Module):
 
         num_items = max(1, int(room))
         tts_seconds = selected.time_to_stockout * 3600
-        deadline = current_time + max(tts_seconds, 300.0)  # At least 5 minutes
+        deadline = current_time + max(tts_seconds, DEFAULT_MIN_REPLENISHMENT_DEADLINE_S)
 
         task = Task(
             task_id=next_task_id,
             from_location_index=selected.from_node_idx,
             to_location_index=selected.to_node_idx,
-            manual_priority=2,           # Non-urgent; deterministic path handles urgent
             deadline=deadline,
             arrival_time=current_time,
-            estimated_duration=120.0,
+            estimated_duration=selected.features[2],  # dijkstra(hub → destination) from candidate
             task_type='replenishment',
             num_items=num_items,
             sku_id=selected.sku_id,
             category_id=selected.category_id,
-            source_stock_level=live_stock,
             time_to_stockout=selected.time_to_stockout,
             sku_stock_level=live_stock,
             sku_max_level=max_stock,

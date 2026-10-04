@@ -64,7 +64,7 @@ class GraphEncoder(nn.Module):
         # Categorical embeddings for each feature
         self.node_type_embedding = nn.Embedding(num_node_types, node_type_embedding_dim)
         self.department_embedding = nn.Embedding(num_departments + 1, department_embedding_dim)  # +1 for -1 (unknown)
-        self.shift_embedding = nn.Embedding(num_shift_periods, shift_embedding_dim)
+        self.shift_embedding = nn.Embedding(num_shift_periods + 1, shift_embedding_dim)  # +1 for outside-schedule slot
         self.day_type_embedding = nn.Embedding(num_day_types, day_type_embedding_dim)
 
         # Total node feature dimension after concatenating continuous + all embedded categoricals
@@ -145,7 +145,10 @@ class GraphEncoder(nn.Module):
         dept_ids[dept_ids == -1] = self.department_embedding.num_embeddings - 1
         dept_embeds = self.department_embedding(dept_ids)  # [num_nodes, 16]
 
-        shift_embeds = self.shift_embedding(node_categorical[:, 2])  # [num_nodes, 4]
+        # Shift period: map negative ids (outside any period) to the last index
+        shift_ids = node_categorical[:, 2].clone()
+        shift_ids[shift_ids < 0] = self.shift_embedding.num_embeddings - 1
+        shift_embeds = self.shift_embedding(shift_ids)  # [num_nodes, 4]
         day_type_embeds = self.day_type_embedding(node_categorical[:, 3])  # [num_nodes, 4]
 
         # Concatenate continuous + all embedded categoricals

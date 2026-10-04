@@ -378,6 +378,39 @@ class EdgeCostManager:
         stats['risk_sensitivity'] = self.risk_sensitivity
         return stats
 
+    def state_dict(self) -> dict:
+        """Return serializable state for checkpointing learned edge costs."""
+        return {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.trainer.optimizer.state_dict(),
+            "trainer_buffer": self.trainer.buffer,
+            "trainer_total_records_added": self.trainer.total_records_added,
+            "trainer_total_train_steps": self.trainer.total_train_steps,
+            "trainer_recent_losses": self.trainer.recent_losses,
+            "records_since_last_train": self._records_since_last_train,
+            "using_learned_model": self.using_learned_model,
+            "risk_sensitivity": self.risk_sensitivity,
+            "train_interval_records": self.train_interval_records,
+            "train_steps_per_interval": self.train_steps_per_interval,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore learned edge cost checkpoint state."""
+        if not state:
+            return
+        self.model.load_state_dict(state["model_state_dict"])
+        if "optimizer_state_dict" in state:
+            self.trainer.optimizer.load_state_dict(state["optimizer_state_dict"])
+        self.trainer.buffer = state.get("trainer_buffer", [])
+        self.trainer.total_records_added = state.get("trainer_total_records_added", 0)
+        self.trainer.total_train_steps = state.get("trainer_total_train_steps", 0)
+        self.trainer.recent_losses = state.get("trainer_recent_losses", [])
+        self._records_since_last_train = state.get("records_since_last_train", 0)
+        self.using_learned_model = state.get("using_learned_model", False)
+        self.risk_sensitivity = state.get("risk_sensitivity", self.risk_sensitivity)
+        self.train_interval_records = state.get("train_interval_records", self.train_interval_records)
+        self.train_steps_per_interval = state.get("train_steps_per_interval", self.train_steps_per_interval)
+
     def build_edge_features(self, graph_state, all_robots=None) -> np.ndarray:
         """
         Build feature matrix for all edges in the graph.
