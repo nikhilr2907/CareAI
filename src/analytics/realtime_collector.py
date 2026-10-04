@@ -1,21 +1,18 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Optional
-from collections import defaultdict
+from typing import List
+from collections import defaultdict, deque
 import json
-import csv
 import numpy as np
 import matplotlib.pyplot as plt
 
 # Type hints for objects we'll receive
 from src.environment.robot.robot_state import RobotState
 from src.environment.graph.node import GraphNode
-from src.environment.graph.edge import GraphEdge
 
 
 class RealtimeAnalyticsCollector:
     """
-<<<<<<< HEAD
     Collects and aggregates derived metrics from simulation or real deployment.
 
     Data flow:
@@ -26,59 +23,34 @@ class RealtimeAnalyticsCollector:
     Outputs:
     - metrics.json (derived metrics only)
     - plots/*.png and plots_final/*.png
-=======
-    Collects and aggregates metrics from simulation/real deployment.
-
-    Data flow:
-    - Task completion data from TaskLogger.cost_data
-    - RobotState/RobotTelemetry → record_robot_telemetry()
-    - GraphNode → record_inventory_snapshot()
-    - GraphEdge → record_corridor_state()
-
-    Outputs:
-    - metrics.json (raw events)
-    - metrics_summary.csv (per-iteration aggregates)
-    - plots_final/*.png (6 matplotlib plots)
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
     """
 
     def __init__(self,
                  output_dir: Path,
                  mode: str = 'sim',
                  snapshot_frequency: int = 50,
-<<<<<<< HEAD
                  task_logger=None,
                  sku_logger=None,
                  robot_sample_logger=None):
-=======
-                 task_logger=None):
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         """
         Args:
             output_dir: Directory for metrics output (analytics/ subdir)
             mode: 'sim' or 'real' (for logging/configuration)
             snapshot_frequency: Generate plots every N iterations
             task_logger: Reference to TaskLogger for reading task completion data
-<<<<<<< HEAD
             sku_logger: Reference to SKULogger for reading SKU event data
             robot_sample_logger: Reference to RobotSampleLogger for raw robot samples
-=======
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         """
         self.output_dir = Path(output_dir)
         self.mode = mode
         self.snapshot_frequency = snapshot_frequency
         self.task_logger = task_logger
-<<<<<<< HEAD
         self.sku_logger = sku_logger
         self.robot_sample_logger = robot_sample_logger
-=======
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-<<<<<<< HEAD
         self.nodes = None  # Set by initialize()
 
         # Keep only a bounded recent window of robot samples per robot in memory.
@@ -86,47 +58,19 @@ class RealtimeAnalyticsCollector:
 
         # Iteration tracking
         self.current_iteration = 0
-=======
-        # ===== Flow Metrics Infrastructure =====
-        self.nodes = None                    # Set by record_inventory_snapshot()
-        self.metric_helpers = None           # Set by _initialize_metrics()
-        self.metric_modules: Dict = {}       # {metric_name: metric_instance}
-        self.flow_metrics_cache: Dict = {}   # Cached results from last compute()
-
-        # Raw event streams (append-only)
-        # Note: task completion data now read from task_logger.cost_data
-        self.robot_samples = []    # {robot_id, status, battery, position, assigned_tasks}
-        self.inventory_snapshots = []  # {location, sku, stock, max_stock}
-        self.corridor_samples = []  # {edge, robot_count, clutter, people}
-
-        # Iteration tracking
-        self.current_iteration = 0
-        self.iteration_summaries = defaultdict(dict)  # iteration → summary stats
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
 
         # Aggregated metrics (updated per _update_metrics())
         self.metrics = {
             'latency': {'p50': 0, 'p95': 0, 'p99': 0, 'mean': 0},
             'utilization': {'idle': 0, 'active': 0, 'waiting': 0},
             'replenishment_lag': {'mean': 0, 'max': 0},
-<<<<<<< HEAD
             'cost': {'mean': 0, 'min': 0, 'max': 0},
-=======
-            'sku_demand': {},  # sku → consumption_rate
-            'cost': {'mean': 0, 'min': 0, 'max': 0},
-            'failure_rate': 0.0,
-            'a_c_ratio': 0.0,
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         }
 
     # ========== RECORDING METHODS ==========
 
-<<<<<<< HEAD
     def record_robot_telemetry(self, robots: List[RobotState], current_time: float,
                                iteration: int = None, step: int = None):
-=======
-    def record_robot_telemetry(self, robots: List[RobotState], current_time: float):
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         """
         Sample robot telemetry from RobotState + RobotTelemetry.
         Called periodically during training (e.g., every 10 steps).
@@ -135,7 +79,6 @@ class RealtimeAnalyticsCollector:
             robots: List of RobotState objects
             current_time: Current simulation/real time
         """
-<<<<<<< HEAD
         if self.robot_sample_logger is None:
             raise RuntimeError("RealtimeAnalyticsCollector.record_robot_telemetry() requires robot_sample_logger")
 
@@ -405,188 +348,11 @@ class RealtimeAnalyticsCollector:
             'by_zone': by_zone,
             'by_category': by_category,
         }
-=======
-        for robot in robots:
-            if robot.telemetry is not None:
-                # Task-aware idle detection
-                if len(robot.task_queue) == 0:
-                    status = 'IDLE'
-                elif robot.telemetry.velocity_ms > 0.1:
-                    status = 'ACTIVE'
-                else:
-                    status = 'WAITING_AT_LOCATION'
-
-                self.robot_samples.append({
-                    'robot_id': robot.robot_id,
-                    'status': status,
-                    'battery': robot.battery_level,
-                    'position': robot.current_position,
-                    'assigned_tasks': len(robot.task_queue),
-                    'timestamp': current_time,
-                })
-
-    def record_inventory_snapshot(self, nodes: List[GraphNode], current_time: float):
-        """
-        Sample inventory levels from GraphNode objects.
-        Called periodically during training (e.g., every 50 steps).
-
-        On first call: store nodes and initialize flow metrics.
-
-        Args:
-            nodes: List of GraphNode objects
-            current_time: Current simulation/real time
-        """
-        # Initialize metrics on first call (capture nodes + floor layout)
-        if self.nodes is None:
-            self.nodes = nodes
-            self._initialize_metrics()
-
-        for node in nodes:
-            # SKU-level inventory if available
-            if hasattr(node, 'sku_inventory') and node.sku_inventory:
-                for sku_id, sku_data in node.sku_inventory.items():
-                    stock = sku_data.get('stock', 0)
-                    max_stock = sku_data.get('max_stock', 1)
-                    self.inventory_snapshots.append({
-                        'location_id': node.node_id,
-                        'sku_id': sku_id,
-                        'stock': stock,
-                        'max_stock': max_stock,
-                        'stock_ratio': stock / max_stock if max_stock > 0 else 0,
-                        'consumption_rate': node.consumption_rate,
-                        'timestamp': current_time,
-                    })
-
-    def record_corridor_state(self, edges: List[GraphEdge], current_time: float):
-        """
-        Sample corridor congestion from GraphEdge objects.
-        Called periodically (e.g., every 50 steps).
-
-        Args:
-            edges: List of GraphEdge objects
-            current_time: Current simulation/real time
-        """
-        for edge in edges:
-            robot_count = len(edge.active_robot_ids) if hasattr(edge, 'active_robot_ids') else 0
-            self.corridor_samples.append({
-                'edge_id': f"{edge.from_node}->{edge.to_node}",
-                'distance': edge.distance_m,
-                'robot_count': robot_count,
-                'clutter': getattr(edge, 'clutter_level', 0),
-                'people': getattr(edge, 'people_count', 0),
-                'timestamp': current_time,
-            })
-
-    def record_cost_per_task(self, task_id: int, total_cost: float, total_reward: float):
-        """
-        Record cost breakdown for a task (from task_logger).
-
-        Args:
-            task_id: Task ID
-            total_cost: Total cost in dollars
-            total_reward: Total reward
-        """
-        # Store for later aggregation (cost computation happens in task_logger)
-        self.task_events_with_cost = getattr(self, 'task_events_with_cost', {})
-        self.task_events_with_cost[task_id] = {
-            'cost': total_cost,
-            'reward': total_reward,
-            'cost_per_reward': total_cost / total_reward if total_reward > 0 else 0,
-        }
-
-    # ========== FLOW METRICS ORCHESTRATION ==========
-
-    def _initialize_metrics(self):
-        """Instantiate all flow metric modules (called on first inventory snapshot)."""
-        try:
-            from src.analytics.metrics import (
-                MetricHelpers, ZoneLatencyMetric, RoutePerformanceMetric,
-                TaskCompletionDistributionMetric, EfficiencyComparisonMetric,
-            )
-            self.metric_helpers = MetricHelpers(self.nodes)
-            self.metric_modules = {
-                'zone_latency': ZoneLatencyMetric(self.task_logger, self.nodes, self.metric_helpers),
-                'route_performance': RoutePerformanceMetric(self.task_logger, self.nodes, self.metric_helpers),
-                'task_completion_dist': TaskCompletionDistributionMetric(self.task_logger, self.nodes, self.metric_helpers),
-                'efficiency_comparison': EfficiencyComparisonMetric(self.task_logger, self.nodes, self.metric_helpers),
-            }
-        except Exception:
-            self.metric_modules = {}
-
-    def compute_flow_metrics(self) -> Dict:
-        """
-        Orchestrate computation of all flow metrics.
-
-        Returns:
-            {
-                'zone_latency': {...},
-                'route_performance': {...},
-                'task_completion_dist': {...},
-                'efficiency_comparison': {...},
-            }
-        """
-        if not self.metric_modules:
-            return {}
-
-        result = {}
-        for name, metric in self.metric_modules.items():
-            try:
-                result[name] = metric.compute()
-            except Exception:
-                result[name] = {}
-
-        self.flow_metrics_cache = result
-        return result
-
-    # ========== METRICS COMPUTATION ==========
-
-    def _update_metrics(self):
-        """Recompute aggregated metrics from raw events."""
-
-        # 1. Task latency percentiles (from task_logger.cost_data)
-        if self.task_logger and self.task_logger.cost_data:
-            latencies = [e['latency'] for e in self.task_logger.cost_data if e.get('latency') is not None]
-            if latencies:
-                self.metrics['latency'] = {
-                    'p50': float(np.percentile(latencies, 50)),
-                    'p95': float(np.percentile(latencies, 95)),
-                    'p99': float(np.percentile(latencies, 99)),
-                    'mean': float(np.mean(latencies)),
-                }
-        else:
-            self.metrics['latency'] = {'p50': 0, 'p95': 0, 'p99': 0, 'mean': 0}
-
-        # 2. Robot utilization breakdown
-        if self.robot_samples:
-            statuses = defaultdict(int)
-            for sample in self.robot_samples:
-                statuses[sample['status']] += 1
-            total = sum(statuses.values())
-            self.metrics['utilization'] = {
-                'idle': int(statuses.get('IDLE', 0)),
-                'active': int(statuses.get('ACTIVE', 0)),
-                'waiting': int(statuses.get('WAITING_AT_LOCATION', 0)),
-            }
-
-        # 3. SKU demand (consumption rate)
-        if self.inventory_snapshots:
-            sku_stats = defaultdict(list)
-            for snap in self.inventory_snapshots:
-                sku_stats[snap['sku_id']].append(snap['consumption_rate'])
-            self.metrics['sku_demand'] = {
-                sku: float(np.mean(rates))
-                for sku, rates in sku_stats.items()
-            }
-
-        # 4. Failure rate (no failure tracking in cost_data yet, set to 0)
-        self.metrics['failure_rate'] = 0.0
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
 
     def increment_iteration(self):
         """Call at end of each training iteration to track progress."""
         self.current_iteration += 1
 
-<<<<<<< HEAD
     # ========== OUTPUT GENERATION ==========
 
     def save_metrics_json(self):
@@ -595,58 +361,12 @@ class RealtimeAnalyticsCollector:
             'mode': self.mode,
             'iteration': self.current_iteration,
             'metrics': self.metrics,
-=======
-        # Store iteration summary
-        task_count = len(self.task_logger.cost_data) if self.task_logger else 0
-        self.iteration_summaries[self.current_iteration] = {
-            'task_count': task_count,
-            'robot_samples': len(self.robot_samples),
-            'latency_p95': self.metrics['latency'].get('p95', 0),
-            'failure_rate': self.metrics['failure_rate'],
-        }
-
-    # ========== OUTPUT GENERATION ==========
-
-    def save_metrics_json(self):
-        """Save all raw events and flow metrics to JSON for later analysis."""
-        output = {
-            'mode': self.mode,
-            'iteration': self.current_iteration,
-            'task_completions': self.task_logger.cost_data if self.task_logger else [],
-            'robot_samples': self.robot_samples,
-            'inventory_snapshots': self.inventory_snapshots,
-            'corridor_samples': self.corridor_samples,
-            'metrics': self.metrics,
-            'flow_metrics': self.flow_metrics_cache,
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         }
 
         json_path = self.output_dir / 'metrics.json'
         with open(json_path, 'w') as f:
             json.dump(output, f, indent=2)
 
-<<<<<<< HEAD
-=======
-    def save_metrics_csv(self):
-        """Save iteration summaries to CSV."""
-        csv_path = self.output_dir / 'metrics_summary.csv'
-
-        if not self.iteration_summaries:
-            return
-
-        fieldnames = list(self.iteration_summaries[min(self.iteration_summaries.keys())].keys())
-        fieldnames = ['iteration'] + fieldnames
-
-        with open(csv_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-
-            for iteration in sorted(self.iteration_summaries.keys()):
-                row = {'iteration': iteration}
-                row.update(self.iteration_summaries[iteration])
-                writer.writerow(row)
-
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
     def plot_snapshot(self, final: bool = False):
         """
         Generate all 6 plots.
@@ -654,11 +374,8 @@ class RealtimeAnalyticsCollector:
         Args:
             final: If True, save to plots_final/ with final naming
         """
-<<<<<<< HEAD
         self._update_metrics()
 
-=======
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         if final:
             plots_dir = self.output_dir / 'plots_final'
         else:
@@ -672,11 +389,7 @@ class RealtimeAnalyticsCollector:
         self._plot_replenishment_lag(plots_dir, final)
         self._plot_sku_demand_velocity(plots_dir, final)
         self._plot_cost_metrics(plots_dir, final)
-<<<<<<< HEAD
         self._plot_zone_latency(plots_dir, final)
-=======
-        self._plot_failure_recovery(plots_dir, final)
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
 
     # ========== PLOT GENERATION ==========
 
@@ -713,11 +426,7 @@ class RealtimeAnalyticsCollector:
             return
 
         statuses = defaultdict(int)
-<<<<<<< HEAD
         for sample in self._iter_robot_samples():
-=======
-        for sample in self.robot_samples:
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
             statuses[sample['status']] += 1
 
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -739,7 +448,6 @@ class RealtimeAnalyticsCollector:
         plt.close()
 
     def _plot_replenishment_lag(self, output_dir: Path, final: bool = False):
-<<<<<<< HEAD
         """Plot replenishment pipeline breakdown — queue wait, assign→exec, execution."""
         lag = self.metrics.get('replenishment_lag', {})
         if not lag or lag.get('total', {}).get('mean', 0) == 0:
@@ -776,26 +484,13 @@ class RealtimeAnalyticsCollector:
                      f'{val:.0f}s', ha='center', va='bottom', fontsize=10)
 
         plt.tight_layout()
-=======
-        """Placeholder: Replenishment lag analysis."""
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5, 'Replenishment Lag Analysis\n(Data source: task completion tracking)',
-                ha='center', va='center', fontsize=12)
-        ax.set_title('Replenishment Lag (Task Assignment to Completion)')
-        ax.axis('off')
-
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         filename = '03_replenishment_lag.png' if final else f'03_lag_iter{self.current_iteration}.png'
         plt.savefig(output_dir / filename, dpi=150, bbox_inches='tight')
         plt.close()
 
     def _plot_sku_demand_velocity(self, output_dir: Path, final: bool = False):
         """Plot SKU consumption rates."""
-<<<<<<< HEAD
         if not self.metrics.get('sku_demand'):
-=======
-        if not self.inventory_snapshots:
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
             return
 
         sku_demand = self.metrics.get('sku_demand', {})
@@ -821,7 +516,6 @@ class RealtimeAnalyticsCollector:
         plt.close()
 
     def _plot_cost_metrics(self, output_dir: Path, final: bool = False):
-<<<<<<< HEAD
         """Plot cost breakdown — mean per-task cost split by component."""
         cost = self.metrics.get('cost', {})
         if not cost or cost.get('mean', 0) == 0:
@@ -857,30 +551,10 @@ class RealtimeAnalyticsCollector:
             ax2.text(i, val, f'${val:.2f}', ha='center', va='bottom', fontsize=10)
 
         plt.tight_layout()
-=======
-        """Plot cost analysis."""
-        fig, ax = plt.subplots(figsize=(10, 6))
-        cost_data = self.metrics.get('cost', {})
-
-        if cost_data and any(cost_data.values()):
-            labels = list(cost_data.keys())
-            values = list(cost_data.values())
-            ax.bar(labels, values, alpha=0.8, edgecolor='black', color='#95E1D3')
-            ax.set_ylabel('Cost ($)')
-            ax.set_title('Cost Metrics')
-            ax.grid(axis='y', alpha=0.3)
-        else:
-            ax.text(0.5, 0.5, 'Cost Metrics\n(Computed from task logger)',
-                    ha='center', va='center', fontsize=12)
-            ax.set_title('Cost Metrics')
-            ax.axis('off')
-
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         filename = '05_cost_metrics.png' if final else f'05_cost_iter{self.current_iteration}.png'
         plt.savefig(output_dir / filename, dpi=150, bbox_inches='tight')
         plt.close()
 
-<<<<<<< HEAD
     def _plot_zone_latency(self, output_dir: Path, final: bool = False):
         """Plot zone-latency summaries by destination quadrant."""
         zone_latency = self.metrics.get('zone_latency', {})
@@ -939,48 +613,15 @@ class RealtimeAnalyticsCollector:
         plt.close()
 
 
-=======
-    def _plot_failure_recovery(self, output_dir: Path, final: bool = False):
-        """Plot failure rate and recovery metrics."""
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        failure_rate = self.metrics.get('failure_rate', 0)
-        success_rate = 1.0 - failure_rate
-
-        categories = ['Success', 'Failure']
-        values = [success_rate * 100, failure_rate * 100]
-        colors = ['#4ECDC4', '#FF6B6B']
-
-        wedges, texts, autotexts = ax.pie(values, labels=categories, autopct='%1.1f%%',
-                                           colors=colors, startangle=90)
-        ax.set_title(f'Robot Failure Rate ({failure_rate:.2%})')
-
-        for autotext in autotexts:
-            autotext.set_color('white')
-            autotext.set_fontweight('bold')
-
-        filename = '06_failure_recovery.png' if final else f'06_failure_iter{self.current_iteration}.png'
-        plt.savefig(output_dir / filename, dpi=150, bbox_inches='tight')
-        plt.close()
-
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
     def get_snapshot(self) -> dict:
         """Return current metrics for dashboard/logging."""
         task_count = len(self.task_logger.cost_data) if self.task_logger else 0
         return {
             'iteration': self.current_iteration,
             'metrics': self.metrics,
-<<<<<<< HEAD
             'event_counts': {
                 'tasks': task_count,
                 'robot_samples': self._robot_sample_count(),
                 'sku_snapshots': len(self.sku_logger.latest_snapshots) if self.sku_logger else 0,
-=======
-            'flow_metrics': self.flow_metrics_cache,
-            'event_counts': {
-                'tasks': task_count,
-                'robot_samples': len(self.robot_samples),
-                'inventory_snapshots': len(self.inventory_snapshots),
->>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
             }
         }
