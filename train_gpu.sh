@@ -59,7 +59,7 @@ echo "Project files:"
 ls -lh run_training.py configs/
 
 # Check if config file exists
-CONFIG_FILE="configs/hospital_3nodes_consumables.json"
+CONFIG_FILE="configs/ilc_pilot_v1_care_robotics.json"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"
     exit 1
