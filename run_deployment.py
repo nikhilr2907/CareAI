@@ -6,10 +6,10 @@ Matches training script structure for consistency.
 
 Usage:
     # Heuristic (no trained policy)
-    python run_deployment.py --config configs/hospital_3nodes_consumables.json --headless
+    python run_deployment.py --config configs/revised_hospital_config_v3.json --headless
 
     # With trained policy
-    python run_deployment.py --config configs/hospital_3nodes_consumables.json \\
+    python run_deployment.py --config configs/revised_hospital_config_v3.json \\
         --use-trained --checkpoint outputs/gapo_latest/checkpoints/gapo_final.pth
 
     # Custom environment

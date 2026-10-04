@@ -15,7 +15,7 @@
 #   sbatch --time=48:00:00 shell/train_long.sh
 
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
-CONFIG="${CONFIG:-configs/hospital_3nodes_consumables.json}"
+CONFIG="${CONFIG:-configs/revised_hospital_config_v3.json}"
 ITERATIONS="${ITERATIONS:-50000}"
 LR="${LR:-0.0003}"
 HIDDEN_DIM="${HIDDEN_DIM:-128}"

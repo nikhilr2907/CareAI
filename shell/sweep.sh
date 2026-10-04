@@ -15,7 +15,7 @@
 #   CONFIG=configs/other.json ITERATIONS=20000 sbatch shell/sweep.sh
 
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
-CONFIG="${CONFIG:-configs/hospital_3nodes_consumables.json}"
+CONFIG="${CONFIG:-configs/revised_hospital_config_v3.json}"
 ITERATIONS="${ITERATIONS:-10000}"
 SEED="${SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/gapo_sweep}"
