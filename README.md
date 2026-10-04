@@ -21,7 +21,6 @@ A multi-agent PPO policy (GAPO) assigns restocking and pickup tasks to robots ov
 | Simulation training (`run_training.py`) | Working |
 | Simulation deployment (`run_deployment.py`) | Working, headless or with the pygame view |
 | Real-robot training and deployment (`run_training_real.py`, `run_real_deployment.py`) | Not yet run against hardware. Requires the ROS 2 bridge. |
-| Digital twin (`--twin`) | Implemented, not yet checked in a browser |
 | Reliability layer | Phase 1 only (telemetry noise, `src/reliability/`) |
 
 Simulation generates its own tasks and consumption from the config, so no training data is required.
@@ -53,7 +52,7 @@ python run_deployment.py --config configs/ilc_pilot_v1_care_robotics.json \
     --headless --max-runtime 3600
 ```
 
-Drop `--headless` for the pygame view. Add `--twin` to publish state to the digital twin (WebSocket on port 8766, browser page on 8767).
+Drop `--headless` for the pygame view.
 
 Run `python run_training.py --help` for the full list of training flags.
 
@@ -61,14 +60,13 @@ Run `python run_training.py --help` for the full list of training flags.
 
 ```text
 run_training.py              Simulation PPO training
-run_deployment.py            Simulation inference, optional pygame view and twin
+run_deployment.py            Simulation inference, optional pygame view
 run_training_real.py         Training against a live robot via the ROS 2 bridge
 run_real_deployment.py       Inference against a live robot
 configs/                     Pilot layout and demand configuration
-digital_twin/                Browser digital twin
 src/environment/             Graph, robots, tasks and the environment
 src/multi_agent_ppo/         Policy, encoders, attention, PPO, learned edge cost
-src/deployment/              ROS bridge backend, WebSocket client, twin publisher
+src/deployment/              ROS bridge backend and WebSocket client
 src/reliability/             Sim-to-real effects (telemetry noise)
 src/analytics/               Realtime analytics and metrics
 src/utils/                   Logging and helpers

@@ -16,3 +16,6 @@ utilities/**
 
 # Keep the project README tracked despite the *.md rule above
 !README.md
+
+# Digital twin front end (local only)
+digital_twin/
