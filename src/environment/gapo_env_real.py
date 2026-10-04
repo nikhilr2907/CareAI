@@ -23,6 +23,7 @@ from .gapo_env import GAPOTaskAssignmentEnv
 from .robot.robot_telemetry import RobotTelemetry
 from .tasks.task_state import Task
 from .graph_helpers import dijkstra_shortest_path
+from src.exceptions import TelemetryUnavailableError
 
 
 class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
@@ -41,6 +42,11 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         # Fixed drain rate estimate for battery threshold calculations.
         # Matches RobotSimulator.battery_drain_rate default (0.001 per metre).
         self._real_battery_drain_rate = 0.001
+        self._real_robots_charging: set = set()  # tracks robots actively charging at hub
+        # Navigation-failure recovery: retry a failed real task a few times
+        # (transient Nav2 failures), then abort it and free the robot.
+        self._task_failure_counts: dict = {}  # task_id -> consecutive failure count
+        self._max_task_retries: int = 3
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -61,8 +67,13 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         # Re-init robot telemetry from bridge if data is already available.
         for robot in self.robots:
             raw = self.robot_backend.get_telemetry(robot.robot_id)
-            if raw is not None:
-                robot.update_telemetry(self._bridge_to_env_telemetry(robot, raw))
+            if raw is None:
+                raise TelemetryUnavailableError(
+                    f"No telemetry received from ROS bridge for robot_id={robot.robot_id}. "
+                    "Ensure the bridge is connected and publishing before calling reset()."
+                )
+            
+            robot.update_telemetry(self._bridge_to_env_telemetry(robot, raw))
 
         return self._get_state_dict()
 
@@ -101,6 +112,11 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                 v.get('stock', 0.0) for v in node.sku_inventory.values()
             )
 
+        # Mirror sim-mode behavior: write a periodic SNAPSHOT row to the SKU
+        # logger so post-run analytics has time-series inventory data.
+        if self.sku_logger is not None:
+            self.sku_logger.maybe_snapshot(self.graph_state, self.current_time)
+
     # ------------------------------------------------------------------
     # Robot positions
     # ------------------------------------------------------------------
@@ -119,6 +135,39 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                 continue
             robot.update_telemetry(self._bridge_to_env_telemetry(robot, raw))
 
+        for robot in self.robots:
+            rid = robot.robot_id
+            if (rid in self._offline_robots
+                    or rid in self._robots_routing_to_charge
+                    or rid in self._real_robots_charging):
+                continue
+            if not self._should_robot_charge(rid):
+                continue
+
+            if self.fleet_event_logger:
+                hub_idx = self._nearest_hub_index(rid)
+                if robot.task_queue:
+                    self.fleet_event_logger.log_charge_interrupt(
+                        robot_id=rid,
+                        sim_time=self.current_time,
+                        battery_level=robot.battery_level,
+                        interrupted_task_id=(
+                            robot.current_task.task_id if robot.current_task else None
+                        ),
+                        queued_task_ids=[t.task_id for t in robot.task_queue],
+                        current_node=robot.current_node_index,
+                        hub_node=hub_idx,
+                    )
+                else:
+                    self.fleet_event_logger.log_charge_dispatch_idle(
+                        robot_id=rid,
+                        sim_time=self.current_time,
+                        battery_level=robot.battery_level,
+                        current_node=robot.current_node_index,
+                        hub_node=hub_idx,
+                    )
+            self._send_robot_to_charge(rid)
+
     # ------------------------------------------------------------------
     # Task completions
     # ------------------------------------------------------------------
@@ -136,14 +185,37 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
 
         for robot in self.robots:
             for task_id in self.robot_backend.pop_completed_tasks(robot.robot_id):
+                if task_id == -1:
+                    # Charge-trip navigation finished → robot has docked at the hub.
+                    # We use the bridge's own completion event as the arrival signal
+                    # instead of snapping (x, y) to the nearest node. Only honoured
+                    # for robots we actually dispatched to charge.
+                    if (robot.robot_id in self._robots_routing_to_charge
+                            and robot.robot_id not in self._real_robots_charging):
+                        self._real_robots_charging.add(robot.robot_id)
+                        if self.fleet_event_logger:
+                            self.fleet_event_logger.log_charge_start(
+                                robot_id=robot.robot_id,
+                                sim_time=self.current_time,
+                                battery_level=(
+                                    robot.telemetry.battery_level
+                                    if robot.telemetry else 0.0
+                                ),
+                                hub_node=robot.current_node_index,
+                            )
+                    continue
                 if not robot.current_task or robot.current_task.task_id != task_id:
                     continue
 
                 task = robot.current_task
 
                 # Pickup / restock logic — identical to base class
+                if task.task_type == 'replenishment' and task.sku_id and task.leg_type == "pickup":
+                    self._refresh_task_inventory_context(task)
+                    task.sku_stock_level_at_collection = task.current_sku_stock_level
+
                 if task.leg_type == "pickup":
-                    robot.mark_pickup_complete(task.parent_task_id)
+                    robot.mark_pickup_complete(task.task_id)
                 elif task.task_type == 'replenishment':
                     to_node = self.graph_state.nodes[task.to_location_index]
                     if task.sku_id:
@@ -151,16 +223,45 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                         to_node.recalc_category_inventory()
                         to_node.stock_level = sum(
                             v.get('stock', 0.0)
-                            for v in to_node.category_inventory.values()
+                            for v in to_node.sku_inventory.values()
                         )
                     else:
                         to_node.restock(task.num_items)
 
+                    if task.sku_id:
+                        self._refresh_task_inventory_context(task)
+                        task.sku_stock_level_at_dropoff = task.current_sku_stock_level
+                        if self.sku_logger is not None:
+                            sku_data = to_node.sku_inventory.get(task.sku_id, {})
+                            self.sku_logger.log_restock(
+                                node_idx=task.to_location_index,
+                                node_tag=(getattr(to_node, 'location_tag', None)
+                                          or getattr(to_node, 'department_tag', None)
+                                          or f"node_{task.to_location_index}"),
+                                floor=getattr(to_node, 'floor', None),
+                                sku_id=task.sku_id,
+                                category=sku_data.get('category', ''),
+                                stock_after=task.sku_stock_level_at_dropoff or 0.0,
+                                max_stock=float(sku_data.get('max', 0.0)),
+                                par=float(sku_data.get('par', 0.0)),
+                                reorder=float(sku_data.get('reorder', 0.0)),
+                                sim_time=self.current_time,
+                            )
+
                 if task.leg_type == "dropoff":
-                    robot.mark_dropoff_complete(task.parent_task_id)
+                    robot.mark_dropoff_complete(task.task_id)
 
                 completed_task = robot.complete_current_task()
                 if completed_task:
+                    completed_task.distance_traveled = self._path_distance_m(
+                        completed_task.planned_path or []
+                    )
+                    battery_start = self._task_battery_snapshots.pop(
+                        (completed_task.task_id, completed_task.leg_type), None
+                    )
+                    if battery_start is not None and robot.telemetry:
+                        battery_delta = max(0.0, battery_start - robot.telemetry.battery_level)
+                        completed_task.energy_consumed_wh = battery_delta * self.BATTERY_CAPACITY_WH
                     completed_tasks.append(completed_task)
                     if completed_task.leg_type == "dropoff":
                         self.completed_tasks.append(completed_task)
@@ -174,7 +275,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                         and robot.current_task
                         and robot.current_task.leg_type == "dropoff"
                         and not robot.is_pickup_complete(
-                            robot.current_task.parent_task_id
+                            robot.current_task.task_id
                         )
                     ):
                         robot.demote_current_task()
@@ -182,12 +283,111 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                     if robot.current_task and not (
                         robot.current_task.leg_type == "dropoff"
                         and not robot.is_pickup_complete(
-                            robot.current_task.parent_task_id
+                            robot.current_task.task_id
                         )
                     ):
                         self._plan_path_for_robot(robot, robot.current_task, None)
 
+        # Navigation-failure recovery. Drain failed/canceled goals and either
+        # reset charge state (failed charge trip), ignore an expected charge
+        # preemption, or retry/abort a genuinely failed real task.
+        for robot in self.robots:
+            for task_id in self.robot_backend.pop_failed_tasks(robot.robot_id):
+                if task_id == -1:
+                    # Charge-trip navigation failed/aborted → clear charge state so
+                    # the next dispatch can re-route the robot to a hub.
+                    self._robots_routing_to_charge.discard(robot.robot_id)
+                    self._real_robots_charging.discard(robot.robot_id)
+                    continue
+                if robot.robot_id in self._robots_routing_to_charge:
+                    # Expected preemption: we diverted this robot to charge, so Nav2
+                    # aborted its in-flight real task. The task stays queued and
+                    # resumes after charging — not a genuine failure.
+                    continue
+                self._handle_failed_task(robot, task_id)
+
+        # Charge-complete detection.
+        # Charge START is event-driven (handled above: the bridge reports the
+        # task_id=-1 charge-trip navigation as completed once the robot docks).
+        # Charge COMPLETE is battery-driven: a robust scalar threshold on
+        # telemetry, with no fragile nearest-node snap required.
+        for robot in self.robots:
+            robot_id = robot.robot_id
+            if robot_id not in self._real_robots_charging:
+                continue
+            if robot.telemetry is None:
+                continue
+
+            battery = robot.telemetry.battery_level
+            if battery >= 0.99:
+                self._real_robots_charging.discard(robot_id)
+                self._robots_routing_to_charge.discard(robot_id)
+                if self.fleet_event_logger:
+                    self.fleet_event_logger.log_charge_complete(
+                        robot_id=robot_id,
+                        sim_time=self.current_time,
+                        battery_level=battery,
+                        hub_node=robot.current_node_index,
+                    )
+                if robot.current_task:
+                    self._plan_path_for_robot(robot, robot.current_task, None)
+
         return completed_tasks
+
+    def _handle_failed_task(self, robot, task_id: int) -> None:
+        """
+        Recover from a genuine navigation failure on a real task.
+
+        Retries the task (re-issues the path command) up to _max_task_retries to
+        ride out transient Nav2 failures. Once the cap is exceeded, the task's
+        legs are dropped and the robot is freed; the periodic inventory check
+        regenerates an equivalent replenishment task if the demand still exists.
+        """
+        # Act only on the robot's active task; ignore stale failures for tasks
+        # that have already completed or been removed.
+        if not robot.current_task or robot.current_task.task_id != task_id:
+            return
+
+        count = self._task_failure_counts.get(task_id, 0) + 1
+        self._task_failure_counts[task_id] = count
+
+        if count <= self._max_task_retries:
+            # Transient failure — re-dispatch the same task.
+            if self.fleet_event_logger:
+                self.fleet_event_logger.log_task_failed(
+                    robot_id=robot.robot_id,
+                    sim_time=self.current_time,
+                    task_id=task_id,
+                    action="retry",
+                    retry_count=count,
+                    current_node=robot.current_node_index,
+                )
+            self._plan_path_for_robot(robot, robot.current_task, None)
+            return
+
+        # Retry cap exceeded — abort the task and free the robot.
+        if self.fleet_event_logger:
+            self.fleet_event_logger.log_task_failed(
+                robot_id=robot.robot_id,
+                sim_time=self.current_time,
+                task_id=task_id,
+                action="abort",
+                retry_count=count,
+                current_node=robot.current_node_index,
+            )
+        robot.task_queue[:] = [t for t in robot.task_queue if t.task_id != task_id]
+        robot.overflow_queue[:] = [t for t in robot.overflow_queue if t.task_id != task_id]
+        robot.picked_up_task_ids.discard(task_id)
+        self._task_failure_counts.pop(task_id, None)
+        self._task_battery_snapshots.pop((task_id, "pickup"), None)
+        self._task_battery_snapshots.pop((task_id, "dropoff"), None)
+
+        # Dispatch the next queued task if any remain, else clear the robot's path.
+        if robot.current_task:
+            self._plan_path_for_robot(robot, robot.current_task, None)
+        else:
+            robot.planned_path = []
+            robot.target_node_index = None
 
     # ------------------------------------------------------------------
     # Path planning
@@ -206,7 +406,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                 robot.telemetry.x, robot.telemetry.y
             )
 
-        path, distance = dijkstra_shortest_path(
+        path, _ = dijkstra_shortest_path(
             start_node,
             task.to_location_index,
             self.graph_state,
@@ -219,10 +419,14 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
             robot.robot_id, path, task.task_id, task.num_items
         )
 
+        task.planned_path = path
         robot.planned_path = path
         robot.target_node_index = task.to_location_index
         robot.travel_start_time = self.current_time
-        task.estimated_completion_time = self.current_time + distance
+
+        if (task.task_id, task.leg_type) not in self._task_battery_snapshots:
+            battery = robot.telemetry.battery_level if robot.telemetry else 1.0
+            self._task_battery_snapshots[(task.task_id, task.leg_type)] = battery
 
     # ------------------------------------------------------------------
     # Traversal records (future work)
@@ -323,6 +527,14 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                     node_idx = i
                     break
 
+        # Trim planned path to remaining nodes from current position
+        remaining_path = list(path)
+        if node_idx is not None and path:
+            for i, n in enumerate(path):
+                if n == node_idx:
+                    remaining_path = path[i:]
+                    break
+
         return RobotTelemetry(
             timestamp=raw.timestamp,
             robot_id=raw.robot_id,
@@ -338,9 +550,9 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
             current_capacity=raw.current_capacity,
             is_available=raw.is_available,
             active_task_id=raw.active_task_id,
-            remaining_path=list(path),
+            remaining_path=remaining_path,
             eta_to_next_node=raw.eta_to_next_node,
-            is_charging=False,
+            is_charging=(robot.robot_id in self._real_robots_charging),
             needs_charging=False,
         )
 

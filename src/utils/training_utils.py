@@ -12,7 +12,7 @@ import torch
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.environment.graph.graph_state import GraphState
 from src.environment.graph.edge import GraphEdge
-from src.environment.graph.config_loader import load_config_from_file, get_num_robots_from_config
+from src.environment.graph.config_loader import load_config_from_file, get_num_robots_from_config, get_robot_max_capacity_from_config
 
 
 def parse_args():
@@ -22,7 +22,7 @@ def parse_args():
     # Config selection (mutually exclusive)
     config_group = parser.add_mutually_exclusive_group(required=False)
     config_group.add_argument('--config', type=str,
-                              help='Path to single hospital config JSON file')
+                              help='Path to hospital config JSON file')
     config_group.add_argument('--configs-dir', type=str, default=None,
                               help='Directory containing multiple config files for curriculum learning')
     config_group.add_argument('--config-list', type=str, nargs='+',
@@ -73,8 +73,8 @@ def parse_args():
     # Environment
     parser.add_argument('--num-robots', type=int, default=None,
                         help='Number of robots (default: read from config or 5)')
-    parser.add_argument('--max-episode-time', type=float, default=28800.0,
-                        help='Max episode time in seconds (default: 28800 = 8 hours)')
+    parser.add_argument('--max-episode-time', type=float, default=float('inf'),
+                        help='Max episode time in seconds (default: inf = no episode resets)')
     parser.add_argument('--stochastic-tasks-per-hour', type=float, default=2.0,
                         help='Expected stochastic ad-hoc task generation rate per simulated hour (default: 2.0)')
     parser.add_argument('--stochastic-task-cap-per-hour', type=int, default=2,
@@ -121,10 +121,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_curriculum_from_configs(config_paths: list) -> list:
-    """
-    Load curriculum from list of config file paths.
-    """
+def load_curriculum_from_configs(config_paths: List[str]) -> List[Tuple[str, str]]:
+    """Build curriculum list of (config_path, description) from file paths, skipping missing files."""
     curriculum = []
 
     for config_path in config_paths:
@@ -183,11 +181,14 @@ def create_env_from_config_file(config_path: str, num_robots: Optional[int] = No
                                 timestep_seconds: float = 1.0,
                                 stochastic_tasks_per_hour: float = 2.0,
                                 stochastic_task_cap_per_hour: int = 2,
-                                initial_stochastic_tasks: int = 0):
+                                initial_stochastic_tasks: int = 0,
+                                fleet_event_logger=None,
+                                log_dir=None):
     """Create a simulation environment from a config JSON file."""
     nodes, edge_pairs, meta = load_config_from_file(config_path)
     if num_robots is None:
         num_robots = get_num_robots_from_config(config_path)
+    robot_max_capacity = get_robot_max_capacity_from_config(config_path)
     graph_state = _build_graph_state(nodes, edge_pairs, meta)
     env = GAPOTaskAssignmentEnv(
         num_robots=num_robots,
@@ -196,7 +197,10 @@ def create_env_from_config_file(config_path: str, num_robots: Optional[int] = No
         timestep_seconds=timestep_seconds,
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
-        initial_stochastic_tasks=initial_stochastic_tasks
+        initial_stochastic_tasks=initial_stochastic_tasks,
+        robot_max_capacity=robot_max_capacity,
+        fleet_event_logger=fleet_event_logger,
+        log_dir=log_dir,
     )
     env.graph_state = graph_state
     env._custom_graph_state = graph_state
@@ -209,13 +213,16 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
                                      timestep_seconds: float = 1.0,
                                      stochastic_tasks_per_hour: float = 2.0,
                                      stochastic_task_cap_per_hour: int = 2,
-                                     initial_stochastic_tasks: int = 0):
+                                     initial_stochastic_tasks: int = 0,
+                                     fleet_event_logger=None,
+                                     log_dir=None):
     """Create a real-deployment environment (GAPOTaskAssignmentEnvReal) from a config JSON file."""
     from ..environment.gapo_env_real import GAPOTaskAssignmentEnvReal
 
     nodes, edge_pairs, meta = load_config_from_file(config_path)
     if num_robots is None:
         num_robots = get_num_robots_from_config(config_path)
+    robot_max_capacity = get_robot_max_capacity_from_config(config_path)
     graph_state = _build_graph_state(nodes, edge_pairs, meta)
     env = GAPOTaskAssignmentEnvReal(
         robot_backend=robot_backend,
@@ -226,6 +233,9 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         max_stochastic_tasks_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
+        robot_max_capacity=robot_max_capacity,
+        fleet_event_logger=fleet_event_logger,
+        log_dir=log_dir,
     )
     env.graph_state = graph_state
     env._custom_graph_state = graph_state
@@ -373,8 +383,22 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
             if use_baseline:
                 action = select_nearest_robot(task, eval_env.robots, eval_env.graph_state, robot_mask)
             else:
-                action = policy.select_action_greedy(eval_env._get_state_dict(), robot_mask)
+                action, _, _ = policy.select_action_greedy(eval_env._get_state_dict(), robot_mask)
             success = eval_env.assign_task_to_robot(action, task)
+            if not success:
+                # Primary robot rejected — check for other available robots and try heuristic.
+                other_available = [
+                    rid for rid in range(eval_env.num_robots)
+                    if rid != action
+                    and rid not in eval_env._offline_robots
+                    and not eval_env._should_robot_charge(rid)
+                ]
+                if other_available:
+                    fallback = select_nearest_robot(task, eval_env.robots, eval_env.graph_state, robot_mask)
+                    if fallback != action and not eval_env._should_robot_charge(fallback):
+                        success = eval_env.assign_task_to_robot(fallback, task)
+                if not success:
+                    break  # No robot available; stop assigning this step
             if success:
                 eval_assignments += 1
                 assignments_this_step += 1

@@ -243,7 +243,7 @@ def draw_tasks(screen, env, bounds, width, height):
         to_x, to_y = _get_node_center(to_node)
         fx, fy = world_to_screen(from_x, from_y, bounds, width, height)
         tx, ty = world_to_screen(to_x, to_y, bounds, width, height)
-        color = (255, 200, 50) if task.manual_priority >= 4 else (200, 200, 200)
+        color = (255, 200, 50) if task.get_current_time_to_stockout() < 1.0 else (200, 200, 200)
         pygame.draw.circle(screen, color, (fx, fy), 4)
         pygame.draw.circle(screen, (50, 200, 255), (tx, ty), 4)
 
@@ -306,7 +306,7 @@ def rank_pending_tasks(env, ppo):
     if not env.pending_tasks:
         return
     if ppo is None:
-        env.pending_tasks.sort(key=lambda t: (-t.manual_priority, t.arrival_time))
+        env.pending_tasks.sort(key=lambda t: t.arrival_time)
         for i, t in enumerate(env.pending_tasks):
             t.queue_position = i
             t.learned_score = 0.0
@@ -370,23 +370,48 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
     return best_robot if best_robot is not None else 0
 
 
-def assign_tasks(env, ppo, max_assignments):
+def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=None, ranking_logger=None, total_assignments=0, iteration=0):
     assignments = 0
     while env.pending_tasks and assignments < max_assignments:
         task = env.pending_tasks[0]
         robot_mask = np.ones(env.num_robots, dtype=bool)
+
+        heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+
+        state_dict = env._get_state_dict()
+        robot_logits = None
+        action_entropy = None
         if ppo is not None:
-            state_dict = env._get_state_dict()
-            action = ppo.select_action_greedy(state_dict, robot_mask)
+            action, robot_logits, action_entropy = ppo.select_action_greedy(state_dict, robot_mask)
+            task.source = "policy"
         else:
-            action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
-        success = env.assign_task_to_robot(action, task)
-        if not success:
+            action = heuristic_action
+            task.source = "heuristic"
+
+        legs = env.assign_task_to_robot(action, task)
+        if not legs:
             break
+
         assignments += 1
 
-        # Apply capacity overflow rules immediately after insertion so a full robot
-        # does not accumulate pickup legs in the main queue.
+        if ranking_logger is not None:
+            ranking_logger.log_snapshot(task, env.pending_tasks, env.current_time, iteration)
+        if decision_logger is not None:
+            decision_logger.log(
+                task, action, heuristic_action, env, env.current_time,
+                queue_features=state_dict.get('queue_features'),
+                robot_logits=robot_logits,
+                action_entropy=action_entropy,
+            )
+
+        if task_logger is not None:
+            for leg in legs:
+                task_logger.log_assignment(
+                    leg, action, 0.0,
+                    iteration, env.current_time,
+                    total_assignments + assignments, assignments,
+                )
+
         if 0 <= action < len(env.robots):
             robot = env.robots[action]
             robot.enforce_capacity_limits()
