@@ -2,7 +2,7 @@
 
 [Company description: to be written.]
 
-This repository holds the task-allocation software for CareRobotics robots. This branch, `pilot_trial`, is configured for the Independent Learning Centre (Sixth Form) pilot. The `main` branch is configured for hospital environments.
+This repository holds the task-allocation and fleet orchestration software/model code for CareRobotics robots. This branch, `pilot_trial`, is configured for the inaugural pilot, aiming to replicate the replenishment logistics in a hospital in a school environment. The `main` branch is configured for tests in hospital environments, the end goal being a fully functional multi-robot system that can revolutionise patient care in hospitals, by saving clinical staff time previously attributed to laborious manual replenishment and other logistics tasks.
 
 ## Overview
 
@@ -66,6 +66,7 @@ src/deployment/              ROS bridge backend, WebSocket client, twin publishe
 src/reliability/             Sim-to-real effects (telemetry noise)
 src/analytics/               Realtime analytics and metrics
 src/utils/                   Logging and helpers
+shell/                       Cluster (Slurm) job scripts
 ```
 
 ## Configuration
@@ -96,7 +97,16 @@ Deployment runs write to `outputs/`, which is git-ignored.
 
 ## Cluster training
 
-`train_gpu.sh` is a Slurm job for a GPU cluster. Set the project path, output path and Python environment for your cluster before submitting it.
+The Slurm job is `shell/train.sh`. Submit it from the repository root:
+
+```bash
+sbatch shell/train.sh
+CONFIG=configs/ilc_pilot_v1_care_robotics.json ITERATIONS=20000 sbatch shell/train.sh
+```
+
+Settings are environment variables: `CONFIG`, `ITERATIONS`, `SEED`, `OUTPUT_DIR`, `SAVE_INTERVAL`, `LOG_INTERVAL`. Set `MODULES` (environment modules to load) and `VENV_DIR` (a virtualenv to activate) if your cluster needs them. See `shell/env.sh`.
+
+`.github/workflows/deploy.yml` syncs the repository to the cluster on pushes to `main`. Its hosts, username and remote path come from GitHub variables and secrets, listed at the top of the file.
 
 ## Known limitations
 
