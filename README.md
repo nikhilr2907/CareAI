@@ -21,7 +21,7 @@ A multi-agent PPO policy (GAPO) assigns restocking and pickup tasks to robots ov
 | Simulation training (`run_training.py`) | Working |
 | Headless deployment (`run_deployment.py`) | Working with a trained checkpoint |
 | Real-robot scripts | Not on this branch. The ROS bridge client is included but not yet wired into a runner. |
-| Reliability layer | Phase 1 telemetry noise is included but not enabled in the scripts |
+| Reliability layer | Phase 1 telemetry noise is enabled in the environment. Phases 2 and 3 are not implemented. |
 
 ## Setup
 

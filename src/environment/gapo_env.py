@@ -20,6 +20,7 @@ from .tasks.task_generator import (
     update_inventory_levels
 )
 from .graph_helpers import dijkstra_shortest_path
+from ..reliability.telemetry_effects import TelemetryEffectsManager
 
 
 class GAPOTaskAssignmentEnv:#(gym.Env):
@@ -72,6 +73,11 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self.pending_tasks = []  # Tasks waiting for assignment
         self.completed_tasks = []  # Tasks that have been completed
 
+        # Telemetry noise injection (sim-to-real realism, see src/reliability/)
+        self.telemetry_noise_manager = TelemetryEffectsManager(enable=True, graph_bounds=None)
+        self.robot_reset_times = []  # Simulation time at which each robot was initialised
+        self.graph_bounds = None  # Set in reset() from node positions
+
         # Time tracking
         self.current_time = 0.0
         self.last_inventory_check = 0.0
@@ -98,6 +104,19 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             # Create new graph from hospital_config or default
             self.graph_state = GraphState(config=self.hospital_config)
 
+        # Bounds for telemetry position validation, padded beyond the node positions
+        if self.graph_state and self.graph_state.nodes:
+            x_coords = [node.x for node in self.graph_state.nodes]
+            y_coords = [node.y for node in self.graph_state.nodes]
+            padding = 5.0
+            self.graph_bounds = (
+                min(x_coords) - padding,
+                max(x_coords) + padding,
+                min(y_coords) - padding,
+                max(y_coords) + padding
+            )
+            self.telemetry_noise_manager.graph_bounds = self.graph_bounds
+
         # Initialize robots
         self.robots = []
         self.robot_simulators = []
@@ -120,6 +139,7 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
         self.next_task_id = 0
         self.current_time = 0.0
         self.last_inventory_check = 0.0
+        self.robot_reset_times = [self.current_time] * self.num_robots
 
         # Generate initial inventory tasks
         new_tasks, self.next_task_id = generate_inventory_tasks(
@@ -355,6 +375,15 @@ class GAPOTaskAssignmentEnv:#(gym.Env):
             # Update simulator (moves robot)
             telemetry = simulator.update(Δt)
             telemetry.timestamp = self.current_time
+
+            # Apply realistic telemetry noise and validation before the robot state sees it
+            elapsed_minutes = (self.current_time - self.robot_reset_times[simulator.robot_id]) / 60.0
+            telemetry = self.telemetry_noise_manager.apply_noise(
+                telemetry,
+                elapsed_minutes,
+                num_nodes=len(self.graph_state.nodes) if self.graph_state else 0,
+                num_edges=len(self.graph_state.edges) if self.graph_state else 0,
+            )
 
             # Update robot telemetry
             robot.update_telemetry(telemetry)
