@@ -14,6 +14,35 @@ This repository holds the task-allocation software for CareRobotics robots. This
 
 A multi-agent PPO policy (GAPO) assigns restocking and pickup tasks to robots over a graph of storage, recovery and corridor nodes. The environment is simulated from a hospital configuration. No training data is required, because tasks and consumption are generated from the config.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    CFG[Hospital config JSON<br/>nodes, edges, SKUs] --> GS[GraphState<br/>nodes and edges]
+    GS --> ENV[GAPOTaskAssignmentEnv<br/>simulation]
+    TG[Task generator<br/>inventory and ad hoc tasks] --> ENV
+    ENV --> SIM[RobotSimulator<br/>one per robot]
+    SIM --> NOISE[Telemetry noise<br/>src/reliability]
+    NOISE --> ENV
+    ENV --> POL[GAPOPolicyNetwork<br/>hospital graph encoder, attention]
+    POL --> PPO[GAPOPPO<br/>PPO update]
+    PPO -->|assignments| ENV
+    ENV -->|rewards| PPO
+    PPO --> OUT[Checkpoints, logs, analytics]
+    ENV -.->|deployment| BR[MockRobotBridge<br/>simulated bridge]
+```
+
+## Environments
+
+| | Hospital (`main`) | ILC pilot (`pilot_trial`) |
+| --- | --- | --- |
+| Config | `configs/hospital_3nodes_consumables.json` | `configs/ilc_pilot_v1_care_robotics.json` |
+| Nodes | 3: 1 storage, 2 recovery | 3: 1 storage, 2 shelves |
+| Demand | Consumption patterns per SKU | School-day periods with per-SKU demand profiles |
+| Graph encoder | `HospitalGraphEncoder` | `ILCGraphEncoder` with school-period embedding |
+| Path costs | No learned edge-cost model | Learned edge-cost model (`EdgeCostManager`) |
+| Robots | Simulated, via `MockRobotBridge` | Simulated, or live through the ROS 2 bridge |
+
 ## Status
 
 | Area | State |
@@ -107,4 +136,6 @@ Settings are environment variables, for example `CONFIG=... ITERATIONS=... sbatc
 
 ## Contact
 
-[Contact details: to be written.]
+For hospitals, investors and engineers, use the "Get in touch" form on [thecarerobotics.com](https://www.thecarerobotics.com/).
+
+For questions about this code, email [nikhil.raghavan25@imperial.ac.uk](mailto:nikhil.raghavan25@imperial.ac.uk).
