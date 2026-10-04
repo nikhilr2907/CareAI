@@ -11,3 +11,8 @@ checkpoints/
 outputs/**
 utilities/**
 .env
+# Local virtualenv
+.venv/
+
+# Keep the project README tracked despite the *.md rule above
+!README.md
