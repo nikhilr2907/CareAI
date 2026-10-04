@@ -1,8 +1,12 @@
 import numpy as np
 from typing import List, Optional, Set, Tuple, Dict
 from .task_state import Task, TaskQueue
+from ..graph_helpers import dijkstra_shortest_path
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+# Minimum time allowed between creating a replenishment task and its deadline
+DEFAULT_MIN_REPLENISHMENT_DEADLINE_S = 300.0
 
 
 def _parse_time_hhmm(t: str) -> float:
@@ -144,7 +148,7 @@ def generate_inventory_tasks(
                 rate = _compute_sku_rate(dest_node, sku_id, graph_state, current_time)
                 tts_hours = (stock / rate) if rate > 0 else float('inf')
                 tts_seconds = tts_hours * 3600
-                deadline = current_time + max(tts_seconds, 60)
+                deadline = current_time + max(tts_seconds, DEFAULT_MIN_REPLENISHMENT_DEADLINE_S)
 
                 if par_level > 0:
                     target = par_level
@@ -153,20 +157,19 @@ def generate_inventory_tasks(
                 delivery_amount = min(max_level - stock, max(target - stock, 1.0))
                 num_items = max(1, int(delivery_amount))
 
-                urgency = 5 if tts_hours < 0.5 else 4 if tts_hours < 1.0 else 3 if tts_hours < 2.0 else 2
-                estimated_duration = 120.0
+                _, estimated_duration = dijkstra_shortest_path(
+                    central_storage_idx, dest_idx, graph_state, len(graph_state.nodes)
+                )
 
                 task = Task(
                     task_id=task_id,
                     from_location_index=central_storage_idx,
                     to_location_index=dest_idx,
-                    manual_priority=urgency,
                     deadline=deadline,
                     arrival_time=current_time,
                     estimated_duration=estimated_duration,
                     task_type='replenishment',
                     num_items=num_items,
-                    source_stock_level=dest_node.stock_level,
                     time_to_stockout=tts_hours,
                     sku_id=sku_id,
                     category_key=sku_data.get("category"),
@@ -193,21 +196,22 @@ def generate_inventory_tasks(
                     target_stock
                 )
                 num_items = max(1, int(delivery_amount))
-                urgency = dest_node.urgency_level
                 tts_seconds = dest_node.time_to_stockout * 3600
-                deadline = current_time + max(tts_seconds, 60)
-                estimated_duration = 120.0
+                deadline = current_time + max(tts_seconds, DEFAULT_MIN_REPLENISHMENT_DEADLINE_S)
+                _, estimated_duration = dijkstra_shortest_path(
+                    central_storage_idx, dest_idx, graph_state, len(graph_state.nodes)
+                )
                 task = Task(
                     task_id=task_id,
                     from_location_index=central_storage_idx,
                     to_location_index=dest_idx,
-                    manual_priority=urgency,
                     deadline=deadline,
                     arrival_time=current_time,
                     estimated_duration=estimated_duration,
                     task_type='replenishment',
                     num_items=num_items,
-                    source_stock_level=dest_node.stock_level,
+                    sku_stock_level=dest_node.stock_level,
+                    sku_max_level=dest_node.max_stock,
                     time_to_stockout=dest_node.time_to_stockout
                 )
                 new_tasks.append(task)
@@ -255,15 +259,12 @@ def generate_random_ad_hoc_tasks(
             p=[0.7, 0.25, 0.05]
         )
 
-        # Priority based on type
+        # Deadline window based on type
         if task_type == 'emergency':
-            priority = 5
             deadline_offset = np.random.uniform(60, 300)  # 1-5 minutes
         elif task_type == 'ad_hoc':
-            priority = np.random.randint(2, 4)
             deadline_offset = np.random.uniform(600, 1800)  # 10-30 minutes
         else:  # returns
-            priority = np.random.randint(1, 3)
             deadline_offset = np.random.uniform(1800, 3600)  # 30-60 minutes
 
         # Random number of items
@@ -273,7 +274,6 @@ def generate_random_ad_hoc_tasks(
             task_id=task_id,
             from_location_index=from_idx,
             to_location_index=to_idx,
-            manual_priority=priority,
             deadline=current_time + deadline_offset,
             arrival_time=current_time,
             estimated_duration=np.random.uniform(60, 180),

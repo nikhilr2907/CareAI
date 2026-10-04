@@ -40,6 +40,9 @@ def dijkstra_shortest_path(
     if start_node_idx == goal_node_idx:
         return [start_node_idx], 0.0
 
+    # Callers often rely on the default; never size the tables below the actual graph.
+    num_nodes = max(num_nodes, len(graph_state.nodes))
+
     # Precompute learned edge costs if model is available
     learned_costs = None
     if edge_cost_manager is not None:

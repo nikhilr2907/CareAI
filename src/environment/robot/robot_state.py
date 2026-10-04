@@ -33,12 +33,12 @@ class RobotState:
 
     @property
     def num_queued_tasks(self) -> int:
-        """Get number of original (parent) tasks queued, not counting pickup+dropoff legs separately."""
-        seen = set()
-        for task in self.task_queue:
-            pid = task.parent_task_id if task.leg_type in ("pickup", "dropoff") else task.task_id
-            seen.add(pid)
-        return len(seen)
+        """Get number of distinct tasks queued, not counting pickup+dropoff legs separately.
+
+        Pickup and dropoff legs of the same parent share task_id since the leg-ID
+        collapse, so a set of task_ids gives the unique-task count directly.
+        """
+        return len({task.task_id for task in self.task_queue})
 
     @property
     def current_task(self) -> Optional['Task']:
@@ -107,16 +107,19 @@ class RobotState:
         return False
 
     def _task_sort_key(self, t: 'Task') -> tuple:
-        """Sort key for queue ordering.
+        """
+        Sort key for queue ordering.
 
-        Primary: dropoff whose pickup has not yet completed sorts below everything else
-        (correctness constraint, not preference — prevents orphaned dropoffs running early).
+        Primary: per-task pickup-pending constraint — a dropoff whose pickup has
+        not yet completed sorts below everything else (correctness, not preference).
         Secondary: learned_score descending — network signal.
-        Tertiary: arrival_time ascending — FIFO tiebreaker, stable during early training.
+        Tertiary: arrival_time ascending — FIFO tiebreaker, stable during early
+        training when learned_scores are all 0.0. Requires no consumption
+        assumptions and uses only observable task metadata.
         """
         pickup_pending = (
             1 if getattr(t, "leg_type", None) == "dropoff"
-            and t.parent_task_id not in self.picked_up_task_ids
+            and t.task_id not in self.picked_up_task_ids
             else 0
         )
         return (pickup_pending, -t.learned_score, t.arrival_time)
@@ -190,16 +193,14 @@ class RobotState:
         for task in self.task_queue:
             if getattr(task, "leg_type", "full") == "pickup":
                 pickup_count += task.num_items
-                if task.parent_task_id is not None:
-                    pickup_ready_parents.add(task.parent_task_id)
+                pickup_ready_parents.add(task.task_id)
 
         for task in self.overflow_queue:
             if getattr(task, "leg_type", "full") == "pickup":
                 if pickup_count + task.num_items <= available_slots:
                     promoted.append(task)
                     pickup_count += task.num_items  # count items, not tasks
-                    if task.parent_task_id is not None:
-                        pickup_ready_parents.add(task.parent_task_id)
+                    pickup_ready_parents.add(task.task_id)
                 else:
                     deferred.append(task)
             else:
