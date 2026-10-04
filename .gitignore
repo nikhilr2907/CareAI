@@ -13,3 +13,6 @@ checkpoints/
 
 # Keep the project README tracked despite the *.md rule above
 !README.md
+outputs/**
+utilities/**
+.env
