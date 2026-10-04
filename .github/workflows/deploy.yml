@@ -1,12 +1,25 @@
-name: Deploy to IC GPU cluster
+name: Deploy to GPU cluster
 
 on:
   push:
     branches: [ "main" ]
 
+# Required repository configuration (Settings → Secrets and variables → Actions):
+#   secrets.SSH_KEY            private key with access to the cluster
+#   vars.CLUSTER_JUMP_HOST     login/jump host, e.g. login.example.ac.uk
+#   vars.CLUSTER_GPU_HOST      GPU node reached through the jump host
+#   vars.CLUSTER_USER          username on the cluster
+#   vars.CLUSTER_REMOTE_DIR    absolute path on the cluster to sync into
+#   vars.RUN_SBATCH            set to "true" to also submit shell/train.sh
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      JUMP_HOST: ${{ vars.CLUSTER_JUMP_HOST }}
+      GPU_HOST: ${{ vars.CLUSTER_GPU_HOST }}
+      CLUSTER_USER: ${{ vars.CLUSTER_USER }}
+      REMOTE_DIR: ${{ vars.CLUSTER_REMOTE_DIR }}
 
     steps:
       - name: Checkout
@@ -21,34 +34,34 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          cat > ~/.ssh/config << 'EOF'
-          Host ic-shell
-              HostName shell1.doc.ic.ac.uk
-              User nr125
+          cat > ~/.ssh/config << EOF
+          Host cluster-jump
+              HostName $JUMP_HOST
+              User $CLUSTER_USER
               ForwardAgent yes
 
-          Host ic-gpu3
-              HostName gpucluster3.doc.ic.ac.uk
-              User nr125
-              ProxyJump ic-shell
+          Host cluster-gpu
+              HostName $GPU_HOST
+              User $CLUSTER_USER
+              ProxyJump cluster-jump
               ForwardAgent yes
           EOF
           chmod 600 ~/.ssh/config
 
       - name: Add host keys
         run: |
-          ssh-keyscan -H shell1.doc.ic.ac.uk gpucluster3.doc.ic.ac.uk >> ~/.ssh/known_hosts
+          ssh-keyscan -H "$JUMP_HOST" "$GPU_HOST" >> ~/.ssh/known_hosts
 
-      - name: Sync repo to server
+      - name: Sync repo to cluster
         run: |
           rsync -az --delete \
             --exclude ".git/" \
             --exclude ".github/" \
             -e "ssh -F ~/.ssh/config" \
-            ./ ic-gpu3:/vol/bitbucket/nr125/project_code
+            ./ "cluster-gpu:$REMOTE_DIR/"
 
       - name: Submit training job (optional)
-        if: ${{ secrets.RUN_SBATCH == 'true' }}
+        if: ${{ vars.RUN_SBATCH == 'true' }}
         run: |
-          ssh -F ~/.ssh/config ic-shell \
-            "cd /vol/bitbucket/nr125/project_code && sbatch train_gpu.sh"
+          ssh -F ~/.ssh/config cluster-jump \
+            "cd \"$REMOTE_DIR\" && sbatch shell/train.sh"
