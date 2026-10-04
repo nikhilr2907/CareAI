@@ -1,25 +1,28 @@
-# CareRobotics: ILC Pilot (`pilot_trial`)
+# CareRobotics
 
-Multi-agent PPO task allocation for a single restocking robot at the **Independent Learning Centre (Sixth Form)**, pilot window **June 6–19 2026**. The policy assigns restocking and pickup tasks to robots over a small graph of storage, shelf and corridor nodes, using a school-day demand schedule.
+[Company description: to be written.]
 
-This branch carries the ILC layout. The layout-agnostic code is shared with `main`, which runs the hospital environment.
+This repository holds the task-allocation software for CareRobotics robots. This branch, `pilot_trial`, is configured for the Independent Learning Centre (Sixth Form) pilot. The `main` branch is configured for hospital environments.
+
+## Overview
+
+A multi-agent PPO policy (GAPO) assigns restocking and pickup tasks to robots over a graph of storage, shelf and corridor nodes. Demand follows a school-day schedule. The code runs in simulation and can drive a live robot through a ROS 2 bridge.
 
 ## Status
 
 | Area | State |
 | --- | --- |
-| Simulation training (`run_training.py`) | Works. Verified with a 2-iteration smoke run. |
-| Simulation deployment (`run_deployment.py`) | Works headless, with or without a trained checkpoint. |
-| Real-robot training and deployment (`run_training_real.py`, `run_real_deployment.py`) | Imports and CLI verified. **Not run against hardware.** Needs the ROS 2 bridge. |
-| Digital twin (`--twin` flag) | Code present. Not verified in a browser. |
-| Reliability layer | Phase 1 only: telemetry noise (`src/reliability/telemetry_effects.py`), enabled in `gapo_env.py`. Stale-state handling, movement failures, network effects and battery-model phases are **not implemented**. |
-| Tests | Removed from this branch by request. |
+| Simulation training (`run_training.py`) | Working |
+| Simulation deployment (`run_deployment.py`) | Working, headless or with the pygame view |
+| Real-robot training and deployment (`run_training_real.py`, `run_real_deployment.py`) | Not yet run against hardware. Requires the ROS 2 bridge. |
+| Digital twin (`--twin`) | Implemented, not yet checked in a browser |
+| Reliability layer | Phase 1 only (telemetry noise, `src/reliability/`) |
 
-**No training data is needed.** Simulation generates its own tasks and consumption from the config. Real-robot runs take live telemetry and inventory from the ROS bridge, not from files.
+Simulation generates its own tasks and consumption from the config, so no training data is required.
 
-## Quick start
+## Setup
 
-Python 3.13 was used for verification. `requirements.txt` pins PyTorch 2.9.0 and torch-geometric 2.7.0.
+Requires Python 3.13. Dependencies are pinned in `requirements.txt`.
 
 ```bash
 python -m venv .venv
@@ -27,14 +30,16 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-**Train in simulation** (defaults to `configs/ilc_pilot_v1_care_robotics.json`):
+## Usage
+
+Train in simulation:
 
 ```bash
 python run_training.py --config configs/ilc_pilot_v1_care_robotics.json \
     --iterations 10000 --device auto --seed 42 --output-dir outputs --exp-name pilot_sim
 ```
 
-**Run the trained policy headless in simulation:**
+Run a trained policy headless in simulation:
 
 ```bash
 python run_deployment.py --config configs/ilc_pilot_v1_care_robotics.json \
@@ -42,77 +47,63 @@ python run_deployment.py --config configs/ilc_pilot_v1_care_robotics.json \
     --headless --max-runtime 3600
 ```
 
-Drop `--headless` to get the pygame view. Add `--twin` to publish state to the digital twin (WebSocket on 8766, browser page on 8767).
+Drop `--headless` for the pygame view. Add `--twin` to publish state to the digital twin (WebSocket on port 8766, browser page on 8767).
+
+Run `python run_training.py --help` for the full list of training flags.
 
 ## Repository layout
 
 ```text
-run_training.py              Simulation PPO training (curriculum, eval, checkpoints)
+run_training.py              Simulation PPO training
 run_deployment.py            Simulation inference, optional pygame view and twin
-run_training_real.py         Training against a live robot via the ROS 2 bridge (1 Hz pacing)
-run_real_deployment.py       Greedy inference against a live robot
-configs/                     Layout and demand configs (ILC pilot + earlier hospital variants)
-digital_twin/                Browser twin (index.html, graph.json)
-src/environment/             Graph, robots, tasks, Gym-style env (gapo_env.py, gapo_env_real.py)
-src/multi_agent_ppo/         Policy, GNN encoders, attention, PPO, debiasing, learned edge cost
-src/deployment/              ROS bridge backend, WebSocket client, state sync, twin publisher
-src/reliability/             Sim-to-real effects (Phase 1 telemetry noise)
-src/analytics/               Realtime analytics collector and metrics
-src/utils/                   Logging (tasks, decisions, ranking, robot samples, fleet events),
-                             training and deployment helpers
+run_training_real.py         Training against a live robot via the ROS 2 bridge
+run_real_deployment.py       Inference against a live robot
+configs/                     Pilot layout and demand configuration
+digital_twin/                Browser digital twin
+src/environment/             Graph, robots, tasks and the environment
+src/multi_agent_ppo/         Policy, encoders, attention, PPO, learned edge cost
+src/deployment/              ROS bridge backend, WebSocket client, twin publisher
+src/reliability/             Sim-to-real effects (telemetry noise)
+src/analytics/               Realtime analytics and metrics
+src/utils/                   Logging and helpers
 ```
 
 ## Configuration
 
-This branch loads only ILC pilot configs (`metadata.environment_type: ilc_open_space`). The loader rejects anything else.
+This branch loads only pilot configs (`metadata.environment_type: ilc_open_space`). Hospital configs are in `configs/` but are rejected here. Use `main` for hospital runs.
 
-| File | Purpose |
-| --- | --- |
-| `ilc_pilot_v1_care_robotics.json` | The pilot config: 1 robot, capacity 2, 3 nodes, 4 SKUs, 8.5-hour school day |
-
-The hospital configs (`hospital_3nodes_consumables.json`, `revised_hospital_config_v3*.json`) are still in `configs/` but this branch rejects them. Use `main` for hospital runs.
-
-The school day is in `school_schedule` (periods, `operating_days`, per-SKU `school_period_profile`). Demand is scaled by each node's `foot_traffic_weight`.
-
-Key training flags: `--iterations`, `--rollout-steps`, `--lr`, `--hidden-dim`, `--curriculum {none,fixed,adaptive,random}` with `--configs-dir` or `--config-list`, `--max-assignments-per-step`, `--seed`, `--output-dir`, `--exp-name`. Run `python run_training.py --help` for the full list.
+The school day is defined in `school_schedule` (periods, operating days, and per-SKU demand profiles). Demand scales with each node's `foot_traffic_weight`.
 
 ## Real-robot operation
 
-The robot is reached over a WebSocket ROS 2 bridge. Set the URL in a `.env` file, or pass `--bridge-url`:
+Live robots are reached over a WebSocket ROS 2 bridge. Set the URL in `.env` or pass `--bridge-url`:
 
-```
+```text
 ROS_BRIDGE_URL=ws://<robot-host>:8765
 ```
 
-The code default is `ws://localhost:8765`. Note that the `ROSBridgeRobotBackend` docstring still says 9090. The code is authoritative.
-
-```bash
-python run_training_real.py --config configs/ilc_pilot_v1_care_robotics.json \
-    --bridge-url ws://<robot-host>:8765
-python run_real_deployment.py --config configs/ilc_pilot_v1_care_robotics.json \
-    --use-trained --checkpoint outputs/<exp>/checkpoints/gapo_real_final.pth \
-    --bridge-url ws://<robot-host>:8765 --seed 42
-```
-
-The ROS 2 side of the bridge is not in this repository. Before a real run, check the bridge's message schema against `src/deployment/robot_bridge_websocket_client.py` and `robot_backend.py`. The bridge has not been exercised with hardware.
+[ROS bridge integration: to be written.]
 
 ## Outputs
 
-Each run writes under `--output-dir/<exp-name>/`:
+Each run writes to `--output-dir/<exp-name>/`:
 
-- `checkpoints/` (`gapo_iter<N>.pth`, `gapo_final.pth`, `training_metrics.npz`)
-- `logs/` (task, decision, ranking and robot-sample logs)
-- `analytics/` and `metrics_final/` (plots and metric JSON)
+- `checkpoints/`: model checkpoints and training metrics
+- `logs/`: task, decision, ranking and robot-sample logs
+- `analytics/` and `metrics_final/`: plots and metric files
 
-Deployment runs write to `outputs/deploy_<config>_<timestamp>/`. The `outputs/` folder is git-ignored.
+Deployment runs write to `outputs/`, which is git-ignored.
 
 ## Cluster training
 
-`train_gpu.sh` is a Slurm job for the Imperial College GPU cluster. It runs `run_training.py` on the hospital config and expects a Python venv at a path specific to that cluster. Adjust `PROJECT_DIR`, `OUTPUT_DIR` and the `source` line before submitting. `.github/workflows/deploy.yml` rsyncs the repo to the cluster on pushes to `main`. This branch is not deployed by that workflow.
+`train_gpu.sh` is a Slurm job for a GPU cluster. Set the project path, output path and Python environment for your cluster before submitting it.
 
-## Known gaps
+## Known limitations
 
-- Real-robot scripts are untested against hardware and need the ROS 2 bridge.
-- Reliability effects beyond telemetry noise (Phases 2–3) are not implemented, so simulation is cleaner than the real robot will be.
-- The PPO core (`gapo_ppo.py`, `gapo_gnn_encoders.py`) is built around the school-period features. It does not run on the hospital config from `main`.
-- Edge-cost learning (`learned_edge_cost.py`) trains on linear-congestion simulator records. Real traversal times will be multimodal, so expect mispredictions until it is retrained on real records.
+- Real-robot operation has not been tested with hardware.
+- Only telemetry noise from the reliability layer is implemented.
+- The PPO core depends on school-period features and does not run on the hospital config on `main`.
+
+## Contact
+
+[Contact details: to be written.]
