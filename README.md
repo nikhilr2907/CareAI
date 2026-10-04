@@ -61,9 +61,7 @@ src/deployment/              Mock bridge, task source, ROS bridge client
 src/reliability/             Sim-to-real effects (telemetry noise)
 src/analytics/               Realtime analytics and metrics
 src/utils/                   Logging and helpers
-train_gpu.sh                 Slurm job for one training run
-train_gpu_long.sh            Longer Slurm run
-train_gpu_sweep.sh           Hyperparameter sweep Slurm job
+shell/                       Cluster (Slurm) job scripts
 ```
 
 ## Configuration
@@ -84,9 +82,17 @@ The `outputs/` folder is git-ignored.
 
 ## Cluster training
 
-The `train_gpu*.sh` scripts are Slurm jobs for a GPU cluster. Set the project path, output path and Python environment for your cluster before submitting.
+The Slurm jobs are in `shell/`. Submit them from the repository root:
 
-`.github/workflows/deploy.yml` syncs this branch to the cluster on every push to `main`.
+```bash
+sbatch shell/train.sh          # one training run
+sbatch shell/train_long.sh     # longer run with a larger iteration budget
+sbatch shell/sweep.sh          # learning-rate and hidden-dim sweep (9 array jobs)
+```
+
+Settings are environment variables, for example `CONFIG=... ITERATIONS=... sbatch shell/train.sh`. Set `MODULES` (environment modules to load) and `VENV_DIR` (a virtualenv to activate) if your cluster needs them. See `shell/env.sh`.
+
+`.github/workflows/deploy.yml` syncs this branch to the cluster on pushes to `main`. Its hosts, username and remote path come from GitHub variables and secrets, listed at the top of the file.
 
 ## Known limitations
 

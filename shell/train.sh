@@ -15,7 +15,7 @@
 #   sbatch --partition=<name> shell/train.sh
 
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
-CONFIG="${CONFIG:-configs/ilc_pilot_v1_care_robotics.json}"
+CONFIG="${CONFIG:-configs/hospital_3nodes_consumables.json}"
 ITERATIONS="${ITERATIONS:-10000}"
 SEED="${SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/gapo_outputs}"
