@@ -85,6 +85,10 @@ class RobotBridgeWebSocketClient:
         self.on_system_state: Optional[Callable] = None
         self.on_connection_lost: Optional[Callable] = None
         self.on_emergency_stop: Optional[Callable] = None
+<<<<<<< HEAD
+=======
+
+>>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         logger.info(f"ROS Bridge Client initialized (not connected) - bridge URL: {bridge_url}")
 
     async def connect(self):
@@ -145,12 +149,20 @@ class RobotBridgeWebSocketClient:
             await self._handle_task_status(data)
         elif msg_type == 'location_inventory':
             await self._handle_location_inventory(data)
+<<<<<<< HEAD
+=======
+        elif msg_type == 'consumption_rates':
+            logger.debug("Ignoring deprecated message type: consumption_rates")
+>>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         elif msg_type == 'system_state':
             await self._handle_system_state(data)
         elif msg_type == 'emergency_stop':
             await self._handle_emergency_stop(data)
+<<<<<<< HEAD
         elif msg_type in ('task_response', 'connected', 'heartbeat'):
             logger.debug(f"Bridge message: {msg_type} status={data.get('status')}")
+=======
+>>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
         else:
             logger.warning(f"Unknown message type: {msg_type}")
 
@@ -247,12 +259,15 @@ class RobotBridgeWebSocketClient:
                     category_inventory=loc.get('category_inventory', {})
                 )
 
+<<<<<<< HEAD
             # Mirror to the standalone-message cache so get_all_inventories()
             # sees these even when the bridge buffers inventory into system_state
             # (i.e. buffer_inventory_updates=true; in that mode no standalone
             # location_inventory messages ever arrive).
             self.location_inventories = inventories.copy()
 
+=======
+>>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
             # Update system state
             self.system_state = SystemState(
                 timestamp=data.get('timestamp', 0.0),

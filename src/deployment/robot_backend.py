@@ -1,6 +1,5 @@
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
-from datetime import datetime
 from abc import ABC, abstractmethod
 from collections import deque
 import logging
@@ -8,24 +7,6 @@ import asyncio
 import math
 import os
 import signal
-
-
-def _to_epoch_seconds(ts) -> float:
-    """Coerce a timestamp into Unix-epoch seconds.
-
-    Accepts: float / int (already epoch), ISO-8601 string (e.g. from the
-    WebSocket bridge), None / empty. Falls back to 0.0 on parse failure.
-    """
-    if ts is None or ts == "":
-        return 0.0
-    if isinstance(ts, (int, float)):
-        return float(ts)
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.rstrip("Z")).timestamp()
-        except ValueError:
-            return 0.0
-    return 0.0
 
 
 @dataclass
@@ -215,9 +196,6 @@ class ROSBridgeRobotBackend(RobotBackend):
 
         # Per-robot completion queue — drained each step by gapo_env_real
         self._completed_task_queue: Dict[int, Any] = {i: deque() for i in range(num_robots)}
-        # Per-robot failure queue — failed/canceled navigation goals, drained each
-        # step by gapo_env_real so the env can recover instead of freezing.
-        self._failed_task_queue: Dict[int, Any] = {i: deque() for i in range(num_robots)}
 
         # Emergency stop state — set True when an active emergency_stop is received.
         # The deployment loop can also poll this flag before sending new commands.
@@ -323,12 +301,9 @@ class ROSBridgeRobotBackend(RobotBackend):
                 else:
                     self.on_task_completed(robot_id, task_id)
 
-        elif status in ("failed", "canceled"):
+        elif status == "failed":
             error = data.get("error")
-            self._logger.error(f"Robot {robot_id}: task {task_id} {status}: {error}")
-            # Buffer for gapo_env_real to drain synchronously each step (recovery).
-            if task_id is not None:
-                self._failed_task_queue[robot_id].append(task_id)
+            self._logger.error(f"Robot {robot_id}: task {task_id} failed: {error}")
             if self.on_task_failed:
                 if asyncio.iscoroutinefunction(self.on_task_failed):
                     await self.on_task_failed(robot_id, task_id, error)
@@ -404,8 +379,8 @@ class ROSBridgeRobotBackend(RobotBackend):
         Command a robot to follow a path (list of node indices).
 
         Schedules the WebSocket task send asynchronously. This method is synchronous
-        to match the RobotBackend interface, but internally uses asyncio.ensure_future()
-        if an event loop is running, or asyncio.run_until_complete() otherwise.
+        to match the RobotBackend interface, but fires the coroutine into the running
+        event loop via create_task(), or falls back to asyncio.run() for sync callers.
 
         Args:
             robot_id: Robot identifier
@@ -500,24 +475,6 @@ class ROSBridgeRobotBackend(RobotBackend):
         q.clear()
         return result
 
-    def pop_failed_tasks(self, robot_id: int) -> List[int]:
-        """
-        Drain and return all task IDs that failed/canceled since the last call.
-
-        Called once per step by gapo_env_real._check_task_completions() so a
-        failed navigation goal triggers recovery instead of silently wedging the
-        robot. Same drain-on-read semantics as pop_completed_tasks().
-
-        Returns:
-            List of failed task IDs (empty if none since last call)
-        """
-        q = self._failed_task_queue.get(robot_id)
-        if not q:
-            return []
-        result = list(q)
-        q.clear()
-        return result
-
     def _convert_telemetry(
         self, robot_id: int, raw: Any
     ) -> RobotTelemetryData:
@@ -556,7 +513,7 @@ class ROSBridgeRobotBackend(RobotBackend):
 
         return RobotTelemetryData(
             robot_id=robot_id,
-            timestamp=_to_epoch_seconds(raw.timestamp),
+            timestamp=float(raw.timestamp or 0.0),
             x=float(pos[0]),
             y=float(pos[1]),
             heading=heading,

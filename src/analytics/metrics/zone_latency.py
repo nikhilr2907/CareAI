@@ -1,50 +1,33 @@
-"""Zone latency: full latency distribution by destination zone and origin→destination route."""
+"""Zone latency metric: average/p95/p99/std latency per spatial quadrant."""
 
-import numpy as np
 from collections import defaultdict
-from .helpers import MetricHelpers
+from .base import BaseMetric
 
 
-class ZoneLatencyMetric:
+class ZoneLatencyMetric(BaseMetric):
     """
-    Latency statistics grouped by spatial quadrant (NW/NE/SW/SE).
+    Compute latency statistics grouped by destination quadrant.
 
-    Two views of the same underlying data:
-      compute_by_zone()  — group by destination quadrant
-      compute_by_route() — group by origin→destination quadrant pair
+    Reveals which areas of the hospital are slow.
     """
-
-    def __init__(self, task_logger, nodes, helpers: MetricHelpers):
-        self.task_logger = task_logger
-        self.nodes = nodes
-        self.helpers = helpers
 
     def compute(self) -> dict:
-        """Return both zone and route views."""
-        return {
-            'by_zone': self.compute_by_zone(),
-            'by_route': self.compute_by_route(),
-        }
-
-    # ------------------------------------------------------------------
-
-    def compute_by_zone(self) -> dict:
         """
-        Latency stats per destination quadrant, plus efficiency comparison.
+        Compute latency stats per quadrant.
 
         Returns:
             {
-                'SW': {
-                    'mean', 'p50', 'p95', 'p99', 'std', 'min', 'max', 'count',
-                    'percent_loss', 'absolute_loss_s', 'is_baseline',
-                },
-                'SE': {...}, 'NW': {...}, 'NE': {...},
+                'SW': {'mean': float, 'p95': float, 'p99': float, 'std': float, 'count': int},
+                'SE': {...},
+                'NW': {...},
+                'NE': {...},
             }
         """
         if not self._validate():
             return {}
 
         quadrant_latencies = defaultdict(list)
+<<<<<<< HEAD
         for entry in self.task_logger.cost_data:
             to_idx = entry.get('to_location_idx')
             latency = entry.get('latency')
@@ -117,3 +100,22 @@ class ZoneLatencyMetric:
             'max': float(arr.max()),
             'count': len(values),
         }
+=======
+
+        # Group task latencies by destination quadrant
+        for entry in self.task_logger.cost_data:
+            to_idx = entry.get('to_location_idx')
+            latency = entry.get('latency')
+
+            if to_idx is not None and latency is not None:
+                quadrant = self._get_quadrant(to_idx)
+                quadrant_latencies[quadrant].append(latency)
+
+        # Compute stats per quadrant, label with cardinal directions
+        result = {}
+        for q in range(4):
+            latencies = quadrant_latencies.get(q, [])
+            result[self.helpers.quadrant_label(q)] = self._stats(latencies)
+
+        return result
+>>>>>>> 13a47e989d498840f5c626693253d1ea476d8d02
