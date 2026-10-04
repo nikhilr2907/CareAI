@@ -14,9 +14,9 @@ with the following differences:
   - No run_evaluation (no seeded reset on real hardware)
 
 Usage:
-    python run_training_real.py --config configs/hospital_3nodes_consumables.json
-    python run_training_real.py --config configs/... --bridge-url ws://192.168.1.50:8765
-    python run_training_real.py --config configs/... --checkpoint outputs/.../gapo_final.pth
+    python run_training_real.py --config configs/revised_hospital_config_v3.json
+    python run_training_real.py --config configs/revised_hospital_config_v3.json --bridge-url ws://192.168.1.50:8765
+    python run_training_real.py --config configs/revised_hospital_config_v3.json --checkpoint outputs/.../gapo_final.pth
 """
 import asyncio
 import torch
@@ -27,6 +27,7 @@ from collections import deque
 
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO, Memory
 from src.deployment.robot_backend import ROSBridgeRobotBackend
+from src.utils.fleet_event_logger import FleetEventLogger
 from src.utils.training_utils import (
     parse_args,
     create_real_env_from_config_file,
@@ -35,20 +36,27 @@ from src.utils.training_utils import (
     select_nearest_robot,
 )
 from src.utils.task_logger import TaskLogger
+from src.utils.decision_logger import DecisionLogger
+from src.utils.ranking_snapshot_logger import RankingSnapshotLogger
+from src.utils.robot_sample_logger import RobotSampleLogger
 from src.utils.policy_inspector import PolicyInspector
 from src.analytics.realtime_collector import RealtimeAnalyticsCollector
-
+from src.utils.fleet_event_logger import FleetEventLogger
 
 async def main():
     args = parse_args()
 
-    logger, output_dir, exp_name = setup_logging_and_output(args)
+    logger, output_dir, _ = setup_logging_and_output(args)
     task_logger = TaskLogger(output_dir / "logs")
+    decision_logger = DecisionLogger(output_dir / "logs")
+    ranking_logger = RankingSnapshotLogger(output_dir / "logs")
+    robot_sample_logger = RobotSampleLogger(output_dir / "logs")
     analytics = RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
         mode='real',
         snapshot_frequency=50,
         task_logger=task_logger,
+        robot_sample_logger=robot_sample_logger,
     )
 
     if args.seed is not None:
@@ -116,7 +124,7 @@ async def main():
     )
 
     logger.info("=" * 80)
-    logger.info("GAPO REAL-ROBOT TRAINING")
+    logger.info("GAPO REAL-ROBOT TRAINING - Hospital")
     logger.info("=" * 80)
     logger.info(f"Config:      {config_path}")
     logger.info(f"Bridge URL:  {robot_backend._bridge_url}")
@@ -129,6 +137,41 @@ async def main():
     await robot_backend.start()
     logger.info("ROS bridge backend started")
 
+    # Wait for first telemetry from each robot before env.reset() runs.
+    # Yields so the WebSocket listener task can connect + receive its first
+    # robot_state message. Logs progress every second; reports if the
+    # listener task itself died (e.g. wrong URL, connection refused).
+    _loop = asyncio.get_running_loop()
+    _wait_start = _loop.time()
+    _deadline = _wait_start + 20.0
+    _last_log = _wait_start
+    _expected_robots = num_robots if num_robots else 1
+    while _loop.time() < _deadline:
+        if all(robot_backend.get_telemetry(r) is not None for r in range(_expected_robots)):
+            logger.info(f"Telemetry confirmed for all robots after {_loop.time() - _wait_start:.2f}s")
+            break
+        if _loop.time() - _last_log > 1.0:
+            logger.info(
+                f"Waiting for telemetry... bridge_url={robot_backend._bridge_url}, "
+                f"elapsed={_loop.time() - _wait_start:.1f}s"
+            )
+            # Surface listener-task failures (e.g. connection refused, wrong URL).
+            for rid, task in robot_backend._listen_tasks.items():
+                if task.done():
+                    try:
+                        exc = task.exception()
+                        logger.error(f"Listener for robot_id={rid} terminated with: {exc!r}")
+                    except asyncio.CancelledError:
+                        logger.error(f"Listener for robot_id={rid} was cancelled")
+            _last_log = _loop.time()
+        await asyncio.sleep(0.1)
+    else:
+        raise RuntimeError(
+            f"No telemetry received within 20s. "
+            f"bridge_url={robot_backend._bridge_url}. "
+            f"Verify with: curl http://localhost:8765/health"
+        )
+
     # --- Create environment ---
     env, num_nodes = create_real_env_from_config_file(
         config_path,
@@ -139,7 +182,14 @@ async def main():
         stochastic_tasks_per_hour=stochastic_tasks_per_hour,
         stochastic_task_cap_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
+        fleet_event_logger=FleetEventLogger(output_dir / "logs"),
+        log_dir=output_dir / "logs"
     )
+
+    analytics.sku_logger = env.sku_logger
+    analytics.initialize(env.graph_state.nodes)
+
+   
     logger.info(f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}")
 
     # --- Build PPO model ---
@@ -152,17 +202,14 @@ async def main():
     edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
     sku_embed_dim = 16
     node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
-    num_departments = (
-        len(env.graph_state.department_order)
-        if hasattr(env.graph_state, 'department_order') and env.graph_state.department_order
-        else 10
-    )
+    num_departments = len(env.graph_state.department_order) if getattr(env.graph_state, 'department_order', None) else 10
+    num_shift_periods = 4  # night, morning, afternoon, evening
 
     ppo = GAPOPPO(
         node_continuous_dim=node_continuous_dim,
         num_node_types=4,
         num_departments=num_departments,
-        num_shift_periods=4,
+        num_shift_periods=num_shift_periods,
         num_day_types=2,
         edge_feat_dim=edge_feat_dim,
         node_type_embedding_dim=8,
@@ -191,13 +238,14 @@ async def main():
         ranking_max_pairs_per_group=ranking_max_pairs_per_group,
         ranking_min_adv_gap=ranking_min_adv_gap,
         task_creation_actor=getattr(env, 'task_creation_actor', None),
+        edge_cost_manager=getattr(env, 'edge_cost_manager', None),
         device=device,
         logger=logger,
     )
 
     # Load checkpoint if provided (fine-tuning from sim-trained weights)
     if args.checkpoint and Path(args.checkpoint).exists():
-        ppo.load(args.checkpoint)
+        ppo.load(args.checkpoint, edge_cost_manager=getattr(env, 'edge_cost_manager', None))
         logger.info(f"Loaded checkpoint: {args.checkpoint}")
 
     policy_inspector = PolicyInspector(ppo.policy, device=device)
@@ -263,6 +311,7 @@ async def main():
                         ).cpu().numpy()
                     for task, score in zip(all_tasks, scores):
                         task.learned_score = float(score)
+                        # Robot handles the resorting seperately in its own methods.
                     robot.resort_queue()
                     robot.resort_overflow()
                 robot.enforce_capacity_limits()
@@ -273,43 +322,73 @@ async def main():
             step_memory_indices = []
             while len(env.pending_tasks) > 0 and assignments_this_step < max_assignments_per_step:
                 task = env.pending_tasks[0]
-                robot_mask = np.ones(env.num_robots, dtype=bool)
-                mem_idx_before = len(memory.actions)
-
+                robot_mask = env.get_robot_availability_mask(task)
+                if not robot_mask.any():
+                    # Every robot is offline or must charge — nothing can take work
+                    # this step. Leave the task pending and retry on a later step
+                    # rather than spinning out phantom assignments to a blocked robot.
+                    break
+                heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                _used_heuristic = False
+                robot_logits = None
+                action_entropy = None
+                # Select an action but do NOT write to the rollout buffer yet — we
+                # commit the experience only once the env actually accepts the
+                # assignment, so a rejected action never enters memory or the logs.
                 try:
                     if iteration <= warmup_iters and np.random.random() < warmup_mix:
-                        action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                        action = heuristic_action
+                        _used_heuristic = True
                         state_tensor = ppo._state_dict_to_tensor(state_dict)
                         mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
                         with torch.no_grad():
-                            logprob, _, _, _, _, _ = ppo.policy_old.evaluate_actions(
+                            logprob_t, _, _, _, _, _ = ppo.policy_old.evaluate_actions(
                                 [state_tensor],
                                 torch.tensor([action], dtype=torch.long).to(ppo.device),
                                 [mask_tensor],
                             )
-                        memory.state_dicts.append(state_dict)
-                        memory.actions.append(action)
-                        memory.logprobs.append(logprob.item())
-                        memory.robot_masks.append(robot_mask)
-                        ppo.policy.record_action(action)
+                        logprob = logprob_t.item()
                     else:
-                        action = ppo.select_action(state_dict, memory, robot_mask)
+                        action, logprob, robot_logits, action_entropy = ppo.select_action_no_store(
+                            state_dict, robot_mask
+                        )
                 except Exception as e:
                     logger.error(f"Action selection error iter {iteration} step {step}: {e}")
                     raise
 
-                step_memory_indices.append(mem_idx_before)
-                success = env.assign_task_to_robot(action, task)
-                if not success:
-                    memory.rewards.append(0.0)
-                    memory.is_terminals.append(False)
+                legs = env.assign_task_to_robot(action, task)
+                if not legs:
+                    # Robot rejected the assignment (offline / must charge). Nothing
+                    # was written to memory, so just stop assigning this step; the
+                    # task stays pending for a later step.
                     break
+
+                # Assignment accepted — only now commit the experience to the buffer.
+                mem_idx_before = len(memory.actions)
+                memory.state_dicts.append(state_dict)
+                memory.actions.append(action)
+                memory.logprobs.append(logprob)
+                memory.robot_masks.append(robot_mask)
+                ppo.policy.record_action(action)
+
+                task.source = "heuristic" if _used_heuristic else "policy"
+                step_memory_indices.append(mem_idx_before)
+
+                ranking_logger.log_snapshot(task, env.pending_tasks, env.current_time, iteration)
+                decision_logger.log(
+                    task, action, heuristic_action, env, env.current_time,
+                    is_warmup=(iteration <= warmup_iters),
+                    used_heuristic=_used_heuristic,
+                    queue_features=state_dict.get('queue_features'),
+                    robot_logits=robot_logits,
+                    action_entropy=action_entropy,
+                )
 
                 num_assignments += 1
                 assignments_this_step += 1
                 task_to_memory_idx[task.task_id] = mem_idx_before
 
-                feasibility = (task.deadline - env.current_time) / max(task.estimated_duration, 1.0) - 1.0
+                feasibility = task.get_time_to_deadline(env.current_time) / max(task.estimated_duration, 1.0) - 1.0
                 assignment_reward = 0.5 * max(-1.0, min(1.0, feasibility))
                 open_assignments[task.task_id] = {
                     'state':             state_dict,
@@ -334,38 +413,53 @@ async def main():
 
             # Env step
             prev_completed = len(env.completed_tasks)
-            state_dict, step_reward, done, info = env.step(dt=1.0)
+            state_dict, _, _, info = env.step(dt=1.0)
 
             newly_completed = env.completed_tasks[prev_completed:]
             for task in newly_completed:
                 if task.arrival_time is not None:
                     iteration_completion_times.append(env.current_time - task.arrival_time)
-
+            
             task_completion_credits: dict = info.get('task_completion_credits', {})
+            completed_task_legs = info.get('completed_task_legs', [])
+            completed_leg_credits: dict = info.get('completed_leg_credits', {})
+
+            for leg_task in completed_task_legs:
+                raw_leg_reward = float(completed_leg_credits.get((leg_task.task_id, leg_task.leg_type), 0.0))
+                scaled_leg_reward = raw_leg_reward * reward_scale
+                if reward_clip is not None and reward_clip > 0:
+                    scaled_leg_reward = float(np.clip(scaled_leg_reward, -reward_clip, reward_clip))
+                task_logger.log_completion(
+                    leg_task.task_id,
+                    scaled_leg_reward,
+                    env.current_time - leg_task.arrival_time if leg_task.arrival_time is not None else None,
+                    env.current_time,
+                    distance_traveled=getattr(leg_task, "distance_traveled", 0.0),
+                    energy_consumed=getattr(leg_task, "energy_consumed_wh", 0.0),
+                    completed_task=leg_task,
+                )
+
+            deadline_met_by_task = {}
+            for leg in completed_task_legs:
+                if leg.leg_type == 'dropoff':
+                    dl = getattr(leg, 'current_deadline', None) or getattr(leg, 'deadline', None)
+                    deadline_met_by_task[leg.task_id] = (env.current_time <= dl) if dl is not None else None
 
             for parent_id, bonus in task_completion_credits.items():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_bonus = float(np.clip(scaled_bonus, -reward_clip, reward_clip))
 
-                completed_task = next(
-                    (t for t in newly_completed if t.task_id == parent_id), None
-                )
-                actual_completion_time = None
-                if completed_task is not None and completed_task.arrival_time is not None:
-                    actual_completion_time = env.current_time - completed_task.arrival_time
-
-                task_logger.log_completion(
-                    parent_id, scaled_bonus, actual_completion_time, env.current_time,
-                    distance_traveled=0.0, energy_consumed=0.0,
-                )
-
                 if env.task_creation_actor is not None:
                     env.task_creation_actor.record_completion(parent_id, scaled_bonus)
+                decision_logger.queue_outcome(
+                    parent_id, scaled_bonus,
+                    deadline_met=deadline_met_by_task.get(parent_id),
+                )
                 iteration_reward += scaled_bonus
 
                 orig_idx = task_to_memory_idx.get(parent_id)
-                if orig_idx is not None and orig_idx < len(memory.rewards):
+                if orig_idx is not None:
                     entry = open_assignments.pop(parent_id, None)
                     a_rew = entry['assignment_reward'] if entry else 0.0
                     memory.rewards[orig_idx] = a_rew + scaled_bonus
@@ -375,20 +469,10 @@ async def main():
                         entry['reward'] = entry['assignment_reward'] + scaled_bonus
                         closed_buffer.append(entry)
 
-            battery_pen = info.get('battery_penalty', 0.0)
-            if battery_pen != 0.0 and step_memory_indices:
-                share = battery_pen / len(step_memory_indices)
-                for midx in step_memory_indices:
-                    if midx < len(memory.rewards):
-                        memory.rewards[midx] += share
 
-            # Continuous operation: clear per-episode tracking at boundary, no env.reset()
-            if done:
-                task_to_memory_idx.clear()
-                open_assignments.clear()
-                task_logger.task_metadata.clear()
-                if memory.is_terminals:
-                    memory.is_terminals[-1] = True
+            # May need episode termination for future consistency
+
+            analytics.record_robot_telemetry(env.robots, env.current_time, iteration=iteration, step=step)
 
             # Pace to 1 Hz — yields control so backend WebSocket tasks can process messages
             elapsed = time.monotonic() - step_wall_start
@@ -446,6 +530,7 @@ async def main():
             pid for pid, e in open_assignments.items()
             if iteration - e['born_iter'] > OPEN_ASSIGNMENT_TTL
         ]
+        # Stale ids indicate assignments that were never resolved (e.g. due to task cancellation or failure)
         for pid in stale_ids:
             open_assignments.pop(pid)
 
@@ -472,6 +557,11 @@ async def main():
             )
 
         task_logger.log_running_summary(iteration)
+        task_logger.log_iteration_summary(iteration)
+
+
+        if iteration % 50 == 0:
+            analytics.increment_iteration()
 
         if iteration % log_interval == 0:
             avg_reward = np.mean(iteration_rewards[-log_interval:])
@@ -488,6 +578,19 @@ async def main():
             logger.info(f"  Total Timesteps: {total_timesteps}")
             logger.info(f"  Wall Time: {env.current_time / 3600:.2f} hours")
             logger.info(f"  Pending: {len(env.pending_tasks)} | Completed: {len(env.completed_tasks)}")
+            # Real env has no RobotSimulator objects (robot_simulators is all None);
+            # derive status from telemetry + env charge-tracking sets instead.
+            def _robot_status(r):
+                if r.is_charging:
+                    return 'CHARGING'
+                if r.robot_id in env._robots_routing_to_charge:
+                    return 'ROUTING_TO_CHARGE'
+                return 'AVAIL' if r.current_task is None else 'BUSY'
+            robot_states_str = " | ".join(
+                f"R{r.robot_id}:{_robot_status(r)} bat={r.battery_level:.3f}"
+                for r in env.robots
+            )
+            logger.info(f"  Robots: {robot_states_str}")
             logger.info(f"  Iteration Time: {iteration_time:.2f}s  CPU Util: {cpu_util:.1f}%")
 
             if iteration_completion_times:
@@ -541,6 +644,14 @@ async def main():
                     f"records={ec['total_records']} nll_loss={ec['avg_recent_loss']:.4f}"
                 )
 
+        if iteration % 50 == 0:
+            snapshot_dir = output_dir / f"metrics_snapshot_iter{iteration}"
+            task_logger.plot_metrics(snapshot_dir)
+            logger.info(f"Task metrics snapshot saved to iter {iteration}")
+            analytics.plot_snapshot(final=False)
+            analytics.save_metrics_json()
+            logger.info(f"Analytics snapshot saved to iter {iteration}")
+
         # ---- Checkpoint ----
         if iteration % save_interval == 0:
             ckpt_path = checkpoint_dir / f"gapo_real_iter{iteration}.pth"
@@ -550,6 +661,14 @@ async def main():
 
     # ---- Final checkpoint + teardown ----
     ppo.save(str(checkpoint_dir / "gapo_real_final.pth"))
+    final_metrics_dir = output_dir / "metrics_final"
+    task_logger.plot_metrics(final_metrics_dir)
+    logger.info(f"Final task metrics plots saved to {final_metrics_dir}")
+    analytics.increment_iteration()
+    analytics.plot_snapshot(final=True)
+    analytics.save_metrics_json()
+    logger.info(f"Final analytics plots saved to {analytics.output_dir / 'plots_final'}")
+    logger.info(f"Analytics metrics saved to {analytics.output_dir}")
     logger.info(f"\nTraining complete. Total wall time: {(time.time() - start_time) / 3600:.2f}h")
     await robot_backend.stop()
 

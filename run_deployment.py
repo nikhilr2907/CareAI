@@ -26,7 +26,6 @@ import numpy as np
 import torch
 import pygame
 
-from src.environment.gapo_env import GAPOTaskAssignmentEnv
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO
 from src.utils.training_utils import (
     create_env_from_config_file,
@@ -43,6 +42,12 @@ from src.utils.deployment_utils import (
     rescore_robot_queues,
     assign_tasks,
 )
+from src.utils.task_logger import TaskLogger
+from src.utils.decision_logger import DecisionLogger
+from src.utils.ranking_snapshot_logger import RankingSnapshotLogger
+from src.utils.robot_sample_logger import RobotSampleLogger
+from src.analytics.realtime_collector import RealtimeAnalyticsCollector
+from src.utils.fleet_event_logger import FleetEventLogger
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     # Config selection (same as training)
     parser.add_argument(
         "--config", type=str,
-        default="configs/revised_hospital_config_v3_consumption_reduced.json",
+        default="configs/revised_hospital_config_v3.json",
         help="Path to hospital config JSON file"
     )
 
@@ -157,6 +162,16 @@ def parse_args() -> argparse.Namespace:
         help="Sim seconds per real second (default: 1.0)"
     )
 
+    # Digital twin
+    parser.add_argument(
+        "--twin", action="store_true",
+        help="Enable digital twin WebSocket publisher (browser 3D view)"
+    )
+    parser.add_argument(
+        "--twin-port", type=int, default=8766,
+        help="WebSocket port for digital twin (HTTP served on port+1, default 8767)"
+    )
+
     # Visualization
     parser.add_argument(
         "--headless", action="store_true",
@@ -203,6 +218,17 @@ def main():
         ]
     )
     logger = logging.getLogger(__name__)
+    task_logger = TaskLogger(output_dir / "logs")
+    decision_logger = DecisionLogger(output_dir / "logs")
+    ranking_logger = RankingSnapshotLogger(output_dir / "logs")
+    robot_sample_logger = RobotSampleLogger(output_dir / "logs")
+    analytics = RealtimeAnalyticsCollector(
+        output_dir=output_dir / "analytics",
+        mode='sim',
+        snapshot_frequency=50,
+        task_logger=task_logger,
+        robot_sample_logger=robot_sample_logger,
+    )
 
     # Set random seed if provided
     if args.seed is not None:
@@ -222,59 +248,48 @@ def main():
     logger.info("GAPO DEPLOYMENT - Hospital Robot Task Assignment (Inference)")
     logger.info("=" * 80)
 
-    # Config resolution: explicit --config > HOSPITAL_CONFIG_NAME env var
+    # Config resolution: CONFIG_NAME env var (file name in configs/) > --config
     config_path = None
-    config_name_override = os.environ.get("HOSPITAL_CONFIG_NAME")
+    config_name_override = os.environ.get("CONFIG_NAME")
     if config_name_override:
         config_path = Path("configs") / config_name_override
-        logger.info(f"Using config from env var HOSPITAL_CONFIG_NAME: {config_path}")
+        logger.info(f"Using config from env var CONFIG_NAME: {config_path}")
     elif args.config:
         config_path = Path(args.config)
 
-    if config_path and config_path.exists():
-        logger.info(f"Loading hospital config: {config_path}")
-        env, num_nodes = create_env_from_config_file(
-            str(config_path),
-            num_robots=args.num_robots,
-            max_episode_time=args.max_episode_time,
-            timestep_seconds=args.cycle_time,
-            stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
-            stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
-            initial_stochastic_tasks=args.initial_stochastic_tasks
+    if not config_path or not config_path.exists():
+        raise FileNotFoundError(
+            f"Config not found at '{config_path}'. "
+            f"Pass --config configs/revised_hospital_config_v3.json or set CONFIG_NAME."
         )
-        env.reset()
-        apply_floorplan_layout(env.graph_state)
 
-        logger.info(f"  Nodes: {num_nodes}")
-        logger.info(f"  Robots: {env.num_robots}")
-        logger.info(f"  Edges: {len(env.graph_state.edges)}")
+    logger.info(f"Loading config: {config_path}")
+    env, num_nodes = create_env_from_config_file(
+        str(config_path),
+        num_robots=args.num_robots,
+        max_episode_time=args.max_episode_time,
+        timestep_seconds=args.cycle_time,
+        stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
+        stochastic_task_cap_per_hour=args.stochastic_task_cap_per_hour,
+        initial_stochastic_tasks=args.initial_stochastic_tasks,
+        fleet_event_logger=FleetEventLogger(output_dir / "logs"),
+        log_dir=output_dir / "logs",
+    )
+    env.reset()
+    apply_floorplan_layout(env.graph_state)
+    analytics.sku_logger = env.sku_logger
+    analytics.initialize(env.graph_state.nodes)
 
-        # Log category info if available
-        total_categories = set()
-        for node in env.graph_state.nodes:
-            if hasattr(node, 'get_all_categories'):
-                total_categories.update(node.get_all_categories())
-        if total_categories:
-            logger.info(f"  Categories: {len(total_categories)}")
-    else:
-        logger.warning(
-            f"Config not found at '{config_path}', using procedural environment"
-        )
-        num_robots = args.num_robots or 5
-        num_nodes = 10
-        env = GAPOTaskAssignmentEnv(
-            num_robots=num_robots,
-            num_nodes=num_nodes,
-            max_episode_time=args.max_episode_time,
-            timestep_seconds=args.cycle_time,
-            stochastic_tasks_per_hour=args.stochastic_tasks_per_hour,
-            max_stochastic_tasks_per_hour=args.stochastic_task_cap_per_hour,
-            initial_stochastic_tasks=args.initial_stochastic_tasks
-        )
-        env.reset()
-        apply_floorplan_layout(env.graph_state)
+    logger.info(f"  Nodes: {num_nodes}")
+    logger.info(f"  Robots: {env.num_robots}")
+    logger.info(f"  Edges: {len(env.graph_state.edges)}")
 
-        logger.info(f"  Procedural environment: {num_nodes} nodes, {num_robots} robots")
+    total_categories = set()
+    for node in env.graph_state.nodes:
+        if hasattr(node, 'get_all_categories'):
+            total_categories.update(node.get_all_categories())
+    if total_categories:
+        logger.info(f"  Categories: {len(total_categories)}")
 
     # ============ Policy Setup ============
     ppo = None
@@ -301,11 +316,14 @@ def main():
         logger.info(f"  Edge feature dim: {edge_feat_dim}")
         logger.info(f"  SKU feature dim: {sku_feat_dim}")
 
+        num_departments = len(env.graph_state.department_order) if getattr(env.graph_state, 'department_order', None) else 10
+        num_shift_periods = 4  # night, morning, afternoon, evening
+
         ppo = GAPOPPO(
             node_continuous_dim=node_continuous_dim,
             num_node_types=4,
-            num_departments=10,
-            num_shift_periods=4,
+            num_departments=num_departments,
+            num_shift_periods=num_shift_periods,
             num_day_types=2,
             node_type_embedding_dim=8,
             department_embedding_dim=16,
@@ -317,12 +335,11 @@ def main():
             queue_feat_dim=16,
             sku_feat_dim=sku_feat_dim,
             sku_embed_dim=sku_embed_dim,
-            # Deployment disables task-creation actor wiring for now.
-            # This keeps inference aligned with allocation-only policy.
-            enable_task_creation_actor=False,
+            task_creation_actor=None,
+            edge_cost_manager=getattr(env, 'edge_cost_manager', None),
             device=device
         )
-        ppo.load(str(checkpoint_path))
+        ppo.load(str(checkpoint_path), edge_cost_manager=getattr(env, 'edge_cost_manager', None))
         logger.info(f"  Policy loaded from: {checkpoint_path}")
     else:
         logger.info("No trained policy: using heuristic task assignment")
@@ -341,6 +358,14 @@ def main():
                 f"cap={args.stochastic_task_cap_per_hour}/h "
                 f"initial={args.initial_stochastic_tasks}")
     logger.info("\n" + "=" * 80)
+
+    # ============ Digital Twin Publisher ============
+    twin_publisher = None
+    if args.twin:
+        from src.deployment.twin_publisher import TwinPublisher
+        twin_publisher = TwinPublisher(graph_state=env.graph_state, port=args.twin_port)
+        twin_publisher.start()
+        logger.info(f"Open http://localhost:{args.twin_port + 1} to view the digital twin")
 
     # ============ Visualization Setup ============
     if not args.headless:
@@ -401,7 +426,16 @@ def main():
             rescore_robot_queues(env, ppo)
 
             # Assign top pending tasks to available robots
-            assigned_this_cycle = assign_tasks(env, ppo, args.max_assignments_per_step)
+            assigned_this_cycle = assign_tasks(
+                env,
+                ppo,
+                args.max_assignments_per_step,
+                task_logger=task_logger,
+                decision_logger=decision_logger,
+                ranking_logger=ranking_logger,
+                total_assignments=total_tasks_assigned,
+                iteration=total_timesteps,
+            )
             total_tasks_assigned += assigned_this_cycle
 
             # Simulation step
@@ -426,6 +460,30 @@ def main():
                         else:
                             total_late += 1
                             total_lateness += lateness
+                    task_logger.log_completion(
+                        task.task_id, 0.0,
+                        current_time - task.arrival_time if task.arrival_time is not None else None,
+                        current_time,
+                        distance_traveled=getattr(task, "distance_traveled", 0.0),
+                        energy_consumed=getattr(task, "energy_consumed_wh", 0.0),
+                        completed_task=task,
+                    )
+
+            task_logger.log_running_summary(total_timesteps)
+            task_logger.log_iteration_summary(total_timesteps)
+
+            if total_timesteps % 10 == 0:
+                analytics.record_robot_telemetry(env.robots, env.current_time)
+            if total_timesteps % 50 == 0:
+                analytics.increment_iteration()
+
+            if total_timesteps % 50 == 0:
+                snapshot_dir = output_dir / f"metrics_snapshot_step{total_timesteps}"
+                task_logger.plot_metrics(snapshot_dir)
+                logger.info(f"Task metrics snapshot saved to step {total_timesteps}")
+                analytics.plot_snapshot(final=False)
+                analytics.save_metrics_json()
+                logger.info(f"Analytics snapshot saved to step {total_timesteps}")
 
             # Log metrics at specified time interval
             if current_time - last_log_time >= args.log_interval:
@@ -503,17 +561,17 @@ def main():
                 for robot, simulator in zip(env.robots, env.robot_simulators):
                     current_task = robot.current_task
                     leg_type = getattr(current_task, "leg_type", None) if current_task else None
-                    parent_id = getattr(current_task, "parent_task_id", None) if current_task else None
+                    cur_task_id = current_task.task_id if current_task else None
                     pickup_done = (
-                        robot.is_pickup_complete(parent_id)
-                        if (parent_id is not None and hasattr(robot, 'is_pickup_complete'))
+                        robot.is_pickup_complete(cur_task_id)
+                        if (cur_task_id is not None and hasattr(robot, 'is_pickup_complete'))
                         else None
                     )
                     battery_level = getattr(simulator, 'battery_level', 1.0)
                     is_charging = getattr(simulator, 'is_charging', False)
 
                     robot_msg = (
-                        f"R{robot.robot_id} | task={leg_type} parent={parent_id} pickup_done={pickup_done} | "
+                        f"R{robot.robot_id} | task={leg_type} task_id={cur_task_id} pickup_done={pickup_done} | "
                         f"q={robot.num_queued_tasks} ov={len(robot.overflow_queue)} "
                         f"load={getattr(robot, 'current_load', 0)}/{getattr(robot, 'max_capacity', '?')} | "
                         f"battery={battery_level:.2f} charging={is_charging} | "
@@ -590,12 +648,18 @@ def main():
                 for node in env.graph_state.nodes:
                     if node.node_type != "recovery":
                         continue
-                    line = f"{node.node_id}: {node.stock_level:.0f}/{node.max_stock:.0f} tts={node.time_to_stockout:.1f}h"
+                    stockout = " STOCKOUT" if node.is_stockout else ""
+                    line = (
+                        f"{node.node_id}: "
+                        f"{node.stock_level:.0f}/{node.max_stock:.0f}{stockout}"
+                    )
                     if node.category_inventory:
-                        cat_name = next(iter(node.category_inventory.keys()))
-                        cat_stock = node.get_category_stock_level(cat_name)
-                        cat_max = node.get_category_max_stock(cat_name)
-                        line += f" | {cat_name}:{cat_stock:.0f}/{cat_max:.0f}"
+                        cat_parts = [
+                            f"{cat}:{node.get_category_stock_level(cat):.0f}/"
+                            f"{node.get_category_max_stock(cat):.0f}"
+                            for cat in node.category_inventory.keys()
+                        ]
+                        line += " | " + " ".join(cat_parts)
                     hud_lines.append(line)
                     if len(hud_lines) >= 12:
                         break
@@ -613,6 +677,9 @@ def main():
 
                 pygame.display.flip()
                 clock.tick(args.fps)
+
+            if twin_publisher:
+                twin_publisher.broadcast(env)
 
             # Check for episode termination
             if done:
@@ -633,6 +700,14 @@ def main():
         logger.error(f"Error during deployment: {e}", exc_info=True)
         raise
     finally:
+        final_metrics_dir = output_dir / "metrics_final"
+        task_logger.plot_metrics(final_metrics_dir)
+        logger.info(f"Final task metrics plots saved to {final_metrics_dir}")
+        analytics.increment_iteration()
+        analytics.plot_snapshot(final=True)
+        analytics.save_metrics_json()
+        logger.info(f"Final analytics plots saved to {analytics.output_dir / 'plots_final'}")
+        logger.info(f"Analytics metrics saved to {analytics.output_dir}")
         # Cleanup
         logger.info("\n" + "=" * 80)
         logger.info("DEPLOYMENT SUMMARY")
@@ -651,6 +726,9 @@ def main():
 
         if not args.headless:
             pygame.quit()
+
+        if twin_publisher:
+            twin_publisher.stop()
 
         logger.info(f"\nLogs saved to: {output_dir}")
         logger.info("=" * 80)
