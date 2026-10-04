@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="assets/logo.png" alt="CareRobotics logo" width="120">
+</p>
+
 # CareRobotics
 
-[Company description: to be written.]
+Website: [thecarerobotics.com](https://www.thecarerobotics.com/)
+
+CareRobotics is building the automation layer that gives hospital staff their time back. Ward nurses spend a large part of each shift searching for supplies and equipment, and missing stock delays care. CareRobotics is developing robots that restock wards, with the task-allocation software in this repository deciding which robot does which job. The company is supported by Imperial College London and UCL through the Imperial VCC Accelerator and the UCL Venture Builder. A full-size prototype is in development, and a hospital pilot is under discussion with HCA UK.
 
 This repository holds the task-allocation software for CareRobotics robots. This branch, `main`, is configured for hospital environments. The `pilot_trial` branch is configured for the Independent Learning Centre (Sixth Form) pilot.
 
