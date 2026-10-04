@@ -1,7 +1,3 @@
-"""
-Robot telemetry system for real-time position and state tracking.
-Designed to be compatible with real robot data feeds.
-"""
 from dataclasses import dataclass
 from typing import Optional
 import time
@@ -9,10 +5,6 @@ import time
 
 @dataclass
 class RobotTelemetry:
-    """
-    Real-time telemetry data broadcast by robot.
-    Can be populated from simulation or real robot sensors/ROS topics.
-    """
     timestamp: float  # When this telemetry was captured (Unix time or sim time)
     robot_id: int
 
@@ -39,6 +31,10 @@ class RobotTelemetry:
     active_task_id: Optional[int]  # Currently executing task ID
     remaining_path: list  # List of node indices still to visit
     eta_to_next_node: float  # Estimated seconds to next waypoint
+
+    # ===== CHARGING STATE (with defaults) =====
+    is_charging: bool = False  # Robot is docked and charging
+    needs_charging: bool = False  # Dynamic threshold crossed, return to hub needed
 
     @property
     def is_at_node(self) -> bool:
@@ -67,7 +63,9 @@ class RobotTelemetry:
             'current_capacity': self.current_capacity,
             'is_available': self.is_available,
             'active_task_id': self.active_task_id,
-            'eta_to_next_node': self.eta_to_next_node
+            'eta_to_next_node': self.eta_to_next_node,
+            'is_charging': self.is_charging,
+            'needs_charging': self.needs_charging
         }
 
     @classmethod
@@ -89,5 +87,7 @@ class RobotTelemetry:
             is_available=data['is_available'],
             active_task_id=data.get('active_task_id'),
             remaining_path=data.get('remaining_path', []),
-            eta_to_next_node=data.get('eta_to_next_node', 0.0)
+            eta_to_next_node=data.get('eta_to_next_node', 0.0),
+            is_charging=data.get('is_charging', False),
+            needs_charging=data.get('needs_charging', False)
         )
