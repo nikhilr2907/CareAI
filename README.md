@@ -7,7 +7,7 @@ This branch carries the ILC layout. The layout-agnostic code is shared with `mai
 ## Status
 
 | Area | State |
-|---|---|
+| --- | --- |
 | Simulation training (`run_training.py`) | Works. Verified with a 2-iteration smoke run. |
 | Simulation deployment (`run_deployment.py`) | Works headless, with or without a trained checkpoint. |
 | Real-robot training and deployment (`run_training_real.py`, `run_real_deployment.py`) | Imports and CLI verified. **Not run against hardware.** Needs the ROS 2 bridge. |
@@ -46,7 +46,7 @@ Drop `--headless` to get the pygame view. Add `--twin` to publish state to the d
 
 ## Repository layout
 
-```
+```text
 run_training.py              Simulation PPO training (curriculum, eval, checkpoints)
 run_deployment.py            Simulation inference, optional pygame view and twin
 run_training_real.py         Training against a live robot via the ROS 2 bridge (1 Hz pacing)
@@ -67,7 +67,7 @@ src/utils/                   Logging (tasks, decisions, ranking, robot samples, 
 This branch loads only ILC pilot configs (`metadata.environment_type: ilc_open_space`). The loader rejects anything else.
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `ilc_pilot_v1_care_robotics.json` | The pilot config: 1 robot, capacity 2, 3 nodes, 4 SKUs, 8.5-hour school day |
 
 The hospital configs (`hospital_3nodes_consumables.json`, `revised_hospital_config_v3*.json`) are still in `configs/` but this branch rejects them. Use `main` for hospital runs.
