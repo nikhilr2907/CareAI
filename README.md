@@ -111,8 +111,7 @@ src/deployment/              ROS bridge backend and WebSocket client
 src/reliability/             Sim-to-real effects (telemetry noise)
 src/analytics/               Realtime analytics and metrics
 src/utils/                   Logging and helpers
-shell/                       Cluster (Slurm) job scripts
-tools/                       Branch audit and demand probe
+tools/                       Demand probe (checks a config generates demand)
 ```
 
 ## Configuration
