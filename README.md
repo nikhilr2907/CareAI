@@ -8,49 +8,63 @@ Website: [thecarerobotics.com](https://www.thecarerobotics.com/)
 
 CareRobotics is building the automation layer that gives hospital staff their time back. Ward nurses spend a large part of each shift searching for supplies and equipment, and missing stock delays care. CareRobotics is developing robots that restock wards, with the task-allocation software in this repository deciding which robot does which job. The company is supported by Imperial College London and UCL through the Imperial VCC Accelerator and the UCL Venture Builder. A full-size prototype is in development, and a hospital pilot is under discussion with HCA UK.
 
-This repository holds the task-allocation software for CareRobotics robots. This branch, `main`, is configured for hospital environments. The `pilot_trial` branch is configured for the Independent Learning Centre (Sixth Form) pilot.
+This repository holds the task-allocation and fleet orchestration software/model code for CareRobotics robots. This branch, `main`, is configured for tests in hospital environments, the end goal being a fully functional multi-robot system that can revolutionise patient care in hospitals, by saving clinical staff time previously attributed to laborious manual replenishment and other logistics tasks. The `pilot_trial` branch is configured for the inaugural pilot, aiming to replicate the replenishment logistics in a hospital in a school environment.
 
 ## Overview
 
-A multi-agent PPO policy (GAPO) assigns restocking and pickup tasks to robots over a graph of storage, recovery and corridor nodes. The environment is simulated from a hospital configuration. No training data is required, because tasks and consumption are generated from the config.
+A multi-agent PPO policy (GAPO) decides which robot takes each restocking task. The environment simulates ward shelves consuming stock, raises a replenishment task when a shelf falls to its reorder point, and moves robots along a graph of storage and ward nodes to pick up and deliver. Ad-hoc, returns and emergency tasks arrive alongside replenishment. The same code can drive live robots through a ROS 2 bridge.
+
+Both branches run the same learning and environment code. They differ only in the layout and demand layer: the config format and loader, the graph and task features, the demand model, and a few layout-specific rewards. See [Environments](#environments).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    CFG[Hospital config JSON<br/>nodes, edges, SKUs] --> GS[GraphState<br/>nodes and edges]
-    GS --> ENV[GAPOTaskAssignmentEnv<br/>simulation]
-    TG[Task generator<br/>inventory and ad hoc tasks] --> ENV
+    CFG[Config JSON<br/>layout, SKUs, demand] --> GS[GraphState<br/>nodes, edges, features]
+    GS --> ENV[GAPOTaskAssignmentEnv]
+    TG[Task generator<br/>replenishment and ad-hoc tasks] --> ENV
+    TCA[TaskCreationActor<br/>proactive tasks] --> ENV
     ENV --> SIM[RobotSimulator<br/>one per robot]
     SIM --> NOISE[Telemetry noise<br/>src/reliability]
     NOISE --> ENV
-    ENV --> POL[GAPOPolicyNetwork<br/>hospital graph encoder, attention]
-    POL --> PPO[GAPOPPO<br/>PPO update]
+    ENV --> POL[GAPOPolicyNetwork<br/>graph encoder, robot attention, scorer]
+    POL --> PPO[GAPOPPO<br/>PPO + ranking loss]
     PPO -->|assignments| ENV
     ENV -->|rewards| PPO
+    ENV -->|traversal records| EC[EdgeCostManager<br/>learned path costs]
+    EC -->|path costs| ENV
     PPO --> OUT[Checkpoints, logs, analytics]
-    ENV -.->|deployment| BR[MockRobotBridge<br/>simulated bridge]
+    POL -.->|inference| ENVR[GAPOTaskAssignmentEnvReal]
+    ENVR --> BE[ROSBridgeRobotBackend]
+    BE <-->|WebSocket /ws| ROS[ROS 2 bridge<br/>external]
 ```
 
 ## Environments
 
-| | Hospital (`main`) | ILC pilot (`pilot_trial`) |
+| | Hospital (`main`, this branch) | ILC pilot (`pilot_trial`) |
 | --- | --- | --- |
-| Config | `configs/hospital_3nodes_consumables.json` | `configs/ilc_pilot_v1_care_robotics.json` |
-| Nodes | 3: 1 storage, 2 recovery | 3: 1 storage, 2 shelves |
-| Demand | Consumption patterns per SKU | School-day periods with per-SKU demand profiles |
-| Graph encoder | `HospitalGraphEncoder` | `ILCGraphEncoder` with school-period embedding |
-| Path costs | No learned edge-cost model | Learned edge-cost model (`EdgeCostManager`) |
-| Robots | Simulated, via `MockRobotBridge` | Simulated, or live through the ROS 2 bridge |
+| Config | `configs/revised_hospital_config_v3.json` (and a reduced-consumption variant) | `configs/ilc_pilot_v1_care_robotics.json` |
+| Layout | 12 nodes: 3 storage, 9 recovery wards | 3 nodes: 1 storage, 2 shelves |
+| Stock | 132 SKUs (81 to 132 per node) | 4 SKUs |
+| Robots | 5 by default, capacity 12 | 1, capacity 2 |
+| Demand per SKU | daily mean × intraday profile × weekday × served beds × department-category multiplier | daily mean × school-period profile × weekday × node foot traffic |
+| Time features | 4 shift periods, intraday and weekday weights | school periods from the config |
+| Task types | replenishment, ad hoc, returns, emergency | replenishment |
+| Task features | 15, including task-type flags | 10 |
+| Layout-specific rewards | robot collision tracking, pickup load bonus, ad-hoc delivery bonus | restock-before-break bonus, movement-during-break penalty |
+
+Shared by both: the GAPO policy and PPO, attention and debiasing, the learned edge-cost model, the task-creation actor, charging (robots charge at hub or storage nodes), the real-robot loop, the loggers and analytics, and telemetry noise.
 
 ## Status
 
 | Area | State |
 | --- | --- |
 | Simulation training (`run_training.py`) | Working |
-| Headless deployment (`run_deployment.py`) | Working with a trained checkpoint |
-| Real-robot scripts | Not on this branch. The ROS bridge client is included but not yet wired into a runner. |
-| Reliability layer | Phase 1 telemetry noise is enabled in the environment. Phases 2 and 3 are not implemented. |
+| Simulation deployment (`run_deployment.py`) | Working, headless or with the pygame view |
+| Real-robot training and deployment (`run_training_real.py`, `run_real_deployment.py`) | Not yet run against hardware. Requires the ROS 2 bridge. |
+| Reliability layer | Phase 1 only: telemetry noise (`src/reliability/`) |
+
+Simulation generates its own tasks and consumption from the config, so no training data is required. The v3 demand models are generated (per-SKU negative binomial, scaled per 10 beds), not measured.
 
 ## Setup
 
@@ -67,53 +81,87 @@ pip install -r requirements.txt
 Train in simulation:
 
 ```bash
-python run_training.py --config configs/hospital_3nodes_consumables.json \
+python run_training.py --config configs/revised_hospital_config_v3.json \
     --iterations 10000 --device auto --seed 42 --output-dir outputs --exp-name hospital_sim
 ```
 
-Run a trained policy headless:
+Use `configs/revised_hospital_config_v3_consumption_reduced.json` (about 35% lower demand) for easier early training.
+
+Run a trained policy headless in simulation:
 
 ```bash
-python run_deployment.py --use-trained \
-    --checkpoint outputs/hospital_sim/checkpoints/gapo_final.pth \
+python run_deployment.py --config configs/revised_hospital_config_v3.json \
+    --use-trained --checkpoint outputs/hospital_sim/checkpoints/gapo_final.pth \
     --headless --max-runtime 3600
 ```
 
-Drop `--headless` for the pygame view.
-
-Run `python run_training.py --help` for the full list of training flags.
+Drop `--headless` for the pygame view. Run any script with `--help` for its full list of flags. Deployment on the 12-node config runs at roughly one simulated second per wall-clock second.
 
 ## Repository layout
 
 ```text
 run_training.py              Simulation PPO training
 run_deployment.py            Simulation inference, optional pygame view
-configs/                     Hospital configuration
-examples/                    Config examples and a usage script
+run_training_real.py         Training against live robots via the ROS 2 bridge
+run_real_deployment.py       Inference against live robots
+configs/                     Hospital layout and demand configuration
 src/environment/             Graph, robots, tasks and the environment
-src/multi_agent_ppo/         Policy, encoders, attention, PPO, debiasing
-src/deployment/              Mock bridge, task source, ROS bridge client
+src/multi_agent_ppo/         Policy, encoders, attention, PPO, learned edge cost, task creation
+src/deployment/              ROS bridge backend and WebSocket client
 src/reliability/             Sim-to-real effects (telemetry noise)
 src/analytics/               Realtime analytics and metrics
 src/utils/                   Logging and helpers
 shell/                       Cluster (Slurm) job scripts
+tools/                       Branch audit and demand probe
 ```
 
 ## Configuration
 
-`configs/hospital_3nodes_consumables.json` is the hospital configuration. It describes three nodes, the robots, and the SKUs with their consumption patterns.
+`configs/revised_hospital_config_v3.json` is the default. Its format (version 3.0) provides:
 
-`run_deployment.py` loads the first JSON file in `configs/`, so keep one configuration there.
+- `nodes` with operational locations carrying served beds and department tags
+- `shelves` with per-SKU bins holding par and reorder levels
+- `item_database` with a consumption model per SKU: daily mean, intraday profile and weekday multipliers
+- `metadata.demand_profiles` with department-category demand multipliers
+
+`metadata.num_robots` and `metadata.robot_max_capacity` set the fleet. When they are absent, the defaults are 5 robots with capacity 12. Older hospital formats still load, but they have no per-SKU demand models. The v2.1 file that used to be the default (`hospital_3nodes_consumables.json`) produced no consumption at all and has been removed.
+
+## Real-robot operation
+
+The policy drives live robots through an external ROS 2 bridge, which handles Nav2 and publishes robot state. The bridge server is not in this repository.
+
+**Connection.** Set the bridge URL with `--bridge-url` or `ROS_BRIDGE_URL` in `.env`. The default is `ws://localhost:8765`. The client appends `/ws` to the URL. `ROSBridgeRobotBackend` opens one WebSocket client per robot and reconnects with exponential backoff (1 s, doubling, capped at 30 s).
+
+**Messages from the bridge** (JSON, keyed by `message_type`):
+
+| Type | Contents | Effect |
+| --- | --- | --- |
+| `robot_state` | position, orientation, velocity, battery, capacity, active task | Updates the robot's latest telemetry |
+| `task_status` | task ID and status (`completed`, `in_progress`, `failed`, `canceled`) | Completion or failure handling |
+| `location_inventory` | per-SKU stock at each location | Stored; the real environment overwrites simulated shelf stock with it |
+| `system_state` | full snapshot including inventory | Stored as the latest system state |
+| `emergency_stop` | `active` flag | Sets `emergency_stop_triggered` |
+| `task_response`, `connected`, `heartbeat` | acknowledgements | Logged only |
+
+**Messages to the bridge:** `task_command` (task ID, robot ID, waypoints, task metadata) and `task_cancel`.
+
+**Failures.** A failed or cancelled goal is retried up to 3 times. After that, the task is dropped and the robot freed. The next inventory check recreates the task if the demand still exists.
+
+```bash
+python run_training_real.py --config configs/revised_hospital_config_v3.json --bridge-url ws://<robot-host>:8765
+python run_real_deployment.py --config configs/revised_hospital_config_v3.json \
+    --use-trained --checkpoint outputs/<exp>/checkpoints/gapo_real_final.pth --bridge-url ws://<robot-host>:8765
+```
 
 ## Outputs
 
-Each training run writes to `--output-dir/<exp-name>/`:
+Each run writes to `--output-dir/<exp-name>/`:
 
-- `checkpoints/`: model checkpoints and training metrics
-- `logs/`: task, decision, ranking and robot-sample logs
+- `checkpoints/`: policy, optimiser, task-creation actor and edge-cost model, plus training metrics
+- `logs/`: task, decision, ranking, SKU and robot-sample logs
 - `analytics/` and `metrics_final/`: plots and metric files
 
-The `outputs/` folder is git-ignored.
+Deployment runs write to `outputs/`, which is git-ignored.
 
 ## Cluster training
 
@@ -127,12 +175,25 @@ sbatch shell/sweep.sh          # learning-rate and hidden-dim sweep (9 array job
 
 Settings are environment variables, for example `CONFIG=... ITERATIONS=... sbatch shell/train.sh`. Set `MODULES` (environment modules to load) and `VENV_DIR` (a virtualenv to activate) if your cluster needs them. See `shell/env.sh`.
 
-`.github/workflows/deploy.yml` syncs this branch to the cluster on pushes to `main`. Its hosts, username and remote path come from GitHub variables and secrets, listed at the top of the file.
+`.github/workflows/deploy.yml` syncs this branch to the cluster on every push to `main`. Its hosts, username and remote path come from GitHub variables and secrets, listed at the top of the file.
+
+## Keeping the branches in sync
+
+Improvements to the shared code should land on both branches. Two tools help:
+
+```bash
+python tools/branch_audit.py main pilot_trial > audit.md   # which side changed each function, and in which commit
+python tools/demand_probe.py configs/revised_hospital_config_v3.json --hours 1   # does a config generate demand?
+```
+
+After a sync, the audit should show differences only in the layout and demand layer: config loading, graph and task features, the demand model, encoder naming and the layout-specific rewards.
 
 ## Known limitations
 
-- Simulated consumption is a model. Validate it against real records before relying on learned policies.
-- The real-robot scripts live on `pilot_trial`, not here.
+- Real-robot operation has not been tested with hardware.
+- Only telemetry noise from the reliability layer is implemented.
+- Checkpoints are not interchangeable between branches, because the feature sizes differ.
+- Hospital consumption figures are synthetic. Validate against real restocking records before relying on learned policies.
 
 ## Contact
 
