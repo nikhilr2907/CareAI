@@ -12,7 +12,7 @@ This repository holds the task-allocation and fleet orchestration software/model
 
 ## Overview
 
-A multi-agent PPO policy (GAPO) decides which robot takes each restocking task. The environment simulates shelves consuming stock, raises a replenishment task when a shelf falls to its reorder point, and moves robots along a graph of storage and shelf nodes to pick up and deliver. The same code can drive a live robot through a ROS 2 bridge.
+A multi-agent PPO policy (GAPO) decides which robot takes each restocking task. The environment simulates shelves consuming stock, raises a replenishment task when a shelf falls to its reorder point, and moves robots along a graph of storage and shelf nodes to pick up and deliver.
 
 Both branches run the same learning and environment code. They differ only in the layout and demand layer: the config format and loader, the graph and task features, the demand model, and a few layout-specific rewards. See [Environments](#environments).
 
@@ -34,9 +34,6 @@ flowchart LR
     ENV -->|traversal records| EC[EdgeCostManager<br/>learned path costs]
     EC -->|path costs| ENV
     PPO --> OUT[Checkpoints, logs, analytics]
-    POL -.->|inference| ENVR[GAPOTaskAssignmentEnvReal]
-    ENVR --> BE[ROSBridgeRobotBackend]
-    BE <-->|WebSocket /ws| ROS[ROS 2 bridge<br/>external]
 ```
 
 ## Environments
@@ -53,7 +50,7 @@ flowchart LR
 | Task features | 10 | 15, including task-type flags |
 | Layout-specific rewards | restock-before-break bonus, movement-during-break penalty | robot collision tracking, pickup load bonus, ad-hoc delivery bonus |
 
-Shared by both: the GAPO policy and PPO, attention and debiasing, the learned edge-cost model, the task-creation actor, charging (robots charge at hub or storage nodes), the real-robot loop, the loggers and analytics, and telemetry noise.
+Shared by both: the GAPO policy and PPO, attention and debiasing, the learned edge-cost model, the task-creation actor, charging (robots charge at hub or storage nodes), the loggers and analytics, and telemetry noise.
 
 ## Status
 
@@ -61,7 +58,6 @@ Shared by both: the GAPO policy and PPO, attention and debiasing, the learned ed
 | --- | --- |
 | Simulation training (`run_training.py`) | Working |
 | Simulation deployment (`run_deployment.py`) | Working, headless or with the pygame view |
-| Real-robot training and deployment (`run_training_real.py`, `run_real_deployment.py`) | Not yet run against hardware. Requires the ROS 2 bridge. |
 | Reliability layer | Phase 1 only: telemetry noise (`src/reliability/`) |
 
 Simulation generates its own tasks and consumption from the config, so no training data is required.
@@ -102,12 +98,9 @@ ILC demand is sparse: with the default settings (no ad-hoc tasks, consumption sc
 ```text
 run_training.py              Simulation PPO training
 run_deployment.py            Simulation inference, optional pygame view
-run_training_real.py         Training against a live robot via the ROS 2 bridge
-run_real_deployment.py       Inference against a live robot
 configs/                     ILC layout and demand configuration
 src/environment/             Graph, robots, tasks and the environment
 src/multi_agent_ppo/         Policy, encoders, attention, PPO, learned edge cost, task creation
-src/deployment/              ROS bridge backend and WebSocket client
 src/reliability/             Sim-to-real effects (telemetry noise)
 src/analytics/               Realtime analytics and metrics
 src/utils/                   Logging and helpers
@@ -122,33 +115,6 @@ This branch loads ILC configs (`metadata.environment_type: ilc_open_space`).
 - Each node's `foot_traffic_weight` scales its demand.
 - `metadata.num_robots` and `metadata.robot_max_capacity` set the fleet.
 
-## Real-robot operation
-
-The policy drives live robots through an external ROS 2 bridge, which handles Nav2 and publishes robot state. The bridge server is not in this repository.
-
-**Connection.** Set the bridge URL with `--bridge-url` or `ROS_BRIDGE_URL` in `.env`. The default is `ws://localhost:8765`. The client appends `/ws` to the URL. `ROSBridgeRobotBackend` opens one WebSocket client per robot and reconnects with exponential backoff (1 s, doubling, capped at 30 s).
-
-**Messages from the bridge** (JSON, keyed by `message_type`):
-
-| Type | Contents | Effect |
-| --- | --- | --- |
-| `robot_state` | position, orientation, velocity, battery, capacity, active task | Updates the robot's latest telemetry |
-| `task_status` | task ID and status (`completed`, `in_progress`, `failed`, `canceled`) | Completion or failure handling |
-| `location_inventory` | per-SKU stock at each location | Stored; the real environment overwrites simulated shelf stock with it |
-| `system_state` | full snapshot including inventory | Stored as the latest system state |
-| `emergency_stop` | `active` flag | Sets `emergency_stop_triggered` |
-| `task_response`, `connected`, `heartbeat` | acknowledgements | Logged only |
-
-**Messages to the bridge:** `task_command` (task ID, robot ID, waypoints, task metadata) and `task_cancel`.
-
-**Failures.** A failed or cancelled goal is retried up to 3 times. After that, the task is dropped and the robot freed. The next inventory check recreates the task if the demand still exists.
-
-```bash
-python run_training_real.py --config configs/ilc_pilot_v1_care_robotics.json --bridge-url ws://<robot-host>:8765
-python run_real_deployment.py --config configs/ilc_pilot_v1_care_robotics.json \
-    --use-trained --checkpoint outputs/<exp>/checkpoints/gapo_real_final.pth --bridge-url ws://<robot-host>:8765
-```
-
 ## Outputs
 
 Each run writes to `--output-dir/<exp-name>/`:
@@ -161,9 +127,7 @@ Deployment runs write to `outputs/`, which is git-ignored.
 
 ## Known limitations
 
-- Real-robot operation has not been tested with hardware.
-- Only telemetry noise from the reliability layer is implemented.
-- Checkpoints are not interchangeable between branches, because the feature sizes differ.
+Integration currently works with simulation only; closing the simulation-to-real gap is a work in progress.
 
 ## Contact
 
