@@ -35,3 +35,5 @@ Read [ROS bridge](ros-bridge.md) for how the environment talks to a physical rob
 Read [Policy and training](policy-and-training.md) for how GAPO scores robots and how PPO trains it.
 
 Read [Reliability](reliability.md) for the sim to real gap and what guards against it today.
+
+Read [Development](development.md) for checks, hooks and type coverage.

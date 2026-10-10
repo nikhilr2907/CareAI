@@ -136,3 +136,7 @@ Integration currently works with simulation only; closing the simulation-to-real
 For hospitals, investors and engineers, use the "Get in touch" form on [thecarerobotics.com](https://www.thecarerobotics.com/).
 
 For questions about this code, email [nikhil.raghavan25@imperial.ac.uk](mailto:nikhil.raghavan25@imperial.ac.uk).
+
+## Development
+
+See the [development guide](docs/development.md) for Ruff, type checking, tests and pre-commit setup.

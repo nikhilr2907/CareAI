@@ -42,3 +42,4 @@ nav:
   - ROS bridge: ros-bridge.md
   - Policy and training: policy-and-training.md
   - Reliability: reliability.md
+  - Development: development.md

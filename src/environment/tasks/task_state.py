@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 @dataclass
@@ -55,10 +56,10 @@ class Task:
     source: str = "unknown"  # 'deterministic', 'factoriser'
 
     # Intra-room coordinates (for precise positioning within nodes)
-    from_coordinates: Optional[tuple] = None  # (x, y) exact pickup point in meters
-    to_coordinates: Optional[tuple] = None  # (x, y) exact delivery point in meters
+    from_coordinates: Optional[tuple[float, float]] = None  # (x, y) exact pickup point in meters
+    to_coordinates: Optional[tuple[float, float]] = None  # (x, y) exact delivery point in meters
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Populate live inventory fields from creation-time context by default."""
         if self.initial_time_to_stockout is None:
             self.initial_time_to_stockout = self.time_to_stockout
@@ -98,7 +99,7 @@ class Task:
         deadline = self.current_deadline if self.current_deadline is not None else self.deadline
         return deadline - current_time
 
-    def get_features(self, current_time: float) -> np.ndarray:
+    def get_features(self, current_time: float) -> NDArray[np.float32]:
         """Extract task features for ML model."""
         age = self.get_age(current_time)
         time_to_deadline = self.get_time_to_deadline(current_time)
@@ -134,11 +135,11 @@ class TaskQueue:
 
     tasks: List[Task] = field(default_factory=list)
 
-    def add_task(self, task: Task):
+    def add_task(self, task: Task) -> None:
         """Add a task to the queue."""
         self.tasks.append(task)
 
-    def remove_task(self, task_id: int):
+    def remove_task(self, task_id: int) -> None:
         """Remove a task by ID."""
         self.tasks = [t for t in self.tasks if t.task_id != task_id]
 
@@ -152,6 +153,6 @@ class TaskQueue:
         """Get current number of tasks."""
         return len(self.tasks)
 
-    def clear(self):
+    def clear(self) -> None:
         """Clear all tasks from queue."""
         self.tasks.clear()
