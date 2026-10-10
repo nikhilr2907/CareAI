@@ -8,6 +8,7 @@ checkpoints/
 *.pt
 *.md
 .claude/**
+.codex/
 outputs/**
 utilities/**
 .env
@@ -15,8 +16,11 @@ utilities/**
 # Local virtualenv
 .venv/
 
-# Keep the project README tracked despite the *.md rule above
+# Keep the project README and the published docs site tracked despite the *.md rule above
 !README.md
+!docs/**/*.md
+!mkdocs.yml
+!.readthedocs.yaml
 
 # Digital twin front end (local only)
 digital_twin/
@@ -25,3 +29,13 @@ digital_twin/
 shell/
 tools/branch_audit.py
 tools/
+
+# Superseded docs and other local-only notes (not shared)
+archive/
+site/
+
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/

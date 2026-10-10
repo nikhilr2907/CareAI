@@ -1,30 +1,3 @@
-"""
-GAPO Real-Robot Deployment Script.
-
-Runs a hospital policy (or heuristic baseline) against a live robot via ROS bridge —
-inference only, no gradient updates. Intended for production use after a policy has been
-trained with run_training_real.py or run_training.py.
-
-Differences from run_training_real.py:
-  - No PPO updates, no Memory buffer, no rollout boundaries
-  - Actions selected greedily (deterministic=True) when a policy is loaded
-  - Infinite step loop; stops on Ctrl-C or --max-steps
-  - No warmup logic
-  - No checkpoint saving
-
-Usage:
-    # Heuristic (nearest-robot, no trained policy) — useful as a safety baseline
-    python run_real_deployment.py --config configs/revised_hospital_config_v3.json
-
-    # With trained policy
-    python run_real_deployment.py --config configs/revised_hospital_config_v3.json \\
-                                  --use-trained --checkpoint outputs/.../gapo_real_final.pth
-
-    # Custom bridge URL, capped step count, seeded RNG for reproducible task arrivals
-    python run_real_deployment.py --config configs/revised_hospital_config_v3.json \\
-                                  --use-trained --checkpoint ... \\
-                                  --bridge-url ws://192.168.1.50:9090 --max-steps 86400 --seed 42
-"""
 import argparse
 import asyncio
 import logging
@@ -37,99 +10,152 @@ import numpy as np
 import pygame
 import torch
 
+from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 from src.deployment.robot_backend import ROSBridgeRobotBackend
 from src.multi_agent_ppo.gapo_ppo import GAPOPPO
-from src.utils.training_utils import (
-    create_real_env_from_config_file,
-)
+from src.utils.decision_logger import DecisionLogger
 from src.utils.deployment_utils import (
     apply_floorplan_layout,
+    assign_tasks,
     compute_bounds,
     draw_graph,
     draw_nodes,
-    draw_tasks,
     draw_robots,
+    draw_tasks,
     rank_pending_tasks,
     rescore_robot_queues,
-    assign_tasks,
 )
-from src.utils.task_logger import TaskLogger
-from src.utils.decision_logger import DecisionLogger
+from src.utils.fleet_event_logger import FleetEventLogger
 from src.utils.ranking_snapshot_logger import RankingSnapshotLogger
 from src.utils.robot_sample_logger import RobotSampleLogger
-from src.analytics.realtime_collector import RealtimeAnalyticsCollector
-from src.utils.fleet_event_logger import FleetEventLogger
+from src.utils.task_logger import TaskLogger
+from src.utils.training_utils import (
+    create_real_env_from_config_file,
+)
 
 
 def parse_deploy_args():
     parser = argparse.ArgumentParser(
-        description='Deploy trained GAPO policy on a real hospital robot'
+        description="Deploy trained GAPO policy on a real hospital robot"
     )
 
-    # Required
-    parser.add_argument('--config', type=str, required=True,
-                        help='Path to hospital config JSON file')
+    parser.add_argument(
+        "--config", type=str, required=True, help="Path to hospital config JSON file"
+    )
 
-    # Policy (optional — falls back to heuristic nearest-robot when omitted)
-    parser.add_argument('--use-trained', action='store_true',
-                        help='Load and use a trained policy (default: heuristic assignment)')
-    parser.add_argument('--checkpoint', type=str, default=None,
-                        help='Path to trained policy checkpoint (.pth). Required only with --use-trained')
+    parser.add_argument(
+        "--use-trained",
+        action="store_true",
+        help="Load and use a trained policy (default: heuristic assignment)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to trained policy checkpoint (.pth). Required only with --use-trained",
+    )
 
-    # Connection
-    parser.add_argument('--bridge-url', type=str, default=None,
-                        help='WebSocket URL of ROS bridge (overrides ROS_BRIDGE_URL in .env)')
+    parser.add_argument(
+        "--bridge-url",
+        type=str,
+        default=None,
+        help="WebSocket URL of ROS bridge (overrides ROS_BRIDGE_URL in .env)",
+    )
 
-    # Reproducibility
-    parser.add_argument('--seed', type=int, default=None,
-                        help='Seed numpy + torch RNGs (affects stochastic task generation; '
-                             'world dynamics are not reproducible on real hardware)')
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed numpy + torch RNGs (affects stochastic task generation; "
+        "world dynamics are not reproducible on real hardware)",
+    )
 
-    # Environment
-    parser.add_argument('--num-robots', type=int, default=None,
-                        help='Number of robots (default: read from config)')
-    parser.add_argument('--max-episode-time', type=float, default=28800.0,
-                        help='Max episode time in seconds (default: 28800 = 8 hours)')
-    parser.add_argument('--stochastic-tasks-per-hour', type=float, default=2.0,
-                        help='Stochastic task generation rate per hour (default: 2.0)')
-    parser.add_argument('--stochastic-task-cap-per-hour', type=int, default=2,
-                        help='Hard cap on stochastic tasks per rolling hour (default: 2)')
-    parser.add_argument('--initial-stochastic-tasks', type=int, default=0,
-                        help='Initial stochastic tasks at reset (default: 0)')
-    parser.add_argument('--max-assignments-per-step', type=int, default=10,
-                        help='Max task assignments per step (default: 10)')
-    parser.add_argument('--max-steps', type=int, default=None,
-                        help='Stop after this many steps (default: run indefinitely)')
+    parser.add_argument(
+        "--num-robots", type=int, default=None, help="Number of robots (default: read from config)"
+    )
+    parser.add_argument(
+        "--max-episode-time",
+        type=float,
+        default=28800.0,
+        help="Max episode time in seconds (default: 28800 = 8 hours)",
+    )
+    parser.add_argument(
+        "--stochastic-tasks-per-hour",
+        type=float,
+        default=2.0,
+        help="Stochastic task generation rate per hour (default: 2.0)",
+    )
+    parser.add_argument(
+        "--stochastic-task-cap-per-hour",
+        type=int,
+        default=2,
+        help="Hard cap on stochastic tasks per rolling hour (default: 2)",
+    )
+    parser.add_argument(
+        "--initial-stochastic-tasks",
+        type=int,
+        default=0,
+        help="Initial stochastic tasks at reset (default: 0)",
+    )
+    parser.add_argument(
+        "--max-assignments-per-step",
+        type=int,
+        default=10,
+        help="Max task assignments per step (default: 10)",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Stop after this many steps (default: run indefinitely)",
+    )
 
-    # Model
-    parser.add_argument('--hidden-dim', type=int, default=64,
-                        help='Hidden dimension — must match checkpoint (default: 64)')
-    parser.add_argument('--device', type=str, default='auto',
-                        choices=['auto', 'cpu', 'cuda'])
+    parser.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=64,
+        help="Hidden dimension — must match checkpoint (default: 64)",
+    )
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
 
-    # Digital twin
-    parser.add_argument('--twin', action='store_true',
-                        help='Enable digital twin WebSocket publisher (browser 3D view)')
-    parser.add_argument('--twin-port', type=int, default=8766,
-                        help='WebSocket port for digital twin (HTTP on port+1, default 8767)')
+    parser.add_argument(
+        "--twin",
+        action="store_true",
+        help="Enable digital twin WebSocket publisher (browser 3D view)",
+    )
+    parser.add_argument(
+        "--twin-port",
+        type=int,
+        default=8766,
+        help="WebSocket port for digital twin (HTTP on port+1, default 8767)",
+    )
 
-    # Visualization (pygame live view)
-    parser.add_argument('--headless', action='store_true',
-                        help='Disable pygame visualization (run headless)')
-    parser.add_argument('--fps', type=int, default=30,
-                        help='Pygame FPS (default: 30)')
-    parser.add_argument('--width', type=int, default=1200,
-                        help='Visualization window width (default: 1200)')
-    parser.add_argument('--height', type=int, default=800,
-                        help='Visualization window height (default: 800)')
+    parser.add_argument(
+        "--headless", action="store_true", help="Disable pygame visualization (run headless)"
+    )
+    parser.add_argument("--fps", type=int, default=30, help="Pygame FPS (default: 30)")
+    parser.add_argument(
+        "--width", type=int, default=1200, help="Visualization window width (default: 1200)"
+    )
+    parser.add_argument(
+        "--height", type=int, default=800, help="Visualization window height (default: 800)"
+    )
 
-    # Output
-    parser.add_argument('--output-dir', type=str, default='outputs',
-                        help='Directory for logs and analytics (default: outputs)')
-    parser.add_argument('--exp-name', type=str, default=None,
-                        help='Experiment name (default: auto-generated timestamp)')
-    parser.add_argument('--log-interval', type=int, default=100,
-                        help='Log every N steps (default: 100)')
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="outputs",
+        help="Directory for logs and analytics (default: outputs)",
+    )
+    parser.add_argument(
+        "--exp-name",
+        type=str,
+        default=None,
+        help="Experiment name (default: auto-generated timestamp)",
+    )
+    parser.add_argument(
+        "--log-interval", type=int, default=100, help="Log every N steps (default: 100)"
+    )
 
     return parser.parse_args()
 
@@ -137,14 +163,13 @@ def parse_deploy_args():
 async def main():
     args = parse_deploy_args()
 
-    # --- Output / logging setup ---
     exp_name = args.exp_name or f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir = Path(args.output_dir) / exp_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(message)s',
+        format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[
             logging.FileHandler(output_dir / "deploy.log"),
             logging.StreamHandler(),
@@ -163,13 +188,12 @@ async def main():
     robot_sample_logger = RobotSampleLogger(output_dir / "logs")
     analytics = RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
-        mode='real',
+        mode="real",
         snapshot_frequency=50,
         task_logger=task_logger,
         robot_sample_logger=robot_sample_logger,
     )
 
-    # --- Validate inputs ---
     if not Path(args.config).exists():
         raise FileNotFoundError(f"Config not found: {args.config}")
     if args.use_trained:
@@ -178,12 +202,11 @@ async def main():
         if not Path(args.checkpoint).exists():
             raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
 
-    if args.device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
         device = args.device
 
-    # --- Start robot backend ---
     num_robots = args.num_robots
     robot_backend = ROSBridgeRobotBackend(
         bridge_url=args.bridge_url,
@@ -206,10 +229,7 @@ async def main():
     await robot_backend.start()
     logger.info("ROS bridge backend started")
 
-    # Wait for first telemetry from each robot before env.reset() runs.
-    # Yields so the WebSocket listener task can connect + receive its first
-    # robot_state message. Logs progress every second; reports if the
-    # listener task itself died (e.g. wrong URL, connection refused).
+    # Wait for first telemetry per robot before reset; yields for the WS listener and logs progress/failures.
     _loop = asyncio.get_running_loop()
     _wait_start = _loop.time()
     _deadline = _wait_start + 10.0
@@ -217,7 +237,9 @@ async def main():
     _expected_robots = num_robots if num_robots else 1
     while _loop.time() < _deadline:
         if all(robot_backend.get_telemetry(r) is not None for r in range(_expected_robots)):
-            logger.info(f"Telemetry confirmed for all robots after {_loop.time() - _wait_start:.2f}s")
+            logger.info(
+                f"Telemetry confirmed for all robots after {_loop.time() - _wait_start:.2f}s"
+            )
             break
         if _loop.time() - _last_log > 1.0:
             logger.info(
@@ -240,8 +262,6 @@ async def main():
             f"Verify the bridge is running and reachable."
         )
 
-
-    # --- Create environment ---
     env, num_nodes = create_real_env_from_config_file(
         args.config,
         robot_backend=robot_backend,
@@ -254,11 +274,12 @@ async def main():
         fleet_event_logger=FleetEventLogger(output_dir / "logs"),
         log_dir=output_dir / "logs",
     )
-    logger.info(f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}")
+    logger.info(
+        f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}"
+    )
     analytics.sku_logger = env.sku_logger
     analytics.initialize(env.graph_state.nodes)
 
-    # --- Build and load policy (or run heuristic) ---
     ppo = None
     if args.use_trained:
         if getattr(env.graph_state, "category_order", None):
@@ -270,7 +291,11 @@ async def main():
         edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
         sku_embed_dim = 16
         node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
-        num_departments = len(env.graph_state.department_order) if getattr(env.graph_state, 'department_order', None) else 10
+        num_departments = (
+            len(env.graph_state.department_order)
+            if getattr(env.graph_state, "department_order", None)
+            else 10
+        )
         num_shift_periods = 4  # night, morning, afternoon, evening
 
         ppo = GAPOPPO(
@@ -291,7 +316,7 @@ async def main():
             sku_embed_dim=sku_embed_dim,
             hidden_dim=args.hidden_dim,
             num_attention_heads=4,
-            lr=1e-4,          # unused in deployment, required by constructor
+            lr=1e-4,  # unused in deployment, required by constructor
             actor_lr=1e-4,
             critic_lr=5e-5,
             gamma=0.99,
@@ -305,20 +330,19 @@ async def main():
             min_adv_std=1e-3,
             ranking_max_pairs_per_group=64,
             ranking_min_adv_gap=1e-4,
-            task_creation_actor=getattr(env, 'task_creation_actor', None),
-            edge_cost_manager=getattr(env, 'edge_cost_manager', None),
+            task_creation_actor=getattr(env, "task_creation_actor", None),
+            edge_cost_manager=getattr(env, "edge_cost_manager", None),
             device=device,
             logger=logger,
         )
 
-        ppo.load(args.checkpoint, edge_cost_manager=getattr(env, 'edge_cost_manager', None))
+        ppo.load(args.checkpoint, edge_cost_manager=getattr(env, "edge_cost_manager", None))
         ppo.policy.eval()
         ppo.policy_old.eval()
         logger.info(f"Policy loaded from: {args.checkpoint}")
     else:
         logger.info("No trained policy: using heuristic task assignment (nearest robot)")
 
-    # --- Deployment state ---
     total_steps = 0
     total_assignments = 0
     total_completions = 0
@@ -329,11 +353,7 @@ async def main():
     completion_time_history = deque(maxlen=1000)
     start_time = time.time()
 
-    # Diagnostic: log the first telemetry packet seen per robot so you can confirm
-    # at a glance what the bridge is actually publishing (battery / position / etc).
-    # If battery prints 0.000 here AND stays flat in the periodic log, the ROS bridge
-    # is not populating battery_level → _should_robot_charge() always returns True →
-    # tasks get assigned but the robot is force-routed to a hub instead of executing.
+    # battery_level staying 0.0 here means the bridge isn't publishing it, forcing the robot to charge instead of work.
     first_telemetry_logged: set = set()
 
     state_dict = env.reset()
@@ -342,11 +362,11 @@ async def main():
     twin_publisher = None
     if args.twin:
         from src.deployment.twin_publisher import TwinPublisher
+
         twin_publisher = TwinPublisher(graph_state=env.graph_state, port=args.twin_port)
         twin_publisher.start()
         logger.info(f"Open http://localhost:{args.twin_port + 1} to view the digital twin")
 
-    # --- Visualization setup ---
     if not args.headless:
         pygame.init()
         screen = pygame.display.set_mode((args.width, args.height))
@@ -379,9 +399,7 @@ async def main():
                     logger.info("Pygame window closed — stopping deployment")
                     break
 
-            # First-telemetry diagnostic — fires once per robot the moment the
-            # bridge sends its first packet, so you can immediately see what fields
-            # the bridge is populating (especially battery_level).
+            # Fires once per robot on its first telemetry packet, to surface what the bridge is populating.
             for robot in env.robots:
                 if robot.robot_id in first_telemetry_logged:
                     continue
@@ -409,12 +427,13 @@ async def main():
 
             pending_before = len(env.pending_tasks)
 
-            # Re-rank pending tasks, re-score robot queues, then assign — shared helpers
-            # so behavior matches run_deployment.py and any future changes land in one place.
+            # Shared helpers with run_deployment.py so future changes land in one place.
             rank_pending_tasks(env, ppo)
             rescore_robot_queues(env, ppo)
             assignments_this_step = assign_tasks(
-                env, ppo, args.max_assignments_per_step,
+                env,
+                ppo,
+                args.max_assignments_per_step,
                 task_logger=task_logger,
                 decision_logger=decision_logger,
                 ranking_logger=ranking_logger,
@@ -424,7 +443,6 @@ async def main():
             total_assignments += assignments_this_step
             state_dict = env._get_state_dict()
 
-            # Env step
             prev_completed = len(env.completed_tasks)
             state_dict, _, _, _ = env.step(dt=1.0)
             total_steps += 1
@@ -439,7 +457,7 @@ async def main():
                 if task.arrival_time is not None:
                     ct = env.current_time - task.arrival_time
                     completion_time_history.append(ct)
-                if hasattr(task, 'deadline') and task.deadline:
+                if hasattr(task, "deadline") and task.deadline:
                     lateness = env.current_time - task.deadline
                     if lateness <= 0:
                         total_on_time += 1
@@ -447,8 +465,11 @@ async def main():
                         total_late += 1
                         total_lateness += lateness
                 task_logger.log_completion(
-                    task.task_id, 0.0,
-                    (env.current_time - task.arrival_time) if task.arrival_time is not None else None,
+                    task.task_id,
+                    0.0,
+                    (env.current_time - task.arrival_time)
+                    if task.arrival_time is not None
+                    else None,
                     env.current_time,
                     distance_traveled=getattr(task, "distance_traveled", 0.0),
                     energy_consumed=getattr(task, "energy_consumed_wh", 0.0),
@@ -471,11 +492,12 @@ async def main():
                 analytics.save_metrics_json()
                 logger.info(f"Analytics snapshot saved to step {total_steps}")
 
-            # Periodic logging
             if total_steps % args.log_interval == 0:
                 wall_hours = (time.time() - start_time) / 3600
                 sim_hours = env.current_time / 3600
-                avg_ct = float(np.mean(completion_time_history)) / 60 if completion_time_history else 0.0
+                avg_ct = (
+                    float(np.mean(completion_time_history)) / 60 if completion_time_history else 0.0
+                )
                 logger.info(
                     f"[Step {total_steps}] "
                     f"Assigned={total_assignments}  Completed={total_completions}  "
@@ -483,10 +505,7 @@ async def main():
                     f"AvgCompletionTime={avg_ct:.1f}min  "
                     f"SimTime={sim_hours:.2f}h  WallTime={wall_hours:.2f}h"
                 )
-                # Per-robot diagnostic block — exposes battery + charge gating so a
-                # silent bridge (battery never published, defaults to 0.0) is obvious.
-                # If battery is flat 0.0 across steps, _should_robot_charge() returns True
-                # every tick → robot is force-routed to hub and tasks never execute.
+                # Battery flat at 0.0 across steps means _should_robot_charge() forces the robot to a hub.
                 for robot in env.robots:
                     tele = robot.telemetry
                     if tele is None:
@@ -531,7 +550,7 @@ async def main():
                 for robot in env.robots:
                     assigned += len(robot.task_queue) + len(robot.overflow_queue)
                     for task in robot.task_queue + robot.overflow_queue:
-                        if hasattr(task, 'get_time_to_deadline'):
+                        if hasattr(task, "get_time_to_deadline"):
                             assigned_deadlines.append(task.get_time_to_deadline(env.current_time))
                     for task in robot.task_queue:
                         if getattr(task, "leg_type", "full") == "pickup":
@@ -548,7 +567,7 @@ async def main():
                     deadlines = [
                         t.get_time_to_deadline(env.current_time)
                         for t in env.pending_tasks
-                        if hasattr(t, 'get_time_to_deadline')
+                        if hasattr(t, "get_time_to_deadline")
                     ]
                     avg_deadline = float(np.mean(deadlines)) if deadlines else 0.0
                     min_deadline = float(np.min(deadlines)) if deadlines else 0.0
@@ -566,14 +585,14 @@ async def main():
                 avg_lateness = (total_lateness / max(total_late, 1)) if total_late > 0 else 0.0
 
                 hud_lines = [
-                    f"step={total_steps}  sim_t={env.current_time/60:.1f}m",
+                    f"step={total_steps}  sim_t={env.current_time / 60:.1f}m",
                     f"created={total_tasks_created} assigned={total_assignments}",
                     f"completed={total_completions} pending={pending} in_progress={assigned}",
                     f"pickup_items={pickup_items} dropoff_items={dropoff_items}",
                     f"pickup_ov={pickup_items_overflow} dropoff_ov={dropoff_items_overflow}",
-                    f"on_time={total_on_time} late={total_late} avg_late={avg_lateness/60:.1f}m",
-                    f"deadline_avg={avg_deadline/60:.1f}m min={min_deadline/60:.1f}m",
-                    f"assigned_deadline_avg={avg_assigned_deadline/60:.1f}m min={min_assigned_deadline/60:.1f}m",
+                    f"on_time={total_on_time} late={total_late} avg_late={avg_lateness / 60:.1f}m",
+                    f"deadline_avg={avg_deadline / 60:.1f}m min={min_deadline / 60:.1f}m",
+                    f"assigned_deadline_avg={avg_assigned_deadline / 60:.1f}m min={min_assigned_deadline / 60:.1f}m",
                 ]
                 for robot in env.robots:
                     hud_lines.append(
@@ -585,10 +604,7 @@ async def main():
                     if node.node_type != "recovery":
                         continue
                     stockout = " STOCKOUT" if node.is_stockout else ""
-                    line = (
-                        f"{node.node_id}: "
-                        f"{node.stock_level:.0f}/{node.max_stock:.0f}{stockout}"
-                    )
+                    line = f"{node.node_id}: {node.stock_level:.0f}/{node.max_stock:.0f}{stockout}"
                     if node.category_inventory:
                         cat_parts = [
                             f"{cat}:{node.get_category_stock_level(cat):.0f}/"
@@ -624,10 +640,9 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Deployment stopped by user (Ctrl-C)")
 
-    # --- Teardown ---
     wall_hours = (time.time() - start_time) / 3600
     logger.info("-" * 80)
-    logger.info(f"Deployment complete")
+    logger.info("Deployment complete")
     logger.info(f"  Total steps:       {total_steps}")
     logger.info(f"  Total assignments: {total_assignments}")
     logger.info(f"  Total completions: {total_completions}")
@@ -653,5 +668,5 @@ async def main():
     await robot_backend.stop()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())

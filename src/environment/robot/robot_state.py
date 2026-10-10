@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, TYPE_CHECKING, Set
+from typing import TYPE_CHECKING, List, Optional, Set
+
 import numpy as np
+
 from .robot_telemetry import RobotTelemetry
 
 if TYPE_CHECKING:
@@ -12,19 +14,20 @@ class RobotState:
     robot_id: int
     max_capacity: int = 12  # Maximum items robot can carry
 
-    # ===== TASK ASSIGNMENTS (Environment-controlled) =====
-    task_queue: List['Task'] = field(default_factory=list)  # Ordered list of Task objects
-    overflow_queue: List['Task'] = field(default_factory=list)  # Deferred tasks when capacity is full
-    picked_up_task_ids: Set[int] = field(default_factory=set)  # Parent task IDs with pickup completed
+    task_queue: List["Task"] = field(default_factory=list)  # Ordered list of Task objects
+    overflow_queue: List["Task"] = field(
+        default_factory=list
+    )  # Deferred tasks when capacity is full
+    picked_up_task_ids: Set[int] = field(
+        default_factory=set
+    )  # Parent task IDs with pickup completed
     target_node_index: Optional[int] = None  # Ultimate destination for current task
     planned_path: List[int] = field(default_factory=list)  # Full path for current task
     travel_start_time: float = 0.0  # When robot started current journey
 
-    # ===== STATIONARITY TRACKING =====
     consecutive_idle_s: float = 0.0  # Seconds continuously at ~0 velocity
     _stationary_event_fired: bool = False  # True after 10s threshold logged, reset when robot moves
 
-    # ===== TELEMETRY (Robot simulator/hardware reports) =====
     telemetry: Optional[RobotTelemetry] = None  # Latest sensor data
 
     def update_telemetry(self, telemetry: RobotTelemetry):
@@ -33,15 +36,11 @@ class RobotState:
 
     @property
     def num_queued_tasks(self) -> int:
-        """Get number of distinct tasks queued, not counting pickup+dropoff legs separately.
-
-        Pickup and dropoff legs of the same parent share task_id since the leg-ID
-        collapse, so a set of task_ids gives the unique-task count directly.
-        """
+        """Get number of distinct tasks queued, not counting pickup+dropoff legs separately."""
         return len({task.task_id for task in self.task_queue})
 
     @property
-    def current_task(self) -> Optional['Task']:
+    def current_task(self) -> Optional["Task"]:
         """Get the current task (first in queue)."""
         return self.task_queue[0] if self.task_queue else None
 
@@ -77,8 +76,7 @@ class RobotState:
     def effective_load(self) -> int:
         """Physical load plus items committed by queued pickup legs not yet executed."""
         committed = sum(
-            t.num_items for t in self.task_queue
-            if getattr(t, "leg_type", "full") == "pickup"
+            t.num_items for t in self.task_queue if getattr(t, "leg_type", "full") == "pickup"
         )
         return self.current_load + committed
 
@@ -106,31 +104,18 @@ class RobotState:
             return self.telemetry.is_charging
         return False
 
-    def _task_sort_key(self, t: 'Task') -> tuple:
-        """
-        Sort key for queue ordering.
-
-        Primary: per-task pickup-pending constraint — a dropoff whose pickup has
-        not yet completed sorts below everything else (correctness, not preference).
-        Secondary: learned_score descending — network signal.
-        Tertiary: arrival_time ascending — FIFO tiebreaker, stable during early
-        training when learned_scores are all 0.0. Requires no consumption
-        assumptions and uses only observable task metadata.
-        """
+    def _task_sort_key(self, t: "Task") -> tuple:
+        """Sort key for queue ordering."""
         pickup_pending = (
-            1 if getattr(t, "leg_type", None) == "dropoff"
+            1
+            if getattr(t, "leg_type", None) == "dropoff"
             and t.task_id not in self.picked_up_task_ids
             else 0
         )
         return (pickup_pending, -t.learned_score, t.arrival_time)
 
-    def add_task(self, task: 'Task'):
-        """
-        Add task to robot's queue, maintaining priority order (high priority first).
-
-        Args:
-            task: Task to add to queue
-        """
+    def add_task(self, task: "Task"):
+        """Add task to robot's queue, maintaining priority order (high priority first)."""
         if self.task_queue:
             current_task = self.task_queue[0]
             remaining = self.task_queue[1:] + [task]
@@ -162,7 +147,10 @@ class RobotState:
             if deferred_parent_ids:
                 still_keep = []
                 for task in keep:
-                    if getattr(task, "leg_type", "full") == "dropoff" and task.task_id in deferred_parent_ids:
+                    if (
+                        getattr(task, "leg_type", "full") == "dropoff"
+                        and task.task_id in deferred_parent_ids
+                    ):
                         self.overflow_queue.append(task)
                     else:
                         still_keep.append(task)
@@ -246,10 +234,7 @@ class RobotState:
         self.overflow_queue.sort(key=self._task_sort_key)
 
     def enforce_capacity_limits(self):
-        """
-        Ensure pickup legs in main queue do not exceed available capacity.
-        Moves excess pickups (and their matching dropoffs) to overflow.
-        """
+        """Ensure pickup legs in main queue do not exceed available capacity."""
         available_slots = max(0, self.max_capacity - self.current_load)
         if not self.task_queue:
             return
@@ -278,7 +263,10 @@ class RobotState:
         if deferred_parent_ids:
             still_keep = []
             for task in kept:
-                if getattr(task, "leg_type", "full") == "dropoff" and task.task_id in deferred_parent_ids:
+                if (
+                    getattr(task, "leg_type", "full") == "dropoff"
+                    and task.task_id in deferred_parent_ids
+                ):
                     self.overflow_queue.append(task)
                 else:
                     still_keep.append(task)
@@ -302,13 +290,8 @@ class RobotState:
             return True
         return task_id in self.picked_up_task_ids
 
-    def complete_current_task(self) -> Optional['Task']:
-        """
-        Mark current task complete and remove from queue.
-
-        Returns:
-            Completed task, or None if no tasks in queue
-        """
+    def complete_current_task(self) -> Optional["Task"]:
+        """Mark current task complete and remove from queue."""
         if self.task_queue:
             completed = self.task_queue.pop(0)
             # Reset path if no more tasks
@@ -328,20 +311,12 @@ class RobotState:
         return (total_items + num_items) <= self.max_capacity
 
     def compute_distances_to_nodes(self, graph_state) -> np.ndarray:
-        """
-        Compute Euclidean distances from robot's current position to all nodes.
-
-        Args:
-            graph_state: GraphState object containing nodes
-
-        Returns:
-            numpy array of distances to all nodes
-        """
+        """Compute Euclidean distances from robot's current position to all nodes."""
         distances = []
         robot_x, robot_y = self.current_position
 
         for node in graph_state.nodes:
-            distance = np.sqrt((node.center_x - robot_x)**2 + (node.center_y - robot_y)**2)
+            distance = np.sqrt((node.center_x - robot_x) ** 2 + (node.center_y - robot_y) ** 2)
             distances.append(distance)
 
         return np.array(distances, dtype=np.float32)
@@ -349,7 +324,4 @@ class RobotState:
 
 def create_default_robot(robot_id: int, max_capacity: int = 12) -> RobotState:
     """Create a robot with default state. Telemetry will be populated by robot simulator."""
-    return RobotState(
-        robot_id=robot_id,
-        max_capacity=max_capacity
-    )
+    return RobotState(robot_id=robot_id, max_capacity=max_capacity)

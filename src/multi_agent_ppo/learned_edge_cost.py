@@ -1,44 +1,18 @@
+import random
+from typing import List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-import random
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
 
-
-# Feature indices in EdgeTraversalRecord.to_feature_vector()
-# [0] distance_m  — NOT fed to encoder; extracted in predict_cost() to convert seconds
-# [1] corridor_width         ┐
-# [2] num_robots_on_edge     │
-# [3] people_count           │  These 8 congestion features are the encoder input
-# [4] clutter_level          │  (indices 1–8 of the 9-element vector)
-# [5] approaching_robot_count│
-# [6] from_node_occupancy    │
-# [7] to_node_occupancy      │
-# [8] time_of_day            ┘
-#
-# Removed from original: same_direction_count, opposite_direction_count, stop_count.
-# Direction is unknown at inference time; stop_count only exists post-traversal.
-
-EDGE_COST_FEATURE_DIM = 9   # Full feature vector length (including distance_m at [0])
-EDGE_COST_ENCODER_DIM = 8   # Congestion features fed to encoder (distance_m excluded)
+# Feature vector index 0 is distance_m (excluded from the encoder); indices 1-8 are congestion features. Direction/stop-count fields were dropped: unknown pre-traversal, or post-traversal only.
+EDGE_COST_FEATURE_DIM = 9
+EDGE_COST_ENCODER_DIM = 8
 
 
 class LearnedEdgeCostModel(nn.Module):
-    """
-    Predicts edge traversal time distribution given current conditions.
-
-    Outputs both mean and log-variance so path planning can account for
-    risk (high variance = unreliable edge).
-
-    Architecture:
-        Input features → MLP → (mean_time, log_variance)
-
-    The model learns a delay factor relative to base traversal time:
-        predicted_time = base_time * delay_factor
-    where delay_factor >= 1.0 (can only be slower than free-flow).
-    """
+    """Predicts edge traversal time as a mean delay factor and log-variance so path planning can account for risk."""
 
     def __init__(self, input_dim: int = EDGE_COST_FEATURE_DIM, hidden_dim: int = 64):
         super().__init__()
@@ -46,10 +20,9 @@ class LearnedEdgeCostModel(nn.Module):
         self.input_dim = input_dim
         encoder_input_dim = input_dim - 1  # distance_m (index 0) excluded from encoder
 
-        # Normalize congestion features before encoding (indices 1–8 span very different scales)
+        # Normalize congestion features before encoding (indices 1-8 span very different scales)
         self.input_norm = nn.LayerNorm(encoder_input_dim)
 
-        # Shared feature encoder (congestion features only)
         self.encoder = nn.Sequential(
             nn.Linear(encoder_input_dim, hidden_dim),
             nn.ReLU(),
@@ -64,73 +37,36 @@ class LearnedEdgeCostModel(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
         )
 
-        # Variance head: predicts log-variance of traversal time
         self.log_var_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Linear(hidden_dim // 2, 1),
         )
 
-        # Init mean head bias to -3.0: softplus(-3) ≈ 0.049 → delay_factor starts near 1.05
-        # (avoids the softplus(0) = 0.693 default which would start delay_factor at ~1.69)
+        # Mean head bias set to -3.0 so softplus(-3)≈0.049 → delay_factor starts near 1.05 (default softplus(0)=0.693 would start near 1.69).
         nn.init.constant_(self.mean_head[-1].bias, -3.0)
-        # Initialize log_var head bias to small value (low initial uncertainty)
         nn.init.constant_(self.log_var_head[-1].bias, -2.0)
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Predict delay factor distribution.
-
-        Args:
-            features: [batch, input_dim] edge features (distance_m at [0], congestion at [1:])
-
-        Returns:
-            delay_factor: [batch] predicted mean delay factor (>= 1.0, dimensionless)
-            log_var: [batch] log-variance of delay factor, clamped to [-8, 4]
-
-        The delay factor is scale-invariant: delay_factor = actual_time / base_time.
-        To get traversal time in seconds: time = delay_factor * (distance_m / max_v_ms).
-        Training on delay_factor rather than absolute seconds prevents long corridors
-        from dominating the gradient signal.
-
-        distance_m (index 0) is NOT passed to the encoder — it is only used in
-        predict_cost() to convert the dimensionless delay_factor back to seconds.
-        """
+        """Predict the delay-factor distribution (mean >= 1.0, clamped log-variance) from congestion features, excluding distance_m."""
         # Congestion features only (exclude distance_m at index 0)
-        congestion_features = features[:, 1:]  # [batch, input_dim-1]
+        congestion_features = features[:, 1:]
         h = self.encoder(self.input_norm(congestion_features))
 
         # Predict delay factor >= 1.0 (corridor can only be slower than free-flow)
         raw_delay = self.mean_head(h).squeeze(-1)
         delay_factor = 1.0 + F.softplus(raw_delay)
 
-        # Predicted log-variance of delay factor (clamped for numerical stability)
         log_var = self.log_var_head(h).squeeze(-1)
         log_var = torch.clamp(log_var, min=-8.0, max=4.0)
 
         return delay_factor, log_var
 
-    def predict_cost(
-        self,
-        features: torch.Tensor,
-        risk_sensitivity: float = 0.0
-    ) -> torch.Tensor:
-        """
-        Predict path cost in seconds for Dijkstra, optionally risk-adjusted.
-
-        Args:
-            features: [batch, input_dim] or [num_edges, input_dim]
-            risk_sensitivity: 0.0 = use mean only (risk-neutral)
-                             >0.0 = penalize high-variance edges (risk-averse)
-                             Typical: 0.5 - 1.0
-
-        Returns:
-            costs: [batch] or [num_edges] predicted traversal time in seconds
-        """
+    def predict_cost(self, features: torch.Tensor, risk_sensitivity: float = 0.0) -> torch.Tensor:
+        """Predict path cost in seconds for Dijkstra, optionally risk-adjusted."""
         delay_factor, log_var = self.forward(features)
 
-        # Convert delay factor back to seconds: time = delay_factor * (distance / max_v).
-        # Current simulator/config convention uses 0.5 m/s uniformly across edges.
+        # time = delay_factor * (distance / max_v); sim/config convention uses 0.5 m/s uniformly.
         distance = features[:, 0]
         base_time = distance / 0.5
 
@@ -141,21 +77,8 @@ class LearnedEdgeCostModel(nn.Module):
         else:
             return delay_factor * base_time
 
-    def predict_numpy(
-        self,
-        features_np: np.ndarray,
-        risk_sensitivity: float = 0.0
-    ) -> np.ndarray:
-        """
-        Convenience method for use in Dijkstra (numpy in, numpy out).
-
-        Args:
-            features_np: [num_edges, input_dim] numpy array
-            risk_sensitivity: risk aversion parameter
-
-        Returns:
-            costs: [num_edges] numpy array of predicted costs
-        """
+    def predict_numpy(self, features_np: np.ndarray, risk_sensitivity: float = 0.0) -> np.ndarray:
+        """Convenience method for use in Dijkstra (numpy in, numpy out)."""
         with torch.no_grad():
             features = torch.tensor(features_np, dtype=torch.float32)
             costs = self.predict_cost(features, risk_sensitivity)
@@ -163,37 +86,10 @@ class LearnedEdgeCostModel(nn.Module):
 
 
 class HeuristicEdgeCostModel:
-    """
-    Fallback heuristic model used before enough data is collected.
-    Mimics the LearnedEdgeCostModel interface but uses simple rules.
-    """
+    """Fallback heuristic model, matching the LearnedEdgeCostModel interface, used before enough data is collected."""
 
-    def predict_numpy(
-        self,
-        features_np: np.ndarray,
-        risk_sensitivity: float = 0.0
-    ) -> np.ndarray:
-        """
-        Heuristic cost prediction.
-
-        Feature layout (matches EdgeTraversalRecord.to_feature_vector / build_edge_features):
-            [0] distance_m
-            [1] corridor_width
-            [2] num_robots_on_edge
-            [3] people_count
-            [4] clutter_level
-            [5] approaching_robot_count
-            [6] from_node_occupancy
-            [7] to_node_occupancy
-            [8] time_of_day
-
-        Args:
-            features_np: [num_edges, 9] feature array
-            risk_sensitivity: ignored in heuristic mode
-
-        Returns:
-            costs: [num_edges] predicted costs
-        """
+    def predict_numpy(self, features_np: np.ndarray, risk_sensitivity: float = 0.0) -> np.ndarray:
+        """Predict traversal cost using simple additive congestion/people/clutter penalties."""
         distance = features_np[:, 0]
         num_robots = features_np[:, 2]
         people_count = features_np[:, 3]
@@ -203,7 +99,6 @@ class HeuristicEdgeCostModel:
         # Match the simulator/config baseline corridor speed used elsewhere.
         base_time = distance / 0.5
 
-        # Simple additive penalties
         congestion = (num_robots + approaching) * 1.5
         people_penalty = people_count * 0.5
         clutter_penalty = clutter * 10.0
@@ -212,17 +107,7 @@ class HeuristicEdgeCostModel:
 
 
 class EdgeCostTrainer:
-    """
-    Supervised trainer for LearnedEdgeCostModel.
-
-    Collects EdgeTraversalRecords from simulation, maintains a replay buffer,
-    and periodically trains the model on completed traversal data.
-
-    Training loss: Gaussian negative log-likelihood
-        NLL = 0.5 * (log_var + (actual - predicted_mean)^2 / exp(log_var))
-
-    This jointly learns mean AND variance from data.
-    """
+    """Supervised trainer for LearnedEdgeCostModel using a replay buffer and Gaussian NLL loss to jointly learn mean and variance."""
 
     def __init__(
         self,
@@ -236,10 +121,8 @@ class EdgeCostTrainer:
         self.max_buffer_size = max_buffer_size
         self.min_train_samples = min_train_samples
 
-        # Replay buffer: list of (features_np, actual_time) tuples
         self.buffer: List[Tuple[np.ndarray, float]] = []
 
-        # Training stats
         self.total_records_added = 0
         self.total_train_steps = 0
         self.recent_losses: List[float] = []
@@ -295,27 +178,21 @@ class EdgeCostTrainer:
     def avg_recent_loss(self) -> float:
         """Average loss over recent training steps."""
         if not self.recent_losses:
-            return float('inf')
+            return float("inf")
         return np.mean(self.recent_losses)
 
     def get_stats(self) -> dict:
-        """Get training statistics."""
         return {
-            'buffer_size': len(self.buffer),
-            'total_records': self.total_records_added,
-            'total_train_steps': self.total_train_steps,
-            'avg_recent_loss': self.avg_recent_loss,
-            'is_ready': self.is_ready,
+            "buffer_size": len(self.buffer),
+            "total_records": self.total_records_added,
+            "total_train_steps": self.total_train_steps,
+            "avg_recent_loss": self.avg_recent_loss,
+            "is_ready": self.is_ready,
         }
 
 
 class EdgeCostManager:
-    """
-    Manages the transition from heuristic to learned edge cost predictions.
-
-    Starts with heuristic fallback, collects traversal data, and switches
-    to the learned model once enough data is available.
-    """
+    """Manages the transition from the heuristic to the learned edge-cost model as traversal data accumulates."""
 
     def __init__(
         self,
@@ -328,9 +205,7 @@ class EdgeCostManager:
     ):
         self.model = LearnedEdgeCostModel(hidden_dim=hidden_dim)
         self.heuristic = HeuristicEdgeCostModel()
-        self.trainer = EdgeCostTrainer(
-            self.model, lr=lr, min_train_samples=min_train_samples
-        )
+        self.trainer = EdgeCostTrainer(self.model, lr=lr, min_train_samples=min_train_samples)
 
         self.risk_sensitivity = risk_sensitivity
         self.train_interval_records = train_interval_records
@@ -339,43 +214,26 @@ class EdgeCostManager:
         self.using_learned_model = False
 
     def predict_edge_costs(self, features_np: np.ndarray) -> np.ndarray:
-        """
-        Predict edge costs for path planning.
-
-        Automatically switches between heuristic and learned model.
-
-        Args:
-            features_np: [num_edges, 12] feature array
-
-        Returns:
-            costs: [num_edges] predicted costs
-        """
+        """Predict edge costs for path planning, automatically switching between the heuristic and learned model."""
         if self.using_learned_model and self.trainer.is_ready:
             return self.model.predict_numpy(features_np, self.risk_sensitivity)
         else:
             return self.heuristic.predict_numpy(features_np, self.risk_sensitivity)
 
     def add_traversal_records(self, records: list) -> None:
-        """
-        Add completed traversal records and optionally trigger training.
-        """
+        """Add completed traversal records and optionally trigger training."""
         count = self.trainer.add_records_batch(records)
         self._records_since_last_train += count
 
-        # Train periodically
-        if (self._records_since_last_train >= self.train_interval_records
-                and self.trainer.is_ready):
-            self.trainer.train_epoch(
-                num_steps=self.train_steps_per_interval
-            )
+        if self._records_since_last_train >= self.train_interval_records and self.trainer.is_ready:
+            self.trainer.train_epoch(num_steps=self.train_steps_per_interval)
             self._records_since_last_train = 0
             self.using_learned_model = True
 
     def get_stats(self) -> dict:
-        """Get status information."""
         stats = self.trainer.get_stats()
-        stats['using_learned_model'] = self.using_learned_model
-        stats['risk_sensitivity'] = self.risk_sensitivity
+        stats["using_learned_model"] = self.using_learned_model
+        stats["risk_sensitivity"] = self.risk_sensitivity
         return stats
 
     def state_dict(self) -> dict:
@@ -408,61 +266,56 @@ class EdgeCostManager:
         self._records_since_last_train = state.get("records_since_last_train", 0)
         self.using_learned_model = state.get("using_learned_model", False)
         self.risk_sensitivity = state.get("risk_sensitivity", self.risk_sensitivity)
-        self.train_interval_records = state.get("train_interval_records", self.train_interval_records)
-        self.train_steps_per_interval = state.get("train_steps_per_interval", self.train_steps_per_interval)
+        self.train_interval_records = state.get(
+            "train_interval_records", self.train_interval_records
+        )
+        self.train_steps_per_interval = state.get(
+            "train_steps_per_interval", self.train_steps_per_interval
+        )
 
     def build_edge_features(self, graph_state, all_robots=None) -> np.ndarray:
-        """
-        Build feature matrix for all edges in the graph.
-
-        Args:
-            graph_state: GraphState with edges
-            all_robots: Optional list of all robots (for approaching count)
-
-        Returns:
-            features: [num_edges, 12] numpy array
-        """
+        """Build the edge feature matrix for all edges in the graph, including robot approach/occupancy counts."""
         features = []
         for edge_idx, edge in enumerate(graph_state.edges):
             # Count approaching robots (have this edge in their planned path but not on it)
             approaching = 0
             if all_robots:
                 for robot in all_robots:
-                    if hasattr(robot, 'planned_path') and robot.planned_path:
+                    if hasattr(robot, "planned_path") and robot.planned_path:
                         path = robot.planned_path
                         for i in range(len(path) - 1):
                             from_node = graph_state.nodes[path[i]].node_id
                             to_node = graph_state.nodes[path[i + 1]].node_id
-                            if ((edge.from_node == from_node and edge.to_node == to_node) or
-                                    (edge.from_node == to_node and edge.to_node == from_node)):
+                            if (edge.from_node == from_node and edge.to_node == to_node) or (
+                                edge.from_node == to_node and edge.to_node == from_node
+                            ):
                                 approaching += 1
                                 break
 
-            # Node occupancy at endpoints
             from_node_occ = 0
             to_node_occ = 0
             for node in graph_state.nodes:
                 if node.node_id == edge.from_node:
-                    from_node_occ = len(getattr(node, 'current_robot_ids', []))
+                    from_node_occ = len(getattr(node, "current_robot_ids", []))
                 elif node.node_id == edge.to_node:
-                    to_node_occ = len(getattr(node, 'current_robot_ids', []))
+                    to_node_occ = len(getattr(node, "current_robot_ids", []))
 
-            current_time = getattr(graph_state, 'current_time', 0.0)
+            current_time = getattr(graph_state, "current_time", 0.0)
             time_of_day = (current_time % 86400.0) / 86400.0
 
-            # 9 features matching EdgeTraversalRecord.to_feature_vector()
-            # same_direction_count, opposite_direction_count, stop_count excluded:
-            # direction is unknown at prediction time; stop_count is post-traversal only.
-            features.append([
-                edge.distance_m,
-                edge.corridor_width,
-                float(len(edge.active_robot_ids)),
-                float(edge.people_count),
-                edge.clutter_level,
-                float(approaching),
-                float(from_node_occ),
-                float(to_node_occ),
-                time_of_day,
-            ])
+            # Matches EdgeTraversalRecord.to_feature_vector(); direction/stop-count fields excluded (unknown pre-/post-traversal only).
+            features.append(
+                [
+                    edge.distance_m,
+                    edge.corridor_width,
+                    float(len(edge.active_robot_ids)),
+                    float(edge.people_count),
+                    edge.clutter_level,
+                    float(approaching),
+                    float(from_node_occ),
+                    float(to_node_occ),
+                    time_of_day,
+                ]
+            )
 
         return np.array(features, dtype=np.float32)

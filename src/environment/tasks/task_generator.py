@@ -1,7 +1,9 @@
+from typing import Dict, List, Optional, Set, Tuple
+
 import numpy as np
-from typing import List, Optional, Set, Tuple, Dict
-from .task_state import Task, TaskQueue
+
 from ..graph_helpers import dijkstra_shortest_path
+from .task_state import Task
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -14,7 +16,9 @@ def _parse_time_hhmm(t: str) -> float:
     return int(hh) + int(mm) / 60.0
 
 
-def _intraday_weight(intraday_profile: Dict[str, float], current_time_seconds: float) -> Tuple[float, float]:
+def _intraday_weight(
+    intraday_profile: Dict[str, float], current_time_seconds: float
+) -> Tuple[float, float]:
     """Return (weight, bin_hours) for current time of day."""
     if not intraday_profile:
         return 1.0, 24.0
@@ -34,7 +38,9 @@ def _intraday_weight(intraday_profile: Dict[str, float], current_time_seconds: f
     return 1.0, 24.0
 
 
-def _weekday_multiplier(weekday_multipliers: Dict[str, float], current_time_seconds: float, start_day: int = 0) -> float:
+def _weekday_multiplier(
+    weekday_multipliers: Dict[str, float], current_time_seconds: float, start_day: int = 0
+) -> float:
     if not weekday_multipliers:
         return 1.0
     day_idx = int(current_time_seconds // 86400) % 7
@@ -70,13 +76,19 @@ def _compute_sku_rate(node, sku_id: str, graph_state, current_time_seconds: floa
 
     demand_profiles = getattr(graph_state, "demand_profiles", {}) or {}
     dept_multipliers = demand_profiles.get("department_category_multipliers_normalized", {})
-    dept_tag = getattr(node, "department_tag", None) or consumption.get("base_context", {}).get("baseline_department_tag")
+    dept_tag = getattr(node, "department_tag", None) or consumption.get("base_context", {}).get(
+        "baseline_department_tag"
+    )
     dept_cat_mult = 1.0
     if dept_tag and dept_tag in dept_multipliers:
-        dept_cat_mult = float(dept_multipliers[dept_tag].get(category_key, dept_multipliers[dept_tag].get("*", 1.0)))
+        dept_cat_mult = float(
+            dept_multipliers[dept_tag].get(category_key, dept_multipliers[dept_tag].get("*", 1.0))
+        )
 
     scale_factor = float(getattr(graph_state, "consumption_scale", 1.0))
-    hourly_rate = (daily_mean * weight / bin_hours) * scale * dept_cat_mult * float(area_mult) * weekday_mult
+    hourly_rate = (
+        (daily_mean * weight / bin_hours) * scale * dept_cat_mult * float(area_mult) * weekday_mult
+    )
     hourly_rate *= scale_factor
     return max(0.0, hourly_rate)
 
@@ -87,22 +99,7 @@ def generate_inventory_tasks(
     next_task_id: int = 0,
     existing_task_keys: Optional[Set[Tuple]] = None,
 ) -> Tuple[List[Task], int]:
-    """
-    Generate tasks based on inventory needs.
-    Creates replenishment tasks for locations that need restocking.
-
-    Args:
-        graph_state: GraphState with inventory information
-        current_time: Current simulation time (seconds)
-        next_task_id: Next available task ID
-        existing_task_keys: Set of (sku_id, dest_node_idx) tuples already covered
-            by pending or in-flight tasks. Tasks matching an existing key are
-            skipped so we never create duplicate replenishment demand. Pass None
-            to skip deduplication (backwards-compatible).
-
-    Returns:
-        Tuple of (list of new tasks, next task ID)
-    """
+    """Generate tasks based on inventory needs."""
     new_tasks = []
     task_id = next_task_id
 
@@ -112,10 +109,7 @@ def generate_inventory_tasks(
     seen_keys: Set[Tuple] = set(existing_task_keys) if existing_task_keys else set()
 
     # Find storage nodes (sources of supplies)
-    storage_nodes = [
-        i for i, node in enumerate(graph_state.nodes)
-        if node.node_type == 'storage'
-    ]
+    storage_nodes = [i for i, node in enumerate(graph_state.nodes) if node.node_type == "storage"]
 
     if not storage_nodes:
         return new_tasks, task_id
@@ -125,7 +119,7 @@ def generate_inventory_tasks(
 
     # Check each node for inventory needs
     for dest_idx, dest_node in enumerate(graph_state.nodes):
-        if dest_node.node_type == 'storage':
+        if dest_node.node_type == "storage":
             continue
         if not dest_node.consumption_enabled:
             continue
@@ -146,7 +140,7 @@ def generate_inventory_tasks(
                     continue
 
                 rate = _compute_sku_rate(dest_node, sku_id, graph_state, current_time)
-                tts_hours = (stock / rate) if rate > 0 else float('inf')
+                tts_hours = (stock / rate) if rate > 0 else float("inf")
                 tts_seconds = tts_hours * 3600
                 deadline = current_time + max(tts_seconds, DEFAULT_MIN_REPLENISHMENT_DEADLINE_S)
 
@@ -168,16 +162,19 @@ def generate_inventory_tasks(
                     deadline=deadline,
                     arrival_time=current_time,
                     estimated_duration=estimated_duration,
-                    task_type='replenishment',
+                    task_type="replenishment",
                     num_items=num_items,
                     time_to_stockout=tts_hours,
                     sku_id=sku_id,
                     category_key=sku_data.get("category"),
-                    category_id=float(graph_state.category_order.index(sku_data.get("category"))) if getattr(graph_state, "category_order", None) and sku_data.get("category") in graph_state.category_order else -1.0,
+                    category_id=float(graph_state.category_order.index(sku_data.get("category")))
+                    if getattr(graph_state, "category_order", None)
+                    and sku_data.get("category") in graph_state.category_order
+                    else -1.0,
                     sku_stock_level=stock,
                     sku_max_level=max_level,
                     reorder_point=reorder,
-                    par_level=par_level
+                    par_level=par_level,
                 )
 
                 new_tasks.append(task)
@@ -191,10 +188,7 @@ def generate_inventory_tasks(
                     continue
 
                 target_stock = dest_node.buffer_time * dest_node.consumption_rate
-                delivery_amount = min(
-                    dest_node.max_stock - dest_node.stock_level,
-                    target_stock
-                )
+                delivery_amount = min(dest_node.max_stock - dest_node.stock_level, target_stock)
                 num_items = max(1, int(delivery_amount))
                 tts_seconds = dest_node.time_to_stockout * 3600
                 deadline = current_time + max(tts_seconds, DEFAULT_MIN_REPLENISHMENT_DEADLINE_S)
@@ -208,11 +202,11 @@ def generate_inventory_tasks(
                     deadline=deadline,
                     arrival_time=current_time,
                     estimated_duration=estimated_duration,
-                    task_type='replenishment',
+                    task_type="replenishment",
                     num_items=num_items,
                     sku_stock_level=dest_node.stock_level,
                     sku_max_level=dest_node.max_stock,
-                    time_to_stockout=dest_node.time_to_stockout
+                    time_to_stockout=dest_node.time_to_stockout,
                 )
                 new_tasks.append(task)
                 seen_keys.add(key)
@@ -222,23 +216,9 @@ def generate_inventory_tasks(
 
 
 def generate_random_ad_hoc_tasks(
-    graph_state,
-    current_time: float,
-    num_tasks: int,
-    next_task_id: int = 0
+    graph_state, current_time: float, num_tasks: int, next_task_id: int = 0
 ) -> Tuple[List[Task], int]:
-    """
-    Generate random ad-hoc tasks (inter-ward transfers, pharmacy deliveries).
-
-    Args:
-        graph_state: GraphState object
-        current_time: Current simulation time
-        num_tasks: Number of ad-hoc tasks to generate
-        next_task_id: Next available task ID
-
-    Returns:
-        Tuple of (list of new tasks, next task ID)
-    """
+    """Generate random ad-hoc tasks (inter-ward transfers, pharmacy deliveries)."""
     new_tasks = []
     task_id = next_task_id
     num_nodes = len(graph_state.nodes)
@@ -254,15 +234,12 @@ def generate_random_ad_hoc_tasks(
                 to_idx = np.random.randint(0, num_nodes)
 
         # Random task type
-        task_type = np.random.choice(
-            ['ad_hoc', 'returns', 'emergency'],
-            p=[0.7, 0.25, 0.05]
-        )
+        task_type = np.random.choice(["ad_hoc", "returns", "emergency"], p=[0.7, 0.25, 0.05])
 
         # Deadline window based on type
-        if task_type == 'emergency':
+        if task_type == "emergency":
             deadline_offset = np.random.uniform(60, 300)  # 1-5 minutes
-        elif task_type == 'ad_hoc':
+        elif task_type == "ad_hoc":
             deadline_offset = np.random.uniform(600, 1800)  # 10-30 minutes
         else:  # returns
             deadline_offset = np.random.uniform(1800, 3600)  # 30-60 minutes
@@ -278,7 +255,7 @@ def generate_random_ad_hoc_tasks(
             arrival_time=current_time,
             estimated_duration=np.random.uniform(60, 180),
             task_type=task_type,
-            num_items=num_items
+            num_items=num_items,
         )
 
         new_tasks.append(task)
@@ -288,20 +265,19 @@ def generate_random_ad_hoc_tasks(
 
 
 def update_inventory_levels(graph_state, time_delta_hours: float):
-    """
-    Update stock levels at all nodes based on consumption rates.
-
-    Args:
-        graph_state: GraphState to update
-        time_delta_hours: Time elapsed in hours
-    """
+    """Update stock levels at all nodes based on consumption rates."""
     for node in graph_state.nodes:
         if node.sku_inventory and node.consumption_enabled:
             category_rates = {}
             total_stock = 0.0
             total_rate = 0.0
             for sku_id, sku_data in node.sku_inventory.items():
-                rate = _compute_sku_rate(node, sku_id, graph_state, graph_state.current_time if hasattr(graph_state, "current_time") else 0.0)
+                rate = _compute_sku_rate(
+                    node,
+                    sku_id,
+                    graph_state,
+                    graph_state.current_time if hasattr(graph_state, "current_time") else 0.0,
+                )
                 consumed = rate * time_delta_hours
                 node.consume_sku(sku_id, consumed)
                 total_stock += node.get_sku_stock(sku_id)

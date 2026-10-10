@@ -4,119 +4,243 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
 
 from src.environment.gapo_env import GAPOTaskAssignmentEnv
-from src.environment.graph.graph_state import GraphState
+from src.environment.graph.config_loader import (
+    get_num_robots_from_config,
+    get_robot_max_capacity_from_config,
+    load_config_from_file,
+)
 from src.environment.graph.edge import GraphEdge
-from src.environment.graph.config_loader import load_config_from_file, get_num_robots_from_config, get_robot_max_capacity_from_config
+from src.environment.graph.graph_state import GraphState
 
 
 def parse_args():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='Train GAPO policy for hospital robot task assignment')
+    parser = argparse.ArgumentParser(
+        description="Train GAPO policy for hospital robot task assignment"
+    )
 
-    # Config selection (mutually exclusive)
     config_group = parser.add_mutually_exclusive_group(required=False)
-    config_group.add_argument('--config', type=str,
-                              help='Path to hospital config JSON file')
-    config_group.add_argument('--configs-dir', type=str, default=None,
-                              help='Directory containing multiple config files for curriculum learning')
-    config_group.add_argument('--config-list', type=str, nargs='+',
-                              help='List of specific config files for curriculum learning')
+    config_group.add_argument("--config", type=str, help="Path to hospital config JSON file")
+    config_group.add_argument(
+        "--configs-dir",
+        type=str,
+        default=None,
+        help="Directory containing multiple config files for curriculum learning",
+    )
+    config_group.add_argument(
+        "--config-list",
+        type=str,
+        nargs="+",
+        help="List of specific config files for curriculum learning",
+    )
 
-    # Curriculum settings
-    parser.add_argument('--curriculum', type=str, default='none', choices=['adaptive', 'fixed', 'random', 'none'],
-                        help='Curriculum learning schedule (default: none)')
-    parser.add_argument('--config-interval', type=int, default=500,
-                        help='Config switch interval for fixed schedule (default: 500)')
-    parser.add_argument('--perf-threshold', type=float, default=50.0,
-                        help='Performance threshold for adaptive schedule (default: 50.0)')
+    parser.add_argument(
+        "--curriculum",
+        type=str,
+        default="none",
+        choices=["adaptive", "fixed", "random", "none"],
+        help="Curriculum learning schedule (default: none)",
+    )
+    parser.add_argument(
+        "--config-interval",
+        type=int,
+        default=500,
+        help="Config switch interval for fixed schedule (default: 500)",
+    )
+    parser.add_argument(
+        "--perf-threshold",
+        type=float,
+        default=50.0,
+        help="Performance threshold for adaptive schedule (default: 50.0)",
+    )
 
-    # Training hyperparameters
-    parser.add_argument('--iterations', type=int, default=10000,
-                        help='Number of training iterations (default: 10000)')
-    parser.add_argument('--lr', type=float, default=0.0003,
-                        help='Learning rate (default: 0.0003)')
-    parser.add_argument('--actor-lr', type=float, default=None,
-                        help='Actor learning rate (default: same as --lr)')
-    parser.add_argument('--critic-lr', type=float, default=None,
-                        help='Critic learning rate (default: same as --lr)')
-    parser.add_argument('--hidden-dim', type=int, default=64,
-                        help='Hidden dimension for GNN (default: 64)')
-    parser.add_argument('--no-debiasing', action='store_true',
-                        help='Disable de-biasing loss')
-    parser.add_argument('--critic-coef', type=float, default=0.5,
-                        help='Critic loss coefficient (default: 0.5)')
-    parser.add_argument('--entropy-coef', type=float, default=0.01,
-                        help='Entropy coefficient magnitude (default: 0.01)')
-    parser.add_argument('--min-adv-std', type=float, default=1e-3,
-                        help='Minimum advantage std for normalization (default: 1e-3)')
-    parser.add_argument('--rollout-steps', type=int, default=1000,
-                        help='Rollout steps per iteration (default: 1000)')
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=10000,
+        help="Number of training iterations (default: 10000)",
+    )
+    parser.add_argument("--lr", type=float, default=0.0003, help="Learning rate (default: 0.0003)")
+    parser.add_argument(
+        "--actor-lr", type=float, default=None, help="Actor learning rate (default: same as --lr)"
+    )
+    parser.add_argument(
+        "--critic-lr", type=float, default=None, help="Critic learning rate (default: same as --lr)"
+    )
+    parser.add_argument(
+        "--hidden-dim", type=int, default=64, help="Hidden dimension for GNN (default: 64)"
+    )
+    parser.add_argument("--no-debiasing", action="store_true", help="Disable de-biasing loss")
+    parser.add_argument(
+        "--critic-coef", type=float, default=0.5, help="Critic loss coefficient (default: 0.5)"
+    )
+    parser.add_argument(
+        "--entropy-coef",
+        type=float,
+        default=0.01,
+        help="Entropy coefficient magnitude (default: 0.01)",
+    )
+    parser.add_argument(
+        "--min-adv-std",
+        type=float,
+        default=1e-3,
+        help="Minimum advantage std for normalization (default: 1e-3)",
+    )
+    parser.add_argument(
+        "--rollout-steps",
+        type=int,
+        default=1000,
+        help="Rollout steps per iteration (default: 1000)",
+    )
 
-    # Real robot deployment
-    parser.add_argument('--bridge-url', type=str, default=None,
-                        help='WebSocket URL of the ROS bridge server (overrides ROS_BRIDGE_URL in .env)')
-    parser.add_argument('--checkpoint', type=str, default=None,
-                        help='Path to checkpoint file to resume from')
+    parser.add_argument(
+        "--bridge-url",
+        type=str,
+        default=None,
+        help="WebSocket URL of the ROS bridge server (overrides ROS_BRIDGE_URL in .env)",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default=None, help="Path to checkpoint file to resume from"
+    )
 
-    # System
-    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cpu', 'cuda'],
-                        help='Device to use (default: auto)')
-    parser.add_argument('--seed', type=int, default=None,
-                        help='Random seed for reproducibility')
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Device to use (default: auto)",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
 
-    # Environment
-    parser.add_argument('--num-robots', type=int, default=None,
-                        help='Number of robots (default: read from config or 5)')
-    parser.add_argument('--max-episode-time', type=float, default=float('inf'),
-                        help='Max episode time in seconds (default: inf = no episode resets)')
-    parser.add_argument('--stochastic-tasks-per-hour', type=float, default=2.0,
-                        help='Expected stochastic ad-hoc task generation rate per simulated hour (default: 2.0)')
-    parser.add_argument('--stochastic-task-cap-per-hour', type=int, default=2,
-                        help='Hard cap on stochastic ad-hoc tasks created in any rolling simulated hour (default: 2)')
-    parser.add_argument('--initial-stochastic-tasks', type=int, default=0,
-                        help='Initial stochastic ad-hoc tasks at reset (bounded by hourly cap, default: 0)')
+    parser.add_argument(
+        "--num-robots",
+        type=int,
+        default=None,
+        help="Number of robots (default: read from config or 5)",
+    )
+    parser.add_argument(
+        "--max-episode-time",
+        type=float,
+        default=float("inf"),
+        help="Max episode time in seconds (default: inf = no episode resets)",
+    )
+    parser.add_argument(
+        "--stochastic-tasks-per-hour",
+        type=float,
+        default=2.0,
+        help="Expected stochastic ad-hoc task generation rate per simulated hour (default: 2.0)",
+    )
+    parser.add_argument(
+        "--stochastic-task-cap-per-hour",
+        type=int,
+        default=2,
+        help="Hard cap on stochastic ad-hoc tasks created in any rolling simulated hour (default: 2)",
+    )
+    parser.add_argument(
+        "--initial-stochastic-tasks",
+        type=int,
+        default=0,
+        help="Initial stochastic ad-hoc tasks at reset (bounded by hourly cap, default: 0)",
+    )
 
-    # Logging and output
-    parser.add_argument('--output-dir', type=str, default='outputs',
-                        help='Directory for checkpoints and logs (default: outputs)')
-    parser.add_argument('--exp-name', type=str, default=None,
-                        help='Experiment name (default: auto-generated timestamp)')
-    parser.add_argument('--log-interval', type=int, default=10,
-                        help='Logging interval in iterations (default: 10)')
-    parser.add_argument('--save-interval', type=int, default=100,
-                        help='Model save interval in iterations (default: 100)')
-    parser.add_argument('--max-assignments-per-step', type=int, default=10,
-                        help='Max task assignments per simulation step (default: 10)')
-    parser.add_argument('--reward-clip', type=float, default=200.0,
-                        help='Clip per-step rewards to [-reward_clip, reward_clip] (default: 200)')
-    parser.add_argument('--reward-scale', type=float, default=1.0,
-                        help='Scale per-step rewards (default: 1.0)')
-    parser.add_argument('--warmup-iters', type=int, default=50,
-                        help='Warmup iterations using heuristic/mild penalties (default: 50)')
-    parser.add_argument('--warmup-mix', type=float, default=0.8,
-                        help='Probability of heuristic action during warmup (default: 0.8)')
-    parser.add_argument('--warmup-consumption-scale', type=float, default=0.6,
-                        help='Scale consumption rates during warmup (default: 0.6)')
-    parser.add_argument('--warmup-entropy-mult', type=float, default=2.0,
-                        help='Entropy coefficient multiplier during warmup (default: 2.0)')
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="outputs",
+        help="Directory for checkpoints and logs (default: outputs)",
+    )
+    parser.add_argument(
+        "--exp-name",
+        type=str,
+        default=None,
+        help="Experiment name (default: auto-generated timestamp)",
+    )
+    parser.add_argument(
+        "--log-interval", type=int, default=10, help="Logging interval in iterations (default: 10)"
+    )
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=100,
+        help="Model save interval in iterations (default: 100)",
+    )
+    parser.add_argument(
+        "--max-assignments-per-step",
+        type=int,
+        default=10,
+        help="Max task assignments per simulation step (default: 10)",
+    )
+    parser.add_argument(
+        "--reward-clip",
+        type=float,
+        default=200.0,
+        help="Clip per-step rewards to [-reward_clip, reward_clip] (default: 200)",
+    )
+    parser.add_argument(
+        "--reward-scale", type=float, default=1.0, help="Scale per-step rewards (default: 1.0)"
+    )
+    parser.add_argument(
+        "--warmup-iters",
+        type=int,
+        default=50,
+        help="Warmup iterations using heuristic/mild penalties (default: 50)",
+    )
+    parser.add_argument(
+        "--warmup-mix",
+        type=float,
+        default=0.8,
+        help="Probability of heuristic action during warmup (default: 0.8)",
+    )
+    parser.add_argument(
+        "--warmup-consumption-scale",
+        type=float,
+        default=0.6,
+        help="Scale consumption rates during warmup (default: 0.6)",
+    )
+    parser.add_argument(
+        "--warmup-entropy-mult",
+        type=float,
+        default=2.0,
+        help="Entropy coefficient multiplier during warmup (default: 2.0)",
+    )
 
-    parser.add_argument('--ranking-max-pairs-per-group', type=int, default=64,
-                        help='Max sampled assignment pairs per env-step group for ranking losses (default: 64)')
-    parser.add_argument('--ranking-min-adv-gap', type=float, default=1e-4,
-                        help='Skip ranking pairs with |adv_i-adv_j| below this threshold (default: 1e-4)')
+    parser.add_argument(
+        "--ranking-max-pairs-per-group",
+        type=int,
+        default=64,
+        help="Max sampled assignment pairs per env-step group for ranking losses (default: 64)",
+    )
+    parser.add_argument(
+        "--ranking-min-adv-gap",
+        type=float,
+        default=1e-4,
+        help="Skip ranking pairs with |adv_i-adv_j| below this threshold (default: 1e-4)",
+    )
 
-    parser.add_argument('--eval-interval', type=int, default=200,
-                        help='Evaluation interval in iterations (default: 200)')
-    parser.add_argument('--eval-steps', type=int, default=1000,
-                        help='Number of environment steps per evaluation (default: 1000)')
-    parser.add_argument('--eval-seeds', type=int, nargs='*', default=[123, 456, 789],
-                        help='Fixed seeds for evaluation runs (default: 123 456 789)')
+    parser.add_argument(
+        "--eval-interval",
+        type=int,
+        default=200,
+        help="Evaluation interval in iterations (default: 200)",
+    )
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=1000,
+        help="Number of environment steps per evaluation (default: 1000)",
+    )
+    parser.add_argument(
+        "--eval-seeds",
+        type=int,
+        nargs="*",
+        default=[123, 456, 789],
+        help="Fixed seeds for evaluation runs (default: 123 456 789)",
+    )
 
     return parser.parse_args()
 
@@ -131,7 +255,7 @@ def load_curriculum_from_configs(config_paths: List[str]) -> List[Tuple[str, str
             print(f"Warning: Config file not found: {config_path}, skipping...")
             continue
 
-        description = config_path.stem.replace('_', ' ').title()
+        description = config_path.stem.replace("_", " ").title()
         curriculum.append((str(config_path), description))
 
     if not curriculum:
@@ -149,26 +273,30 @@ def _build_graph_state(nodes, edge_pairs, meta) -> GraphState:
     for from_idx, to_idx in edge_pairs:
         from_node = nodes[from_idx]
         to_node = nodes[to_idx]
-        distance = np.sqrt((from_node.center_x - to_node.center_x) ** 2 +
-                           (from_node.center_y - to_node.center_y) ** 2)
+        distance = np.sqrt(
+            (from_node.center_x - to_node.center_x) ** 2
+            + (from_node.center_y - to_node.center_y) ** 2
+        )
         detail = edges_detailed.get((from_idx, to_idx)) or edges_detailed.get((to_idx, from_idx))
-        graph_state.edges.append(GraphEdge(
-            from_node=from_node.node_id,
-            to_node=to_node.node_id,
-            distance_m=float(detail.get("distance_m", distance)) if detail else distance,
-            corridor_width=1.9,
-            entry_point=(from_node.center_x, from_node.center_y),
-            exit_point=(to_node.center_x, to_node.center_y),
-            max_v_ms=0.5,
-            clutter_level=np.random.random() * 0.3,
-            active_robot_ids=[],
-            has_patient_bed=np.random.random() < 0.1,
-            edge_id=detail.get("edge_id") if detail else None,
-            mode=detail.get("mode") if detail else None,
-            floor_delta=int(detail.get("floor_delta", 0)) if detail else 0,
-            travel_time_model=detail.get("travel_time_model") if detail else None,
-            constraints=detail.get("constraints", "") if detail else ""
-        ))
+        graph_state.edges.append(
+            GraphEdge(
+                from_node=from_node.node_id,
+                to_node=to_node.node_id,
+                distance_m=float(detail.get("distance_m", distance)) if detail else distance,
+                corridor_width=1.9,
+                entry_point=(from_node.center_x, from_node.center_y),
+                exit_point=(to_node.center_x, to_node.center_y),
+                max_v_ms=0.5,
+                clutter_level=np.random.random() * 0.3,
+                active_robot_ids=[],
+                has_patient_bed=np.random.random() < 0.1,
+                edge_id=detail.get("edge_id") if detail else None,
+                mode=detail.get("mode") if detail else None,
+                floor_delta=int(detail.get("floor_delta", 0)) if detail else 0,
+                travel_time_model=detail.get("travel_time_model") if detail else None,
+                constraints=detail.get("constraints", "") if detail else "",
+            )
+        )
     graph_state.sku_database = meta.get("sku_database")
     graph_state.demand_profiles = meta.get("demand_profiles")
     graph_state.category_order = meta.get("category_order")
@@ -176,14 +304,17 @@ def _build_graph_state(nodes, edge_pairs, meta) -> GraphState:
     return graph_state
 
 
-def create_env_from_config_file(config_path: str, num_robots: Optional[int] = None,
-                                max_episode_time: float = 28800.0,
-                                timestep_seconds: float = 1.0,
-                                stochastic_tasks_per_hour: float = 2.0,
-                                stochastic_task_cap_per_hour: int = 2,
-                                initial_stochastic_tasks: int = 0,
-                                fleet_event_logger=None,
-                                log_dir=None):
+def create_env_from_config_file(
+    config_path: str,
+    num_robots: Optional[int] = None,
+    max_episode_time: float = 28800.0,
+    timestep_seconds: float = 1.0,
+    stochastic_tasks_per_hour: float = 2.0,
+    stochastic_task_cap_per_hour: int = 2,
+    initial_stochastic_tasks: int = 0,
+    fleet_event_logger=None,
+    log_dir=None,
+):
     """Create a simulation environment from a config JSON file."""
     nodes, edge_pairs, meta = load_config_from_file(config_path)
     if num_robots is None:
@@ -207,15 +338,18 @@ def create_env_from_config_file(config_path: str, num_robots: Optional[int] = No
     return env, len(nodes)
 
 
-def create_real_env_from_config_file(config_path: str, robot_backend,
-                                     num_robots: Optional[int] = None,
-                                     max_episode_time: float = 28800.0,
-                                     timestep_seconds: float = 1.0,
-                                     stochastic_tasks_per_hour: float = 2.0,
-                                     stochastic_task_cap_per_hour: int = 2,
-                                     initial_stochastic_tasks: int = 0,
-                                     fleet_event_logger=None,
-                                     log_dir=None):
+def create_real_env_from_config_file(
+    config_path: str,
+    robot_backend,
+    num_robots: Optional[int] = None,
+    max_episode_time: float = 28800.0,
+    timestep_seconds: float = 1.0,
+    stochastic_tasks_per_hour: float = 2.0,
+    stochastic_task_cap_per_hour: int = 2,
+    initial_stochastic_tasks: int = 0,
+    fleet_event_logger=None,
+    log_dir=None,
+):
     """Create a real-deployment environment (GAPOTaskAssignmentEnvReal) from a config JSON file."""
     from ..environment.gapo_env_real import GAPOTaskAssignmentEnvReal
 
@@ -243,9 +377,7 @@ def create_real_env_from_config_file(config_path: str, robot_backend,
 
 
 def setup_logging_and_output(args):
-    """
-    Setup logging, output directories, and system monitoring for GPU cluster training.
-    """
+    """Set up logging, output directories, and system monitoring for GPU cluster training."""
     if args.exp_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.exp_name = f"gapo_{timestamp}"
@@ -257,21 +389,23 @@ def setup_logging_and_output(args):
     (output_dir / "logs").mkdir(exist_ok=True)
     (output_dir / "metrics").mkdir(exist_ok=True)
 
-    logger = logging.getLogger('GAPO_Training')
+    logger = logging.getLogger("GAPO_Training")
     logger.setLevel(logging.INFO)
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
-    console_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s',
-                                         datefmt='%Y-%m-%d %H:%M:%S')
+    console_formatter = logging.Formatter(
+        "[%(asctime)s] %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
     log_file = output_dir / "logs" / "training.log"
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(logging.INFO)
-    file_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s',
-                                      datefmt='%Y-%m-%d %H:%M:%S')
+    file_formatter = logging.Formatter(
+        "[%(asctime)s] %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
     logger.info(f"Logging to file: {log_file}")
@@ -294,7 +428,7 @@ def setup_logging_and_output(args):
 
     config_dict = vars(args)
     config_file = output_dir / "config.json"
-    with open(config_file, 'w') as f:
+    with open(config_file, "w") as f:
         json.dump(config_dict, f, indent=2, default=str)
     logger.info(f"Configuration saved to: {config_file}")
     logger.info("=" * 80)
@@ -303,7 +437,6 @@ def setup_logging_and_output(args):
 
 
 def log_gpu_memory(logger):
-    """Log current GPU memory usage."""
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             allocated = torch.cuda.memory_allocated(i) / 1e9
@@ -317,7 +450,7 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
         available = list(range(len(robots)))
     task_node = graph_state.nodes[task.from_location_index]
     best_robot = available[0]
-    best_dist = float('inf')
+    best_dist = float("inf")
     for robot_id in available:
         robot = robots[robot_id]
         rx, ry = robot.current_position
@@ -339,8 +472,16 @@ def apply_consumption_scale(env, scale: Optional[float]):
         node.consumption_rate = node._base_consumption_rate * scale
 
 
-def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_step,
-                   timesteps_per_decision, reward_clip, use_baseline=False):
+def run_evaluation(
+    eval_env,
+    eval_steps,
+    eval_seed,
+    policy,
+    max_assignments_per_step,
+    timesteps_per_decision,
+    reward_clip,
+    use_baseline=False,
+):
     """Run a fixed-seed evaluation rollout (greedy policy or baseline)."""
     torch.manual_seed(eval_seed)
     np.random.seed(eval_seed)
@@ -364,11 +505,17 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
             all_tasks = robot.task_queue[1:] + robot.overflow_queue
             if all_tasks:
                 task_features = np.stack([t.get_features(eval_env.current_time) for t in all_tasks])
-                task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(policy.device)
+                task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(
+                    policy.device
+                )
                 with torch.no_grad():
                     state_tensor = policy._state_dict_to_tensor(state)
                     graph_emb, fleet_emb = policy.policy_old.encode_context(state_tensor)
-                    scores = policy.policy_old.score_tasks(task_features_tensor, graph_emb, fleet_emb).cpu().numpy()
+                    scores = (
+                        policy.policy_old.score_tasks(task_features_tensor, graph_emb, fleet_emb)
+                        .cpu()
+                        .numpy()
+                    )
                 for task, score in zip(all_tasks, scores):
                     task.learned_score = float(score)
                 robot.resort_queue()
@@ -381,20 +528,25 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
             task = eval_env.pending_tasks[0]
             robot_mask = np.ones(eval_env.num_robots, dtype=bool)
             if use_baseline:
-                action = select_nearest_robot(task, eval_env.robots, eval_env.graph_state, robot_mask)
+                action = select_nearest_robot(
+                    task, eval_env.robots, eval_env.graph_state, robot_mask
+                )
             else:
                 action, _, _ = policy.select_action_greedy(eval_env._get_state_dict(), robot_mask)
             success = eval_env.assign_task_to_robot(action, task)
             if not success:
-                # Primary robot rejected — check for other available robots and try heuristic.
+                # Primary robot rejected; retry with the nearest robot that's actually available.
                 other_available = [
-                    rid for rid in range(eval_env.num_robots)
+                    rid
+                    for rid in range(eval_env.num_robots)
                     if rid != action
                     and rid not in eval_env._offline_robots
                     and not eval_env._should_robot_charge(rid)
                 ]
                 if other_available:
-                    fallback = select_nearest_robot(task, eval_env.robots, eval_env.graph_state, robot_mask)
+                    fallback = select_nearest_robot(
+                        task, eval_env.robots, eval_env.graph_state, robot_mask
+                    )
                     if fallback != action and not eval_env._should_robot_charge(fallback):
                         success = eval_env.assign_task_to_robot(fallback, task)
                 if not success:
@@ -431,5 +583,5 @@ def run_evaluation(eval_env, eval_steps, eval_seed, policy, max_assignments_per_
         "completed_late": completed_late,
         "pending": len(eval_env.pending_tasks),
         "completed": len(eval_env.completed_tasks),
-        "sim_hours": eval_env.current_time / 3600.0
+        "sim_hours": eval_env.current_time / 3600.0,
     }

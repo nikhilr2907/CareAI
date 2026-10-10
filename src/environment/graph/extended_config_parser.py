@@ -1,15 +1,13 @@
-"""Parser for the extended hospital config format."""
 import json
 import logging
-from typing import Dict, List, Optional
 from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ItemInfo:
-    """Item metadata."""
     item_id: str
     category: str
     unit: str
@@ -23,7 +21,6 @@ class ItemInfo:
 
 @dataclass
 class InventoryCategory:
-    """Inventory category data."""
     category_name: str
     stock_level: float
     max_stock: float
@@ -35,7 +32,6 @@ class InventoryCategory:
 
 @dataclass
 class NodeConstruction:
-    """Node construction data."""
     equipment: List[str] = field(default_factory=list)
     num_beds: int = 0
     shelving: Dict = field(default_factory=dict)
@@ -45,7 +41,6 @@ class NodeConstruction:
 
 @dataclass
 class ExtendedNodeConfig:
-    """Extended-format node configuration."""
     node_id: str
     node_type: str
     name: str
@@ -60,73 +55,68 @@ class ExtendedNodeConfig:
 
 
 class ExtendedConfigParser:
-    """Parse the extended hospital config format."""
-
     def __init__(self, config_path: str):
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             self.config_data = json.load(f)
 
-        self.name = self.config_data.get('name', 'unnamed')
-        self.metadata = self.config_data.get('metadata', {})
+        self.name = self.config_data.get("name", "unnamed")
+        self.metadata = self.config_data.get("metadata", {})
 
         self.item_database: Dict[str, ItemInfo] = {}
-        if 'item_database' in self.config_data:
-            for item_id, item_data in self.config_data['item_database'].items():
-                self.item_database[item_id] = ItemInfo(
-                    item_id=item_id,
-                    **item_data
-                )
+        if "item_database" in self.config_data:
+            for item_id, item_data in self.config_data["item_database"].items():
+                self.item_database[item_id] = ItemInfo(item_id=item_id, **item_data)
 
         self.nodes: List[ExtendedNodeConfig] = []
-        for node_data in self.config_data.get('nodes', []):
+        for node_data in self.config_data.get("nodes", []):
             self.nodes.append(self._parse_node(node_data))
 
-        self.edges = self.config_data.get('edges', [])
-        self.task_type_mappings = self.config_data.get('task_type_item_mapping', {})
+        self.edges = self.config_data.get("edges", [])
+        self.task_type_mappings = self.config_data.get("task_type_item_mapping", {})
 
     def _parse_node(self, node_data: Dict) -> ExtendedNodeConfig:
         construction = None
-        if 'construction' in node_data:
-            const_data = node_data['construction']
+        if "construction" in node_data:
+            const_data = node_data["construction"]
             construction = NodeConstruction(
-                equipment=const_data.get('equipment', []),
-                num_beds=const_data.get('num_beds', 0),
-                shelving=const_data.get('shelving', {}),
-                environmental=const_data.get('environmental', {}),
-                bedside_storage=const_data.get('bedside_storage', {})
+                equipment=const_data.get("equipment", []),
+                num_beds=const_data.get("num_beds", 0),
+                shelving=const_data.get("shelving", {}),
+                environmental=const_data.get("environmental", {}),
+                bedside_storage=const_data.get("bedside_storage", {}),
             )
 
         inventory_categories = {}
-        if 'inventory' in node_data and 'categories' in node_data['inventory']:
-            for cat_name, cat_data in node_data['inventory']['categories'].items():
+        if "inventory" in node_data and "categories" in node_data["inventory"]:
+            for cat_name, cat_data in node_data["inventory"]["categories"].items():
                 inventory_categories[cat_name] = InventoryCategory(
                     category_name=cat_name,
-                    stock_level=cat_data.get('stock_level', 0.0),
-                    max_stock=cat_data.get('max_stock', 100.0),
-                    consumption_rate=cat_data.get('consumption_rate', 0.0),
-                    buffer_time=cat_data.get('buffer_time', 2.0),
-                    items=cat_data.get('items', [])
+                    stock_level=cat_data.get("stock_level", 0.0),
+                    max_stock=cat_data.get("max_stock", 100.0),
+                    consumption_rate=cat_data.get("consumption_rate", 0.0),
+                    buffer_time=cat_data.get("buffer_time", 2.0),
+                    items=cat_data.get("items", []),
                 )
 
         storage_zones = {}
-        if 'inventory' in node_data and 'storage_zones' in node_data['inventory']:
-            storage_zones = node_data['inventory']['storage_zones']
+        if "inventory" in node_data and "storage_zones" in node_data["inventory"]:
+            storage_zones = node_data["inventory"]["storage_zones"]
 
         priority_items = []
-        if 'inventory' in node_data:
-            priority_items = node_data['inventory'].get('priority_items', [])
+        if "inventory" in node_data:
+            priority_items = node_data["inventory"].get("priority_items", [])
 
         return ExtendedNodeConfig(
-            node_id=str(node_data['id']),
-            node_type=node_data['type'],
-            name=node_data.get('name', f"Node_{node_data['id']}"),
-            pos=tuple(node_data['pos']),
-            size=tuple(node_data['size']),
+            node_id=str(node_data["id"]),
+            node_type=node_data["type"],
+            name=node_data.get("name", f"Node_{node_data['id']}"),
+            pos=tuple(node_data["pos"]),
+            size=tuple(node_data["size"]),
             construction=construction,
             inventory_categories=inventory_categories,
             storage_zones=storage_zones,
-            patient_info=node_data.get('patient_info', {}),
-            priority_items=priority_items
+            patient_info=node_data.get("patient_info", {}),
+            priority_items=priority_items,
         )
 
     def get_node_by_id(self, node_id: str) -> Optional[ExtendedNodeConfig]:
@@ -161,10 +151,7 @@ class ExtendedConfigParser:
         if not node:
             return 0.0
 
-        total = sum(
-            cat.consumption_rate
-            for cat in node.inventory_categories.values()
-        )
+        total = sum(cat.consumption_rate for cat in node.inventory_categories.values())
         return total
 
     def get_equipment_list(self, node_id: str) -> List[str]:
@@ -175,9 +162,7 @@ class ExtendedConfigParser:
 
     def get_controlled_substances(self) -> List[str]:
         return [
-            item_id
-            for item_id, item in self.item_database.items()
-            if item.controlled_substance
+            item_id for item_id, item in self.item_database.items() if item.controlled_substance
         ]
 
     def needs_temperature_control(self, item_id: str) -> bool:
@@ -185,11 +170,11 @@ class ExtendedConfigParser:
         return item.temperature_sensitive if item else False
 
     def summarize(self):
-        logger.debug(f"\n{'='*60}")
+        logger.debug(f"\n{'=' * 60}")
         logger.debug(f"Config: {self.name}")
-        logger.debug(f"{'='*60}")
+        logger.debug(f"{'=' * 60}")
 
-        logger.debug(f"\nMetadata:")
+        logger.debug("\nMetadata:")
         for key, value in self.metadata.items():
             logger.debug(f"  {key}: {value}")
 
@@ -206,11 +191,13 @@ class ExtendedConfigParser:
             if node.inventory_categories:
                 logger.debug(f"    Inventory categories: {len(node.inventory_categories)}")
                 for cat_name, cat in node.inventory_categories.items():
-                    logger.debug(f"      - {cat_name}: {cat.stock_level}/{cat.max_stock} "
-                          f"(consumption: {cat.consumption_rate}/hr)")
+                    logger.debug(
+                        f"      - {cat_name}: {cat.stock_level}/{cat.max_stock} "
+                        f"(consumption: {cat.consumption_rate}/hr)"
+                    )
 
             if node.patient_info:
-                spec = node.patient_info.get('specialization', 'N/A')
+                spec = node.patient_info.get("specialization", "N/A")
                 logger.debug(f"    Specialization: {spec}")
 
         logger.debug(f"\nItem Database: {len(self.item_database)} items")
@@ -219,4 +206,4 @@ class ExtendedConfigParser:
             logger.debug(f"  Controlled substances: {len(controlled)}")
 
         logger.debug(f"\nEdges: {len(self.edges)}")
-        logger.debug(f"{'='*60}\n")
+        logger.debug(f"{'=' * 60}\n")

@@ -1,39 +1,24 @@
-"""
-Fleet-level event logging: charging interrupts, robot stoppages, offline events.
-Separate from TaskLogger so operational events are not buried in task completion noise.
-"""
 import logging
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional
 
 
 class FleetEventLogger:
-    """Log robot-level operational events to a dedicated file.
-
-    Events logged:
-        CHARGE_INTERRUPT  - battery forced a mid-task diversion to hub
-        CHARGE_DISPATCH   - robot routed to charge while idle (no tasks)
-        CHARGE_START      - robot docked and charging began
-        CHARGE_COMPLETE   - charging finished, robot resuming
-        ROBOT_OFFLINE     - manual shutdown; tasks requeued or escalated
-        TASK_REQUEUED     - task returned to pending after offline event
-        TASK_EMERGENCY    - task escalated to manual handling (items on robot)
-    """
+    """Log robot-level operational events (charging, offline, stoppage) to a dedicated file."""
 
     def __init__(self, log_dir: Path):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger = logging.getLogger('GAPO_Fleet')
+        self.logger = logging.getLogger("GAPO_Fleet")
         self.logger.setLevel(logging.INFO)
         self.logger.handlers = []
 
         fh = logging.FileHandler(self.log_dir / "fleet_events.log")
         fh.setLevel(logging.INFO)
-        fh.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        fh.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
         self.logger.addHandler(fh)
 
-        # Summary counters
         self.charge_interrupts = 0
         self.charge_dispatches_idle = 0
         self.robot_offline_events = 0
@@ -75,13 +60,17 @@ class FleetEventLogger:
             f"battery={battery_level:.3f} current_node={current_node} hub_node={hub_node}"
         )
 
-    def log_charge_start(self, robot_id: int, sim_time: float, battery_level: float, hub_node: Optional[int]):
+    def log_charge_start(
+        self, robot_id: int, sim_time: float, battery_level: float, hub_node: Optional[int]
+    ):
         self.logger.info(
             f"CHARGE_START robot={robot_id} sim_time={sim_time:.1f}s "
             f"battery={battery_level:.3f} hub_node={hub_node}"
         )
 
-    def log_charge_complete(self, robot_id: int, sim_time: float, battery_level: float, hub_node: Optional[int]):
+    def log_charge_complete(
+        self, robot_id: int, sim_time: float, battery_level: float, hub_node: Optional[int]
+    ):
         self.logger.info(
             f"CHARGE_COMPLETE robot={robot_id} sim_time={sim_time:.1f}s "
             f"battery={battery_level:.3f} hub_node={hub_node}"
@@ -130,8 +119,7 @@ class FleetEventLogger:
         current_node: Optional[int],
         stoppage_reason: str,
     ):
-        """Robot has been stationary for >= 10s. stoppage_reason populated from scheduler
-        state in sim; to be enriched with ROS backend data in real deployment."""
+        """Robot has been stationary for >= 10s; stoppage_reason is populated from sim scheduler state."""
         self.logger.info(
             f"ROBOT_STATIONARY robot={robot_id} sim_time={sim_time:.1f}s "
             f"battery={battery_level:.3f} duration={duration_s:.1f}s "

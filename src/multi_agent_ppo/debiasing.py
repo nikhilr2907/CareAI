@@ -1,7 +1,8 @@
+from typing import List, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple
 
 
 class StateDeltaDebiasing(nn.Module):
@@ -40,7 +41,9 @@ class TemporalConsistencyDebiasing(nn.Module):
         task_similarity_matrix: torch.Tensor,
         device=None,
     ) -> torch.Tensor:
-        dev = (action_logits_sequence[0].device if action_logits_sequence else device) or torch.device("cpu")
+        dev = (
+            action_logits_sequence[0].device if action_logits_sequence else device
+        ) or torch.device("cpu")
         if len(action_logits_sequence) < 2:
             return torch.zeros((), device=dev)
 
@@ -89,8 +92,6 @@ class PermutationInvarianceDebiasing(nn.Module):
 
 
 class CausalMaskingDebiasing(nn.Module):
-    """Build causal masks."""
-
     def __init__(self):
         super().__init__()
 
@@ -142,7 +143,9 @@ class ComprehensiveDebiasing(nn.Module):
             similarity_threshold = 0.7
             upper_tri = torch.triu(task_similarity, diagonal=1)
             similar_pairs = int((upper_tri > similarity_threshold).sum().item())
-            sim_mean = float(upper_tri[upper_tri > 0].mean().item()) if (upper_tri > 0).any() else 0.0
+            sim_mean = (
+                float(upper_tri[upper_tri > 0].mean().item()) if (upper_tri > 0).any() else 0.0
+            )
             sim_max = float(upper_tri.max().item()) if upper_tri.numel() > 0 else 0.0
         else:
             consistency_loss = torch.zeros((), device=dev)

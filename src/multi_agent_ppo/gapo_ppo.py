@@ -1,10 +1,11 @@
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from typing import Any, List, Dict, Tuple, Optional
-import numpy as np
-import logging
 
 from .gapo_policy import GAPOPolicyNetwork
 from .task_creation_actor import TaskCreationActor
@@ -18,8 +19,7 @@ class Memory:
         self.rewards = []
         self.is_terminals = []
         self.robot_masks = []
-        # Track which memory indices belong to the same assignment step
-        # Each entry is a list of memory indices for assignments made in that step
+        # step_assignment_groups: lists of memory indices for assignments made in the same step
         self.step_assignment_groups = []
 
     def clear_memory(self):
@@ -74,8 +74,8 @@ class GAPOPPO:
         lambda_creation_factorizer: float = 0.1,
         lambda_creation_kl: float = 0.01,
         edge_cost_manager: Optional[Any] = None,
-        device='cpu',
-        logger: Optional[logging.Logger] = None
+        device="cpu",
+        logger: Optional[logging.Logger] = None,
     ):
         self.gamma = gamma
         self.eps_clip = eps_clip
@@ -92,7 +92,6 @@ class GAPOPPO:
         self.ranking_min_adv_gap = float(max(0.0, ranking_min_adv_gap))
         self.lambda_ranking = float(lambda_ranking)
 
-        # GAPO policy network
         self.policy = GAPOPolicyNetwork(
             node_continuous_dim=node_continuous_dim,
             num_node_types=num_node_types,
@@ -112,10 +111,10 @@ class GAPOPPO:
             hidden_dim=hidden_dim,
             num_attention_heads=num_attention_heads,
             use_debiasing=use_debiasing,
-            lambda_state_delta=lambda_debias
+            lambda_state_delta=lambda_debias,
         ).to(self.device)
 
-        # Old policy for PPO ratio
+        # policy_old provides the fixed reference for the PPO probability ratio
         self.policy_old = GAPOPolicyNetwork(
             node_continuous_dim=node_continuous_dim,
             num_node_types=num_node_types,
@@ -134,26 +133,20 @@ class GAPOPPO:
             sku_embed_dim=sku_embed_dim,
             hidden_dim=hidden_dim,
             num_attention_heads=num_attention_heads,
-            use_debiasing=False  # Don't need debiasing in old policy
+            use_debiasing=False,  # Don't need debiasing in old policy
         ).to(self.device)
 
         self.policy_old.load_state_dict(self.policy.state_dict())
-        # policy_old is used exclusively for rollout inference — keep it in eval mode
-        # so any remaining dropout (e.g. critic head) is disabled during rollout.
+        # policy_old is used exclusively for rollout inference — eval mode disables any remaining dropout (e.g. critic head).
         self.policy_old.eval()
 
-        # Compile hot paths. dynamic=True handles variable node/edge/robot counts
-        # across configs without recompiling. reduce-overhead on policy_old trades
-        # compile time for lower per-call kernel launch overhead (inference only).
-        # _forward_batched is compiled directly since evaluate_actions calls it
-        # as a method rather than going through forward().
+        # torch.compile: dynamic=True avoids recompiling for variable node/edge/robot counts; reduce-overhead speeds up policy_old inference.
         if torch.cuda.is_available():
             self.policy_old = torch.compile(self.policy_old, mode="reduce-overhead", dynamic=True)
             self.policy._forward_batched = torch.compile(self.policy._forward_batched, dynamic=True)
 
         self.MseLoss = nn.MSELoss()
 
-        # Optimizer (actor/critic param groups)
         actor_lr = actor_lr if actor_lr is not None else lr
         critic_lr = critic_lr if critic_lr is not None else lr
         actor_params = []
@@ -177,78 +170,39 @@ class GAPOPPO:
         self.lambda_creation_kl = lambda_creation_kl
         self.edge_cost_manager = edge_cost_manager
         if task_creation_actor is not None:
-            self.creation_optimizer = optim.Adam(
-                task_creation_actor.parameters(), lr=lr_creation
-            )
+            self.creation_optimizer = optim.Adam(task_creation_actor.parameters(), lr=lr_creation)
         else:
             self.creation_optimizer = None
 
     def select_action(
-        self,
-        state_dict: Dict[str, np.ndarray],
-        memory: Memory,
-        robot_mask: np.ndarray = None
+        self, state_dict: Dict[str, np.ndarray], memory: Memory, robot_mask: np.ndarray = None
     ) -> int:
-        """
-        Select action using current policy.
-
-        Args:
-            state_dict: State dictionary from environment
-            memory: Memory buffer to store experience
-            robot_mask: Boolean mask for available robots
-
-        Returns:
-            action: Selected action
-        """
-        # Convert numpy arrays to tensors
+        """Select an action using the current policy and record the experience into memory."""
         state_dict_tensor = self._state_dict_to_tensor(state_dict)
 
-        # Convert mask
         if robot_mask is not None:
             robot_mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(self.device)
         else:
             robot_mask_tensor = None
 
-        # Select action
         with torch.no_grad():
             action, log_prob, action_probs, entropy = self.policy_old.select_action(
-                state_dict_tensor,
-                robot_mask_tensor
+                state_dict_tensor, robot_mask_tensor
             )
 
-        # Store in memory
         memory.state_dicts.append(state_dict)
         memory.actions.append(action)
         memory.logprobs.append(log_prob.item())
         memory.robot_masks.append(robot_mask)
 
-        # Record action for de-biasing
         self.policy.record_action(action)
 
         return action, action_probs, entropy
 
     def select_action_no_store(
-        self,
-        state_dict: Dict[str, np.ndarray],
-        robot_mask: np.ndarray = None
+        self, state_dict: Dict[str, np.ndarray], robot_mask: np.ndarray = None
     ) -> Tuple[int, float, list, float]:
-        """
-        Select a stochastic action WITHOUT writing to a Memory buffer.
-
-        Mirrors select_action() but returns the log-prob so the caller can defer
-        committing the experience until the assignment is actually accepted by the
-        env. Use this when an action may be rejected (e.g. the chosen robot must
-        charge) and only successful assignments should enter the rollout buffer.
-
-        Note: this does not call record_action() either — the caller records the
-        action after a confirmed assignment so de-biasing stays consistent.
-
-        Returns:
-            action: selected robot index
-            logprob: float log-probability of the action under policy_old
-            action_probs: per-robot probability list (for logging)
-            entropy: policy entropy at this state (for logging)
-        """
+        """Select a stochastic action without writing to a Memory buffer, for callers that may reject the assignment before committing it."""
         state_dict_tensor = self._state_dict_to_tensor(state_dict)
         if robot_mask is not None:
             robot_mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(self.device)
@@ -257,42 +211,25 @@ class GAPOPPO:
 
         with torch.no_grad():
             action, log_prob, action_probs, entropy = self.policy_old.select_action(
-                state_dict_tensor,
-                robot_mask_tensor
+                state_dict_tensor, robot_mask_tensor
             )
 
         return action, log_prob.item(), action_probs, entropy
 
     def select_action_greedy(
-        self,
-        state_dict: Dict[str, np.ndarray],
-        robot_mask: np.ndarray = None
+        self, state_dict: Dict[str, np.ndarray], robot_mask: np.ndarray = None
     ) -> int:
-        """
-        Select action greedily (for deployment/evaluation).
-
-        Args:
-            state_dict: State dictionary from environment
-            robot_mask: Boolean mask for available robots
-
-        Returns:
-            action: Selected action (greedy)
-        """
-        # Convert numpy arrays to tensors
+        """Select an action greedily (for deployment/evaluation)."""
         state_dict_tensor = self._state_dict_to_tensor(state_dict)
 
-        # Convert mask
         if robot_mask is not None:
             robot_mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(self.device)
         else:
             robot_mask_tensor = None
 
-        # Select action greedily
         with torch.no_grad():
             action, _, action_probs, entropy = self.policy.select_action(
-                state_dict_tensor,
-                robot_mask_tensor,
-                deterministic=True
+                state_dict_tensor, robot_mask_tensor, deterministic=True
             )
 
         return action, action_probs, entropy
@@ -302,24 +239,12 @@ class GAPOPPO:
         pending_tasks,
         state_dict: Dict[str, np.ndarray],
         current_time: float,
-        temperature: float = 1.0
+        temperature: float = 1.0,
     ) -> List:
-        """
-        Score and rank pending tasks using context-aware scorer with stochastic sampling.
-
-        Args:
-            pending_tasks: List of Task objects
-            state_dict: Current environment state (numpy)
-            current_time: Current simulation time
-            temperature: Sampling temperature (higher = more random, 0 = deterministic)
-
-        Returns:
-            ranked_tasks: Reordered task list
-        """
+        """Score and rank pending tasks using the context-aware scorer with stochastic sampling."""
         if not pending_tasks or len(pending_tasks) <= 1:
             return pending_tasks
 
-        # Build candidate feature tensor.
         task_features = np.stack([t.get_features(current_time) for t in pending_tasks])
         task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(self.device)
         state_tensor = self._state_dict_to_tensor(state_dict)
@@ -349,49 +274,29 @@ class GAPOPPO:
 
     def compute_ranking_loss(
         self,
-        memory: 'Memory',
+        memory: "Memory",
         state_dict_tensors: List[Dict[str, torch.Tensor]],
         advantages: torch.Tensor,
-        context_cache: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None
+        context_cache: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None,
     ) -> torch.Tensor:
-        """
-        Compute ranking loss: tasks that led to higher advantages should have higher scores.
-
-        Uses a margin ranking loss on pairs of tasks within the same assignment step.
-
-        Args:
-            memory: Memory buffer with step_assignment_groups
-            state_dict_tensors: Tensorized state dicts
-            advantages: GAE advantages for each decision
-            context_cache: Optional dict mapping memory index → (graph_emb, fleet_emb)
-                           pre-computed by evaluate_actions to avoid redundant GNN passes.
-
-        Returns:
-            ranking_loss: Scalar loss
-        """
+        """Compute a margin ranking loss so tasks that led to higher advantages receive higher scores."""
         total_loss = torch.tensor(0.0, device=self.device)
         num_pairs = 0
 
-        # Build groups: prefer same-step groups (tasks competing at the same moment).
-        # Fall back to a single cross-rollout group when no same-step pairs exist —
-        # this happens in single-robot settings where tasks arrive one at a time.
+        # Prefer same-step groups; fall back to one cross-rollout group when none exist (e.g. single-robot settings).
         all_indices = list(range(min(len(advantages), len(state_dict_tensors))))
         if memory.step_assignment_groups:
             groups = [
                 [idx for idx in g if 0 <= idx < len(advantages) and idx < len(state_dict_tensors)]
                 for g in memory.step_assignment_groups
             ]
-            # Check if any same-step group has ≥2 valid members
             has_same_step_pairs = any(len(g) >= 2 for g in groups)
         else:
             groups = []
             has_same_step_pairs = False
 
         if not has_same_step_pairs and len(all_indices) >= 2:
-            # TEMPORARY: single-robot fallback — tasks arrive one at a time so
-            # same-step groups never form. Cross-rollout pairs are noisier (different
-            # world states) but give the scorer a gradient rather than nothing.
-            # Remove once running multi-robot, where same-step pairs form naturally.
+            # TEMPORARY single-robot fallback: noisier cross-rollout pairs beat no gradient; remove once multi-robot forms same-step pairs.
             groups = [all_indices]
 
         for group_indices in groups:
@@ -407,9 +312,7 @@ class GAPOPPO:
                 else:
                     graph_emb, fleet_emb = self.policy.encode_context(sd)
                 score = self.policy.score_tasks(
-                    sd["task_features"].unsqueeze(0),
-                    graph_emb,
-                    fleet_emb
+                    sd["task_features"].unsqueeze(0), graph_emb, fleet_emb
                 ).squeeze(0)
                 group_scores.append(score)
                 group_advs.append(advantages[idx])
@@ -418,8 +321,7 @@ class GAPOPPO:
             advs = torch.stack(group_advs, dim=0)
 
             pair_indices = self._sample_group_pairs(
-                group_size=len(group_indices),
-                max_pairs=self.ranking_max_pairs_per_group
+                group_size=len(group_indices), max_pairs=self.ranking_max_pairs_per_group
             )
             for i, j in pair_indices:
                 adv_delta = advs[i] - advs[j]
@@ -427,10 +329,7 @@ class GAPOPPO:
                     continue
                 target = torch.sign(adv_delta).view(1)
                 margin_loss = F.margin_ranking_loss(
-                    scores[i].view(1),
-                    scores[j].view(1),
-                    target,
-                    margin=0.1
+                    scores[i].view(1), scores[j].view(1), target, margin=0.1
                 )
                 total_loss = total_loss + margin_loss
                 num_pairs += 1
@@ -452,13 +351,7 @@ class GAPOPPO:
         return [all_pairs[k] for k in perm]
 
     def update_task_creation_actor(self) -> torch.Tensor:
-        """
-        Train the task creation actor (#7 factorizer + #8 scorer) using completion
-        credits accumulated in its buffer since the last call.
-
-        Uses a separate optimizer from the main PPO policy.
-        Returns the scalar creation loss (0.0 if no completed records or actor is None).
-        """
+        """Train the task creation actor on completion credits accumulated since the last call, using its own optimizer."""
         if self.task_creation_actor is None or self.creation_optimizer is None:
             return torch.tensor(0.0, device=self.device)
 
@@ -471,77 +364,54 @@ class GAPOPPO:
         if loss.requires_grad:
             self.creation_optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(self.task_creation_actor.parameters()), 0.5
-            )
+            torch.nn.utils.clip_grad_norm_(list(self.task_creation_actor.parameters()), 0.5)
             self.creation_optimizer.step()
 
         return loss
 
     def update(self, memory: Memory, next_state_dict: Dict[str, np.ndarray] = None):
-        """
-        Update policy using PPO with GAE advantages.
-
-        Args:
-            memory: Memory buffer with experiences
-            next_state_dict: Next state for bootstrapping (continuous tasks)
-        """
+        """Update the policy using PPO with GAE advantages."""
         # Ensure policy is in train mode for gradient updates; policy_old stays in eval.
         self.policy.train()
 
-        # Convert to tensors
         old_actions = torch.tensor(memory.actions, dtype=torch.long).to(self.device)
         old_logprobs = torch.tensor(memory.logprobs, dtype=torch.float32).to(self.device)
         rewards_tensor = torch.tensor(memory.rewards, dtype=torch.float32).to(self.device)
 
-        # Convert state dicts to tensors
-        state_dict_tensors = [
-            self._state_dict_to_tensor(sd) for sd in memory.state_dicts
-        ]
+        state_dict_tensors = [self._state_dict_to_tensor(sd) for sd in memory.state_dicts]
 
         # Backfill episode_task_features for de-biasing (not filled during rollout since policy_old is used).
         if self.use_debiasing:
             self.policy.episode_task_features = [
-                sd['task_features'].detach() for sd in state_dict_tensors
+                sd["task_features"].detach() for sd in state_dict_tensors
             ]
 
         robot_mask_tensors = []
         for mask in memory.robot_masks:
             if mask is not None:
-                robot_mask_tensors.append(
-                    torch.tensor(mask, dtype=torch.bool).to(self.device)
-                )
+                robot_mask_tensors.append(torch.tensor(mask, dtype=torch.bool).to(self.device))
             else:
                 robot_mask_tensors.append(None)
 
-        # Compute state values for all states
         with torch.no_grad():
             _, values, _, _, _, _ = self.policy.evaluate_actions(
-                state_dict_tensors,
-                old_actions,
-                robot_mask_tensors
+                state_dict_tensors, old_actions, robot_mask_tensors
             )
             values = values.squeeze(-1)
 
-            # Get value of next state for bootstrapping
             if next_state_dict is not None:
                 next_state_tensor = self._state_dict_to_tensor(next_state_dict)
                 _, next_value, _, _, _, _ = self.policy.evaluate_actions(
                     [next_state_tensor],
                     torch.zeros(1, dtype=torch.long).to(self.device),
-                    [robot_mask_tensors[-1] if robot_mask_tensors else None]
+                    [robot_mask_tensors[-1] if robot_mask_tensors else None],
                 )
                 next_value = next_value.squeeze().to(self.device)
             else:
                 next_value = torch.tensor(0.0).to(self.device)
 
         # GAE advantages on raw reward scale; critic trains on raw returns, actor sees normalized advantages.
-        raw_advantages = self._compute_gae(
-            rewards_tensor,
-            values,
-            next_value,
-            memory.is_terminals
-        )
+        raw_advantages = self._compute_gae(rewards_tensor, values, next_value, memory.is_terminals)
 
         returns = (raw_advantages + values).detach()  # discounted return targets for critic
 
@@ -550,43 +420,34 @@ class GAPOPPO:
         if adv_std > self.min_adv_std:
             advantages = (raw_advantages - raw_advantages.mean()) / (adv_std + 1e-7)
         else:
-            advantages = raw_advantages - raw_advantages.mean()  # mean-center only; scaling would amplify noise
+            advantages = (
+                raw_advantages - raw_advantages.mean()
+            )  # mean-center only; scaling would amplify noise
 
         self.logger.info(f"  Starting PPO update ({self.K_epochs} epochs)...")
 
-        # Optimize policy for K epochs
         for epoch in range(self.K_epochs):
             # raw_logits are gradient-connected for de-biasing; embeddings reused by compute_ranking_loss.
-            logprobs, state_values, dist_entropy, raw_logits, graph_emb_batch, fleet_emb_batch = self.policy.evaluate_actions(
-                state_dict_tensors,
-                old_actions,
-                robot_mask_tensors
+            logprobs, state_values, dist_entropy, raw_logits, graph_emb_batch, fleet_emb_batch = (
+                self.policy.evaluate_actions(state_dict_tensors, old_actions, robot_mask_tensors)
             )
 
             state_values = state_values.squeeze(-1).clone()
 
             # Context cache maps memory index → (graph_emb, fleet_emb) to skip redundant GNN passes in ranking loss.
             context_cache = {
-                i: (graph_emb_batch[i], fleet_emb_batch[i])
-                for i in range(graph_emb_batch.shape[0])
+                i: (graph_emb_batch[i], fleet_emb_batch[i]) for i in range(graph_emb_batch.shape[0])
             }
 
-            # PPO ratio
             ratios = torch.exp(logprobs - old_logprobs.detach())
             clip_fraction = (torch.abs(ratios - 1.0) > self.eps_clip).float().mean()
 
-            # Surrogate loss
             surr1 = ratios * advantages
             clipped_ratios = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip)
             surr2 = clipped_ratios * advantages
 
-            # Actor loss
             actor_loss = -torch.min(surr1, surr2).mean()
-
-            # Critic loss (fit to GAE-computed returns)
             critic_loss = 0.5 * self.MseLoss(state_values, returns)
-
-            # Entropy bonus (exploration)
             entropy_loss = -self.entropy_coef * dist_entropy.mean()
 
             # De-biasing loss — pass live logits so gradients reach GNN encoders
@@ -609,54 +470,48 @@ class GAPOPPO:
             critic_scaled = self.critic_coef * critic_loss
             loss = actor_combined + critic_scaled + debias_loss
 
-            # Single backward pass on combined loss
             self.optimizer.zero_grad()
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(list(self.policy.parameters()), 0.5)
             self.optimizer.step()
 
-            # Log losses for each epoch
             self.logger.info(
-                f"    Epoch {epoch+1}/{self.K_epochs}: "
+                f"    Epoch {epoch + 1}/{self.K_epochs}: "
                 f"Loss={loss.item():.4f} | "
                 f"Actor={actor_loss.item():.4f} | "
                 f"Critic={critic_loss.item():.4f} | "
                 f"Entropy={entropy_loss.item():.4f} | "
-                f"Ranking={ranking_loss.item():.4f}" +
-                (f" | Debias={debias_loss.item():.4f}" if self.use_debiasing else "")
+                f"Ranking={ranking_loss.item():.4f}"
+                + (f" | Debias={debias_loss.item():.4f}" if self.use_debiasing else "")
             )
 
-            # Store last loss info
             if epoch == 0:
                 self.last_loss_info = {
-                    'total_loss': loss.item(),
-                    'actor_loss': actor_loss.item(),
-                    'critic_loss': critic_loss.item(),
-                    'entropy_loss': entropy_loss.item(),
-                    'ranking_loss': ranking_loss.item(),
-                    'debias_loss': debias_loss.item() if self.use_debiasing else 0.0,
-                    'clip_fraction': clip_fraction.item(),
-                    'grad_norm': float(grad_norm),
+                    "total_loss": loss.item(),
+                    "actor_loss": actor_loss.item(),
+                    "critic_loss": critic_loss.item(),
+                    "entropy_loss": entropy_loss.item(),
+                    "ranking_loss": ranking_loss.item(),
+                    "debias_loss": debias_loss.item() if self.use_debiasing else 0.0,
+                    "clip_fraction": clip_fraction.item(),
+                    "grad_norm": float(grad_norm),
                     # Advantage diagnostics: low adv_std means sparse/no rewards this rollout
-                    'adv_std_raw': float(adv_std.item()),
-                    'returns_mean': float(returns.mean().item()),
-                    'returns_std': float(returns.std().item()),
-                    **debias_breakdown
+                    "adv_std_raw": float(adv_std.item()),
+                    "returns_mean": float(returns.mean().item()),
+                    "returns_std": float(returns.std().item()),
+                    **debias_breakdown,
                 }
 
-        self.logger.info(f"  PPO update completed.")
+        self.logger.info("  PPO update completed.")
 
-        # Update task creation actor (#7/#8) from completion credits
         creation_loss = self.update_task_creation_actor()
         if creation_loss.item() != 0.0:
             self.logger.info(f"  Creation actor loss: {creation_loss.item():.4f}")
-        self.last_loss_info['creation_loss'] = creation_loss.item()
+        self.last_loss_info["creation_loss"] = creation_loss.item()
 
-        # Copy new weights to old policy and restore eval mode for next rollout
         self.policy_old.load_state_dict(self.policy.state_dict())
         self.policy_old.eval()
 
-        # Reset episode tracking
         self.policy.reset_episode_tracking()
 
     def _compute_gae(
@@ -664,36 +519,17 @@ class GAPOPPO:
         rewards: torch.Tensor,
         values: torch.Tensor,
         next_value: torch.Tensor,
-        is_terminals: List[bool]
+        is_terminals: List[bool],
     ) -> torch.Tensor:
-        """
-        Compute Generalized Advantage Estimation (GAE).
-
-        GAE formula:
-            A_t = Σ_{l=0}^{∞} (γλ)^l * δ_{t+l}
-        where:
-            δ_t = r_t + γ * V(s_{t+1}) * (1 - terminal) - V(s_t)
-
-        Args:
-            rewards: Rewards [T]
-            values: State values [T]
-            next_value: Value of state after last timestep (for bootstrapping)
-            is_terminals: Terminal flags [T]
-
-        Returns:
-            advantages: GAE advantages [T]
-        """
+        """Compute Generalized Advantage Estimation (GAE) advantages via a reverse scan over TD-error deltas."""
         T = len(rewards)
 
-        # Pre-compute all next values and terminal masks as tensors,
-        # eliminating all branching inside the reverse loop.
+        # Pre-compute next values and terminal masks as tensors to eliminate branching inside the reverse loop.
         next_values = torch.cat([values[1:], next_value.unsqueeze(0)])
         masks = (~torch.tensor(is_terminals, dtype=torch.bool, device=self.device)).float()
         deltas = rewards + self.gamma * next_values * masks - values
 
-        # Sequential reverse scan — each term depends on the next so this
-        # cannot be parallelised without a parallel scan algorithm, but the
-        # loop body is now a single branchless multiply-add on scalars.
+        # Each term depends on the next, so this reverse scan can't be parallelised without a parallel-scan algorithm.
         advantages = torch.zeros(T, dtype=torch.float32, device=self.device)
         gae = 0.0
         coeff = self.gamma * self.lambda_gae
@@ -713,7 +549,6 @@ class GAPOPPO:
                 if key in int64_keys:
                     tensor_dict[key] = torch.tensor(value, dtype=torch.int64).to(self.device)
                 else:
-                    # Replace NaN/Inf before converting to tensor
                     value = np.nan_to_num(value, nan=0.0, posinf=1e6, neginf=-1e6)
                     tensor_dict[key] = torch.tensor(value, dtype=torch.float32).to(self.device)
             else:
@@ -725,47 +560,49 @@ class GAPOPPO:
         """Save all trainable system components available to PPO."""
         edge_cost_manager = edge_cost_manager or self.edge_cost_manager
         payload = {
-            'policy_state_dict': self.policy.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
+            "policy_state_dict": self.policy.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
         }
         if self.task_creation_actor is not None:
-            payload['task_creation_actor_state_dict'] = self.task_creation_actor.state_dict()
-            payload['task_creation_actor_meta'] = {
-                'reward_baseline': getattr(self.task_creation_actor, '_reward_baseline', 0.0),
-                'baseline_alpha': getattr(self.task_creation_actor, '_baseline_alpha', 0.05),
+            payload["task_creation_actor_state_dict"] = self.task_creation_actor.state_dict()
+            payload["task_creation_actor_meta"] = {
+                "reward_baseline": getattr(self.task_creation_actor, "_reward_baseline", 0.0),
+                "baseline_alpha": getattr(self.task_creation_actor, "_baseline_alpha", 0.05),
             }
             if self.creation_optimizer is not None:
-                payload['creation_optimizer_state_dict'] = self.creation_optimizer.state_dict()
-        if edge_cost_manager is not None and hasattr(edge_cost_manager, 'state_dict'):
-            payload['edge_cost_manager_state_dict'] = edge_cost_manager.state_dict()
+                payload["creation_optimizer_state_dict"] = self.creation_optimizer.state_dict()
+        if edge_cost_manager is not None and hasattr(edge_cost_manager, "state_dict"):
+            payload["edge_cost_manager_state_dict"] = edge_cost_manager.state_dict()
         torch.save(payload, filepath)
 
     def load(self, filepath: str, edge_cost_manager: Optional[Any] = None):
         """Load checkpoint, accepting older policy-only checkpoints."""
         edge_cost_manager = edge_cost_manager or self.edge_cost_manager
         checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
-        self.policy.load_state_dict(checkpoint['policy_state_dict'])
-        self.policy_old.load_state_dict(checkpoint['policy_state_dict'])
-        if 'optimizer_state_dict' in checkpoint:
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.policy.load_state_dict(checkpoint["policy_state_dict"])
+        self.policy_old.load_state_dict(checkpoint["policy_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-        if self.task_creation_actor is not None and 'task_creation_actor_state_dict' in checkpoint:
-            self.task_creation_actor.load_state_dict(checkpoint['task_creation_actor_state_dict'])
-            meta = checkpoint.get('task_creation_actor_meta', {})
-            self.task_creation_actor._reward_baseline = meta.get('reward_baseline', 0.0)
+        if self.task_creation_actor is not None and "task_creation_actor_state_dict" in checkpoint:
+            self.task_creation_actor.load_state_dict(checkpoint["task_creation_actor_state_dict"])
+            meta = checkpoint.get("task_creation_actor_meta", {})
+            self.task_creation_actor._reward_baseline = meta.get("reward_baseline", 0.0)
             self.task_creation_actor._baseline_alpha = meta.get(
-                'baseline_alpha',
-                getattr(self.task_creation_actor, '_baseline_alpha', 0.05),
+                "baseline_alpha",
+                getattr(self.task_creation_actor, "_baseline_alpha", 0.05),
             )
         elif self.task_creation_actor is not None:
-            self.logger.warning("Checkpoint has no task_creation_actor_state_dict; actor left at initialization")
+            self.logger.warning(
+                "Checkpoint has no task_creation_actor_state_dict; actor left at initialization"
+            )
 
-        if self.creation_optimizer is not None and 'creation_optimizer_state_dict' in checkpoint:
-            self.creation_optimizer.load_state_dict(checkpoint['creation_optimizer_state_dict'])
+        if self.creation_optimizer is not None and "creation_optimizer_state_dict" in checkpoint:
+            self.creation_optimizer.load_state_dict(checkpoint["creation_optimizer_state_dict"])
 
-        if edge_cost_manager is not None and 'edge_cost_manager_state_dict' in checkpoint:
-            edge_cost_manager.load_state_dict(checkpoint['edge_cost_manager_state_dict'])
+        if edge_cost_manager is not None and "edge_cost_manager_state_dict" in checkpoint:
+            edge_cost_manager.load_state_dict(checkpoint["edge_cost_manager_state_dict"])
 
     def get_last_loss_info(self) -> Dict:
         """Get last training loss breakdown."""
-        return getattr(self, 'last_loss_info', {})
+        return getattr(self, "last_loss_info", {})

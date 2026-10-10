@@ -1,13 +1,16 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
+
 import numpy as np
-from .node import GraphNode
+
 from .edge import GraphEdge
+from .node import GraphNode
 
 
 @dataclass
 class GraphState:
     """Represents the graph structure (nodes + edges)."""
+
     nodes: List[GraphNode] = field(default_factory=list)
     edges: List[GraphEdge] = field(default_factory=list)
     sku_database: Optional[dict] = None
@@ -18,17 +21,7 @@ class GraphState:
     consumption_scale: float = 1.0
 
     def get_node_features(self) -> np.ndarray:
-        """
-        Extract node features as numpy array (10 nodes × 8 features).
-
-        Features per node:
-        - center_x, center_y: Region center coordinates
-        - width, height: Region dimensions
-        - stock_level: Current inventory
-        - consumption_rate: Items consumed per hour
-        - time_to_stockout: Hours until stockout
-        - (deprecated) occupancy_count removed from this compact view
-        """
+        """Extract compact per-node features: center, dimensions, stock level, consumption rate, time to stockout."""
         features = []
         for node in self.nodes:
             node_features = [
@@ -38,22 +31,13 @@ class GraphState:
                 node.height,
                 node.stock_level,
                 node.consumption_rate,
-                node.time_to_stockout
+                node.time_to_stockout,
             ]
             features.append(node_features)
         return np.array(features, dtype=np.float32)
 
     def get_edge_features(self) -> np.ndarray:
-        """
-        Extract edge features as numpy array (20 edges × 5 features).
-
-        Features per edge:
-        - distance_m: Physical corridor length
-        - corridor_width: Corridor width (affects capacity)
-        - current_weight: Dynamic cost (includes congestion)
-        - has_patient_bed: Boolean (bed obstacle)
-        - clutter_level: Static clutter (0-1)
-        """
+        """Extract compact per-edge features: distance, width, dynamic weight, patient bed flag, clutter level."""
         features = []
         for edge in self.edges:
             edge_features = [
@@ -61,47 +45,14 @@ class GraphState:
                 edge.corridor_width,
                 edge.current_weight,
                 float(edge.has_patient_bed),
-                edge.clutter_level
+                edge.clutter_level,
             ]
             features.append(edge_features)
         return np.array(features, dtype=np.float32)
 
-    # ===========================================================================
-    # ENHANCED FEATURE EXTRACTION (Complete node and edge attributes)
-    # ===========================================================================
-
     def get_node_features_complete(self) -> tuple:
-        """
-        Extract core node features for models without category stats.
-
-        Returns:
-            (continuous_features, categorical_features) where:
-            - continuous_features: [num_nodes, 8] numpy array
-            - categorical_features: [num_nodes, 1] numpy array (node_type_id)
-
-        Continuous features per node (8 total):
-        1. center_x: Region center X coordinate
-        2. center_y: Region center Y coordinate
-        3. width: Region width (meters)
-        4. height: Region height (meters)
-        5. area: Region area (width * height)
-        6. stock_level: Current inventory items
-        7. consumption_rate: Items consumed per hour
-        8. time_to_stockout: Hours until stockout (inf if not consuming)
-
-        Categorical features per node (1 total):
-        1. node_type_id: Integer ID for node_type
-           - 0: 'storage'
-           - 1: 'corridor'
-           - 2: 'recovery'
-           - 3: 'hub'
-        """
-        node_type_to_id = {
-            'storage': 0,
-            'corridor': 1,
-            'recovery': 2,
-            'hub': 3
-        }
+        """Extract core (continuous, categorical node_type_id) node features for models without category stats."""
+        node_type_to_id = {"storage": 0, "corridor": 1, "recovery": 2, "hub": 3}
 
         continuous_features = []
         categorical_features = []
@@ -115,7 +66,7 @@ class GraphState:
                 node.area,
                 node.stock_level,
                 node.consumption_rate,
-                min(node.time_to_stockout, 999.0)
+                min(node.time_to_stockout, 999.0),
             ]
             continuous_features.append(node_continuous)
 
@@ -124,24 +75,12 @@ class GraphState:
 
         return (
             np.array(continuous_features, dtype=np.float32),
-            np.array(categorical_features, dtype=np.int64)
+            np.array(categorical_features, dtype=np.int64),
         )
 
     def _get_shift_period_id(self, time_seconds: float) -> int:
-        """
-        Compute shift period ID from time of day.
-
-        Args:
-            time_seconds: Current time in seconds
-
-        Returns:
-            shift_period_id:
-                0 = night (00:00-06:00)
-                1 = morning (06:00-12:00)
-                2 = afternoon (12:00-18:00)
-                3 = evening (18:00-24:00)
-        """
-        hour_of_day = (time_seconds % 86400) / 3600.0  # 86400 seconds in a day
+        """Compute the shift period id (0=night, 1=morning, 2=afternoon, 3=evening) from time of day."""
+        hour_of_day = (time_seconds % 86400) / 3600.0
 
         if hour_of_day < 6.0:
             return 0  # night
@@ -153,18 +92,7 @@ class GraphState:
             return 3  # evening
 
     def _get_day_type_id(self, time_seconds: float) -> int:
-        """
-        Compute day type ID from time.
-
-        Args:
-            time_seconds: Current time in seconds
-
-        Returns:
-            day_type_id:
-                0 = weekday (Mon-Fri)
-                1 = weekend (Sat-Sun)
-        """
-        # Assuming time_seconds starts from Monday midnight
+        """Compute the day type id (0=weekday, 1=weekend); assumes time_seconds starts at Monday midnight."""
         day_of_week = int((time_seconds / 86400.0) % 7)  # 0=Monday, 6=Sunday
 
         if day_of_week >= 5:  # Saturday or Sunday
@@ -173,14 +101,9 @@ class GraphState:
             return 0  # weekday
 
     def _get_intraday_weight(self, time_seconds: float) -> float:
-        """
-        Compute intraday consumption weight from time of day.
-        Matches the pattern from task_generator._intraday_weight()
-
-        Returns value in range [0.068, 0.259] based on time of day.
-        """
+        """Compute the intraday consumption weight (0.068-0.259); must match task_generator._intraday_weight()."""
         hour_of_day = (time_seconds % 86400) / 3600.0
-        
+
         # Demand profile: low at night, high in morning/afternoon
         if hour_of_day < 6.0:  # Night (00:00-06:00)
             return 0.068
@@ -192,12 +115,7 @@ class GraphState:
             return 0.183
 
     def _get_weekday_multiplier(self, time_seconds: float) -> float:
-        """
-        Compute weekday consumption multiplier.
-        Matches the pattern from task_generator._weekday_multiplier()
-
-        Returns value in range [0.95, 1.03] based on day of week.
-        """
+        """Compute the weekday consumption multiplier (0.95-1.03); must match task_generator._weekday_multiplier()."""
         day_of_week = int((time_seconds / 86400.0) % 7)  # 0=Monday, 6=Sunday
 
         # Tuesday/Wednesday highest, weekend lowest
@@ -208,45 +126,14 @@ class GraphState:
             3: 1.00,  # Thursday
             4: 0.98,  # Friday
             5: 0.95,  # Saturday
-            6: 0.96   # Sunday
+            6: 0.96,  # Sunday
         }
 
         return weekday_multipliers.get(day_of_week, 1.0)
 
     def get_node_features_with_category_stats(self) -> tuple:
-        """
-        Extract node features with category-level inventory stats.
-
-        Categorical embeddings for:
-        - node_type (storage, corridor, recovery, hub)
-        - department_id (department tag index)
-        - shift_period (night, morning, afternoon, evening)
-        - day_type (weekday, weekend)
-
-        Returns:
-            (continuous_features, categorical_features)
-
-        Continuous features (17 + 3*num_categories):
-            - Geometry: center_x, center_y, width, height, area
-            - Inventory: stock_level, consumption_rate, time_to_stockout
-            - Context: served_beds
-            - Location: floor, num_locations, num_shelves, num_skus, num_categories
-            - Binary: consumption_enabled
-            - Temporal: current_intraday_weight, weekday_multiplier
-            - Per-category: stock_ratio, consumption_rate, time_to_stockout (?N categories)
-
-        Categorical features [num_nodes, 4]:
-            - node_type_id: 0-3 (storage, corridor, recovery, hub)
-            - department_id: index in department_order list
-            - shift_period_id: 0-3 (night, morning, afternoon, evening)
-            - day_type_id: 0-1 (weekday, weekend)
-        """
-        node_type_to_id = {
-            'storage': 0,
-            'corridor': 1,
-            'recovery': 2,
-            'hub': 3
-        }
+        """Extract node features (geometry, inventory, temporal) plus per-category stats and categorical embeddings."""
+        node_type_to_id = {"storage": 0, "corridor": 1, "recovery": 2, "hub": 3}
 
         category_order = self.category_order or []
         department_order = self.department_order or []
@@ -260,7 +147,11 @@ class GraphState:
         categorical_features = []
 
         for node in self.nodes:
-            dept_id = department_order.index(node.department_tag) if (node.department_tag in department_order) else -1
+            dept_id = (
+                department_order.index(node.department_tag)
+                if (node.department_tag in department_order)
+                else -1
+            )
 
             base = [
                 node.center_x,
@@ -295,77 +186,26 @@ class GraphState:
                 cat_feats.extend([stock_ratio, rate, min(tts, 999.0)])
 
             node_type_id = node_type_to_id.get(node.node_type, 0)
-            categorical_features.append([
-                node_type_id,
-                dept_id,
-                shift_period_id,
-                day_type_id
-            ])
+            categorical_features.append([node_type_id, dept_id, shift_period_id, day_type_id])
 
             continuous_features.append(base + temporal_features + cat_feats)
 
         return (
             np.array(continuous_features, dtype=np.float32),
-            np.array(categorical_features, dtype=np.int64)
+            np.array(categorical_features, dtype=np.int64),
         )
 
     def get_edge_features_complete(self) -> tuple:
-        """
-        Extract COMPLETE edge features including topology and node connectivity.
-
-        Returns:
-            (continuous_features, node_indices) where:
-            - continuous_features: [num_edges, 21] numpy array
-            - node_indices: [num_edges, 2] numpy array (from_node_idx, to_node_idx)
-
-        Continuous features per edge (21 total):
-        1. distance_m: Physical corridor length
-        2. corridor_width: Physical width (meters)
-        3. max_v_ms: Max speed allowed (1.0 m/s)
-        4. entry_point_x: Entry coordinate X
-        5. entry_point_y: Entry coordinate Y
-        6. exit_point_x: Exit coordinate X
-        7. exit_point_y: Exit coordinate Y
-        8. clutter_level: Static clutter (0-1)
-        9. num_active_robots: Count of robots on corridor
-        10. has_patient_bed: Bed obstacle flag (0/1)
-        11. current_weight: Dynamic cost (base + congestion)
-        12. base_cost: Base travel time (distance / max_v_ms)
-        13. floor_delta: Floor change for edge (signed)
-        14. mode_id: Encoded travel mode (0=unknown, 1=walk, 2=lift, 3=stairs)
-        15. same_direction_robots: Robots moving along edge direction
-        16. opposite_direction_robots: Robots moving opposite edge direction
-        17. approaching_robots: Robots planning to enter this edge
-        18. people_count: Estimated people in corridor
-        19. congestion_factor: num_active / corridor_capacity
-        20. corridor_capacity: width / 0.6 (assumes 60cm per robot)
-        21. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
-
-        Node connectivity (2 indices):
-        1. from_node_idx: Source node index (0-9)
-        2. to_node_idx: Destination node index (0-9)
-
-        Note: Node indices will be used by GNN encoder to retrieve node embeddings
-        and augment edge features with from/to node embedding vectors.
-        """
-        # Create node_id to index mapping
+        """Extract full per-edge continuous features (geometry, congestion, mode) plus from/to node indices for the GNN."""
         node_id_to_idx = {node.node_id: idx for idx, node in enumerate(self.nodes)}
 
         continuous_features = []
         node_indices = []
 
-        mode_to_id = {
-            None: 0,
-            "walk": 1,
-            "corridor": 1,
-            "lift": 2,
-            "elevator": 2,
-            "stairs": 3
-        }
+        mode_to_id = {None: 0, "walk": 1, "corridor": 1, "lift": 2, "elevator": 2, "stairs": 3}
         idx_to_id = {idx: node.node_id for idx, node in enumerate(self.nodes)}
 
         for edge in self.edges:
-            # Continuous features (12)
             entry_x = edge.entry_point[0] if edge.entry_point else 0.0
             entry_y = edge.entry_point[1] if edge.entry_point else 0.0
             exit_x = edge.exit_point[0] if edge.exit_point else 0.0
@@ -412,102 +252,48 @@ class GraphState:
             ]
             continuous_features.append(edge_continuous)
 
-            # Node connectivity (2 indices)
             from_idx = node_id_to_idx.get(edge.from_node, 0)
             to_idx = node_id_to_idx.get(edge.to_node, 0)
             node_indices.append([from_idx, to_idx])
 
         return (
-            np.array(continuous_features, dtype=np.float32),  # [num_edges, 21]
-            np.array(node_indices, dtype=np.int64)            # [num_edges, 2]
+            np.array(continuous_features, dtype=np.float32),
+            np.array(node_indices, dtype=np.int64),
         )
 
     def get_node_position(self, node_id: str) -> tuple:
-        """
-        Get center (x, y) position of a node region by its ID.
-
-        Note: This returns the center of the region.
-        For full region bounds, use node.bounds property.
-        """
+        """Get center (x, y) position of a node region by its ID; use node.bounds for full region bounds."""
         for node in self.nodes:
             if node.node_id == node_id:
                 return (node.center_x, node.center_y)
         return (0.0, 0.0)
 
     def get_node_by_index(self, idx: int) -> GraphNode:
-        """Get node by index."""
         if 0 <= idx < len(self.nodes):
             return self.nodes[idx]
         return self.nodes[0]
 
-    # ===========================================================================
-    # ENHANCED FEATURE EXTRACTION WITH CATEGORY EMBEDDINGS
-    # ===========================================================================
-
     def get_node_features_with_categories(
-        self,
-        category_names: Optional[List[str]] = None,
-        max_categories: int = 10
+        self, category_names: Optional[List[str]] = None, max_categories: int = 10
     ) -> tuple:
-        """
-        Extract node features including category-based inventory with embedding indices.
-
-        This is the ENHANCED version that includes per-category stock information
-        and prepares category embedding indices for the neural network.
-
-        Args:
-            category_names: List of category names to extract (e.g., ['iv_therapy', 'ppe'])
-                           If None, automatically discovers categories from nodes
-            max_categories: Maximum number of categories to track (for fixed tensor size)
-
-        Returns:
-            tuple of:
-            - node_continuous: [num_nodes, N] - continuous features (geometry, total stock, etc.)
-            - node_categorical: [num_nodes, 1] - node_type_id
-            - category_features: [num_nodes, max_categories, 4] - per-category features
-              Each category: [stock_level, max_stock, num_skus, consumption_rate]
-            - category_mask: [num_nodes, max_categories] - 1 if category exists, 0 if padding
-            - category_ids: [num_nodes, max_categories] - category embedding indices
-            - location_ids: [num_nodes] - location embedding indices (or -1 if none)
-            - floor_ids: [num_nodes] - floor numbers
-
-        Continuous node features (15 + 3 = 18 total):
-        [Same as get_node_features_complete, plus:]
-        16. total_num_skus: Total distinct SKUs at this node
-        17. num_categories: Number of inventory categories
-        18. num_shelves: Number of shelf IDs
-
-        Category features per node (max_categories × 4):
-        For each category slot:
-        - stock_level: Current stock in this category
-        - max_stock: Max capacity for this category
-        - num_skus: Number of distinct SKUs in category
-        - consumption_rate: Consumption rate for category
-        """
-        # Auto-discover categories if not provided
+        """Extract node features plus per-category stock stats and embedding indices (category/location/floor) for the network."""
         if category_names is None:
             category_set = set()
             for node in self.nodes:
                 category_set.update(node.get_all_categories())
             category_names = sorted(list(category_set))
 
-        # Truncate to max_categories if needed
         if len(category_names) > max_categories:
-            print(f"Warning: {len(category_names)} categories found, truncating to {max_categories}")
+            print(
+                f"Warning: {len(category_names)} categories found, truncating to {max_categories}"
+            )
             category_names = category_names[:max_categories]
 
-        # Build category name → ID mapping
         category_to_id = {cat: idx for idx, cat in enumerate(category_names)}
 
-        node_type_to_id = {
-            'storage': 0,
-            'corridor': 1,
-            'recovery': 2,
-            'hub': 3
-        }
+        node_type_to_id = {"storage": 0, "corridor": 1, "recovery": 2, "hub": 3}
 
-        # Initialize arrays
-        num_nodes = len(self.nodes)
+        len(self.nodes)
         node_continuous = []
         node_categorical = []
         category_features = []
@@ -517,52 +303,46 @@ class GraphState:
         floor_ids = []
 
         for node in self.nodes:
-            # ===== Continuous features (18) =====
             node_cont = [
                 node.center_x,
                 node.center_y,
                 node.width,
                 node.height,
                 node.area,
-                                node.stock_level,  # Total aggregate stock
-                node.consumption_rate,  # Total aggregate consumption
+                node.stock_level,
+                node.consumption_rate,
                 min(node.time_to_stockout, 999.0),
                 float(node.occupancy_count),
                 float(node.urgency_level),
-                float(node.get_total_num_skus()),  # NEW
-                float(len(node.category_inventory)),  # NEW: num categories
-                float(len(node.shelf_ids))  # NEW: num shelves
+                float(node.get_total_num_skus()),
+                float(len(node.category_inventory)),
+                float(len(node.shelf_ids)),
             ]
             node_continuous.append(node_cont)
 
-            # ===== Categorical feature (1) =====
             node_type_id = node_type_to_id.get(node.node_type, 0)
             node_categorical.append([node_type_id])
 
-            # ===== Category features (max_categories × 4) =====
             node_cat_features = []
             node_cat_mask = []
             node_cat_ids = []
 
             for cat_name in category_names:
                 if cat_name in node.category_inventory:
-                    # Category exists at this node
                     cat_data = [
                         node.get_category_stock_level(cat_name),
                         node.get_category_max_stock(cat_name),
                         float(node.get_category_num_skus(cat_name)),
-                        node.get_category_consumption_rate(cat_name)
+                        node.get_category_consumption_rate(cat_name),
                     ]
                     node_cat_features.append(cat_data)
                     node_cat_mask.append(1.0)
                     node_cat_ids.append(category_to_id[cat_name])
                 else:
-                    # Category doesn't exist - pad with zeros
                     node_cat_features.append([0.0, 0.0, 0.0, 0.0])
                     node_cat_mask.append(0.0)
                     node_cat_ids.append(-1)  # -1 = no category
 
-            # Pad to max_categories if needed
             while len(node_cat_features) < max_categories:
                 node_cat_features.append([0.0, 0.0, 0.0, 0.0])
                 node_cat_mask.append(0.0)
@@ -572,12 +352,8 @@ class GraphState:
             category_mask.append(node_cat_mask)
             category_ids.append(node_cat_ids)
 
-            # ===== Location and floor IDs =====
-            # Location ID: if node.location_id exists, map to index (or use -1)
-            # For simplicity, we'll use a hash or assign sequential IDs
-            # In practice, you'd maintain a global location_id → index mapping
+            # Placeholder: hashes location_id to an int rather than a real global mapping.
             if node.location_id:
-                # Simple hash to int (replace with proper mapping in production)
                 loc_idx = hash(node.location_id) % 1000
             else:
                 loc_idx = -1
@@ -586,52 +362,26 @@ class GraphState:
             floor_ids.append(node.floor)
 
         return (
-            np.array(node_continuous, dtype=np.float32),  # [num_nodes, 18]
-            np.array(node_categorical, dtype=np.int64),    # [num_nodes, 1]
-            np.array(category_features, dtype=np.float32), # [num_nodes, max_categories, 4]
-            np.array(category_mask, dtype=np.float32),     # [num_nodes, max_categories]
-            np.array(category_ids, dtype=np.int64),        # [num_nodes, max_categories]
-            np.array(location_ids, dtype=np.int64),        # [num_nodes]
-            np.array(floor_ids, dtype=np.int64)            # [num_nodes]
+            np.array(node_continuous, dtype=np.float32),
+            np.array(node_categorical, dtype=np.int64),
+            np.array(category_features, dtype=np.float32),
+            np.array(category_mask, dtype=np.float32),
+            np.array(category_ids, dtype=np.int64),
+            np.array(location_ids, dtype=np.int64),
+            np.array(floor_ids, dtype=np.int64),
         )
 
     def get_edge_features_enhanced(self) -> tuple:
-        """
-        Extract ENHANCED edge features including physical constraints.
-
-        Returns:
-            (continuous_features, categorical_features, node_indices) where:
-            - continuous_features: [num_edges, 17] numpy array
-            - categorical_features: [num_edges, 2] numpy array (bidirectional, obstacle_type)
-            - node_indices: [num_edges, 2] numpy array (from_node_idx, to_node_idx)
-
-        NEW continuous features (17 total, added 3 more):
-        [Same 14 as get_edge_features_complete, plus:]
-        15. congestion_factor: len(active_robots) / corridor_capacity
-        16. corridor_capacity: width / 0.6 (assumes 60cm per robot)
-        17. is_congested: 1.0 if congestion_factor > 0.8 else 0.0
-
-        Categorical features per edge (2 total):
-        1. is_bidirectional: 1 (all hospital corridors are bidirectional)
-        2. obstacle_type: 0=none, 1=patient_bed, 2=clutter, 3=both
-        """
+        """Extract edge features (continuous geometry/congestion, categorical bidirectional+obstacle_type) and node indices."""
         node_id_to_idx = {node.node_id: idx for idx, node in enumerate(self.nodes)}
 
         continuous_features = []
         categorical_features = []
         node_indices = []
 
-        mode_to_id = {
-            None: 0,
-            "walk": 1,
-            "corridor": 1,
-            "lift": 2,
-            "elevator": 2,
-            "stairs": 3
-        }
+        mode_to_id = {None: 0, "walk": 1, "corridor": 1, "lift": 2, "elevator": 2, "stairs": 3}
 
         for edge in self.edges:
-            # ===== Continuous features (15) =====
             entry_x = edge.entry_point[0] if edge.entry_point else 0.0
             entry_y = edge.entry_point[1] if edge.entry_point else 0.0
             exit_x = edge.exit_point[0] if edge.exit_point else 0.0
@@ -639,7 +389,6 @@ class GraphState:
 
             base_cost = edge.distance_m / edge.max_v_ms
 
-            # NEW: Congestion metrics
             corridor_capacity = edge.corridor_width / 0.6  # Assume 60cm per robot
             num_active = len(edge.active_robot_ids)
             congestion_factor = num_active / max(1.0, corridor_capacity)
@@ -660,16 +409,14 @@ class GraphState:
                 base_cost,
                 float(getattr(edge, "floor_delta", 0)),
                 float(mode_to_id.get(getattr(edge, "mode", None), 0)),
-                congestion_factor,  # NEW
-                corridor_capacity,  # NEW
-                is_congested        # NEW
+                congestion_factor,
+                corridor_capacity,
+                is_congested,
             ]
             continuous_features.append(edge_continuous)
 
-            # ===== Categorical features (2) =====
             is_bidirectional = 1  # All hospital corridors are bidirectional
 
-            # Obstacle type encoding
             if edge.has_patient_bed and edge.clutter_level > 0.5:
                 obstacle_type = 3  # Both bed and clutter
             elif edge.has_patient_bed:
@@ -682,28 +429,18 @@ class GraphState:
             edge_categorical = [is_bidirectional, obstacle_type]
             categorical_features.append(edge_categorical)
 
-            # ===== Node connectivity (2 indices) =====
             from_idx = node_id_to_idx.get(edge.from_node, 0)
             to_idx = node_id_to_idx.get(edge.to_node, 0)
             node_indices.append([from_idx, to_idx])
 
         return (
-            np.array(continuous_features, dtype=np.float32),  # [num_edges, 17]
-            np.array(categorical_features, dtype=np.int64),   # [num_edges, 2]
-            np.array(node_indices, dtype=np.int64)            # [num_edges, 2]
+            np.array(continuous_features, dtype=np.float32),
+            np.array(categorical_features, dtype=np.int64),
+            np.array(node_indices, dtype=np.int64),
         )
 
     def get_node_sku_features(self) -> tuple:
-        """
-        Build per-node SKU feature tensor with global SKU order.
-
-        Returns:
-            (sku_features, sku_mask) where:
-            - sku_features: [num_nodes, num_skus, sku_feat_dim]
-            - sku_mask: [num_nodes, num_skus] (1 if SKU present at node)
-
-        sku_feat_dim = num_categories + 10
-        """
+        """Build the (sku_features, sku_mask) tensors over the global SKU order, one row per node per SKU."""
         sku_db = self.sku_database or {}
         sku_order = sorted(sku_db.keys())
         category_order = self.category_order or []
@@ -723,15 +460,15 @@ class GraphState:
                     continue
                 sku_mask[ni, si] = 1.0
 
-                cat_key = sku_entry.get('category', '')
+                cat_key = sku_entry.get("category", "")
                 if cat_key in cat_index:
                     sku_features[ni, si, cat_index[cat_key]] = 1.0
 
-                stock = float(sku_entry.get('stock', 0.0))
-                max_level = float(sku_entry.get('max', 0.0))
-                reorder = float(sku_entry.get('reorder', 0.0))
-                par = float(sku_entry.get('par', 0.0))
-                area_mult = float(sku_entry.get('area_multiplier', 1.0))
+                stock = float(sku_entry.get("stock", 0.0))
+                max_level = float(sku_entry.get("max", 0.0))
+                reorder = float(sku_entry.get("reorder", 0.0))
+                par = float(sku_entry.get("par", 0.0))
+                area_mult = float(sku_entry.get("area_multiplier", 1.0))
 
                 if max_level > 0:
                     stock_ratio = stock / max_level
@@ -742,11 +479,11 @@ class GraphState:
                     stock_ratio = reorder_ratio = par_ratio = max_ratio = 0.0
 
                 sku_data = sku_db.get(sku_id, {})
-                consumption = sku_data.get('consumption_model', {})
-                daily_dist = consumption.get('daily_distribution', {})
-                demand_mean = float(daily_dist.get('mean', 0.0))
-                demand_k = float(daily_dist.get('dispersion_k', 0.0))
-                intraday = consumption.get('intraday_profile', {}) or {}
+                consumption = sku_data.get("consumption_model", {})
+                daily_dist = consumption.get("daily_distribution", {})
+                demand_mean = float(daily_dist.get("mean", 0.0))
+                demand_k = float(daily_dist.get("dispersion_k", 0.0))
+                intraday = consumption.get("intraday_profile", {}) or {}
                 if intraday:
                     weights = list(intraday.values())
                     intraday_peak = float(max(weights))
@@ -754,12 +491,12 @@ class GraphState:
                 else:
                     intraday_peak = 0.0
                     intraday_offpeak = 0.0
-                weekday = consumption.get('weekday_multiplier', {}) or {}
+                weekday = consumption.get("weekday_multiplier", {}) or {}
                 if weekday:
                     vals = list(weekday.values())
                     mean = sum(vals) / max(len(vals), 1)
                     var = sum((v - mean) ** 2 for v in vals) / max(len(vals), 1)
-                    weekday_std = var ** 0.5
+                    weekday_std = var**0.5
                 else:
                     weekday_std = 0.0
 
@@ -776,4 +513,3 @@ class GraphState:
                 sku_features[ni, si, offset + 9] = area_mult
 
         return sku_features, sku_mask
-

@@ -1,9 +1,8 @@
-"""Utility helpers for GAPO deployment/simulation entrypoints."""
 from typing import Dict, List, Tuple
 
 import numpy as np
-import torch
 import pygame
+import torch
 
 
 def _get_node_center(node) -> Tuple[float, float]:
@@ -12,11 +11,13 @@ def _get_node_center(node) -> Tuple[float, float]:
         float(getattr(node, "viz_center_y", node.center_y)),
     )
 
+
 def _get_node_size(node) -> Tuple[float, float]:
     return (
         float(getattr(node, "viz_width", node.width)),
         float(getattr(node, "viz_height", node.height)),
     )
+
 
 def _node_label(node) -> str:
     display_name = getattr(node, "display_name", None)
@@ -24,17 +25,16 @@ def _node_label(node) -> str:
         return str(display_name)
     return str(node.node_id)
 
+
 def _short_label(text: str, max_len: int = 22) -> str:
     text = str(text).strip()
     if len(text) <= max_len:
         return text
     return text[: max_len - 1].rstrip() + "…"
 
+
 def apply_floorplan_layout(graph_state):
-    """
-    Create a clean floorplan-style visualization layout without changing simulation
-    dynamics. Stores coordinates in node.viz_* attributes used by renderer only.
-    """
+    """Compute a floorplan-style visualization layout, storing coordinates in node.viz_* attributes for the renderer only."""
     nodes = list(graph_state.nodes)
     if not nodes:
         return
@@ -49,13 +49,11 @@ def apply_floorplan_layout(graph_state):
         adjacency[a].append(b)
         adjacency[b].append(a)
 
-    spine_indices = [
-        i for i, node in enumerate(nodes) if node.node_type in ("corridor", "hub")
-    ]
+    spine_indices = [i for i, node in enumerate(nodes) if node.node_type in ("corridor", "hub")]
     if not spine_indices:
-        spine_indices = sorted(
-            range(len(nodes)), key=lambda i: len(adjacency[i]), reverse=True
-        )[: max(1, min(3, len(nodes)))]
+        spine_indices = sorted(range(len(nodes)), key=lambda i: len(adjacency[i]), reverse=True)[
+            : max(1, min(3, len(nodes)))
+        ]
 
     spine_indices = sorted(
         spine_indices,
@@ -125,6 +123,7 @@ def apply_floorplan_layout(graph_state):
         node.viz_width = float(w)
         node.viz_height = float(h)
 
+
 def compute_bounds(graph_state) -> Tuple[float, float, float, float]:
     min_x = min(_get_node_center(n)[0] - _get_node_size(n)[0] * 0.5 for n in graph_state.nodes)
     min_y = min(_get_node_center(n)[1] - _get_node_size(n)[1] * 0.5 for n in graph_state.nodes)
@@ -146,7 +145,6 @@ def world_to_screen(x, y, bounds, width, height, margin=40):
 def draw_graph(screen, graph_state, bounds, width, height):
     node_map = {n.node_id: n for n in graph_state.nodes}
 
-    # Corridor background
     for edge in graph_state.edges:
         from_node = node_map.get(edge.from_node)
         to_node = node_map.get(edge.to_node)
@@ -158,7 +156,6 @@ def draw_graph(screen, graph_state, bounds, width, height):
         tx, ty = world_to_screen(to_x, to_y, bounds, width, height)
         pygame.draw.line(screen, (214, 220, 228), (fx, fy), (tx, ty), 12)
 
-    # Active travel overlay
     for edge in graph_state.edges:
         from_node = node_map.get(edge.from_node)
         to_node = node_map.get(edge.to_node)
@@ -255,10 +252,16 @@ def draw_robots(screen, env, bounds, width, height, font):
         if not robot.telemetry:
             continue
 
-        if robot.telemetry.current_node_index is not None and 0 <= robot.telemetry.current_node_index < len(env.graph_state.nodes):
+        if (
+            robot.telemetry.current_node_index is not None
+            and 0 <= robot.telemetry.current_node_index < len(env.graph_state.nodes)
+        ):
             node = env.graph_state.nodes[robot.telemetry.current_node_index]
             wx, wy = _get_node_center(node)
-        elif robot.telemetry.current_edge_index is not None and 0 <= robot.telemetry.current_edge_index < len(env.graph_state.edges):
+        elif (
+            robot.telemetry.current_edge_index is not None
+            and 0 <= robot.telemetry.current_edge_index < len(env.graph_state.edges)
+        ):
             edge = env.graph_state.edges[robot.telemetry.current_edge_index]
             from_node = node_map.get(edge.from_node)
             to_node = node_map.get(edge.to_node)
@@ -275,7 +278,6 @@ def draw_robots(screen, env, bounds, width, height, font):
 
         x, y = world_to_screen(wx, wy, bounds, width, height)
 
-        # Draw the robot's actual planned movement path on the graph (if any).
         remaining_path = list(robot.telemetry.remaining_path or [])
         if remaining_path:
             path_points = [(x, y)]
@@ -292,7 +294,6 @@ def draw_robots(screen, env, bounds, width, height, font):
         color = (50 + int(200 * load_ratio), 80, 200)
         pygame.draw.circle(screen, color, (x, y), 10)
 
-        # Heading/velocity indicator to make motion direction visible.
         heading = float(robot.telemetry.heading)
         vx = int(14 * np.cos(heading))
         vy = int(-14 * np.sin(heading))
@@ -332,7 +333,9 @@ def rescore_robot_queues(env, ppo):
             task_features = np.stack([t.get_features(env.current_time) for t in all_tasks])
             task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
             with torch.no_grad():
-                scores = ppo.policy.score_tasks(task_features_tensor, graph_emb, fleet_emb).cpu().numpy()
+                scores = (
+                    ppo.policy.score_tasks(task_features_tensor, graph_emb, fleet_emb).cpu().numpy()
+                )
             for task, score in zip(all_tasks, scores):
                 task.learned_score = float(score)
             robot.resort_queue()
@@ -353,15 +356,14 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
         available_robots = list(range(len(robots)))
 
     task_node = graph_state.nodes[task.from_location_index]
-    min_distance = float('inf')
+    min_distance = float("inf")
     best_robot = None
 
     for robot_id in available_robots:
         robot = robots[robot_id]
         robot_x, robot_y = robot.current_position
         distance = np.sqrt(
-            (task_node.center_x - robot_x)**2 +
-            (task_node.center_y - robot_y)**2
+            (task_node.center_x - robot_x) ** 2 + (task_node.center_y - robot_y) ** 2
         )
         if distance < min_distance:
             min_distance = distance
@@ -370,7 +372,16 @@ def select_nearest_robot(task, robots, graph_state, action_mask):
     return best_robot if best_robot is not None else 0
 
 
-def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=None, ranking_logger=None, total_assignments=0, iteration=0):
+def assign_tasks(
+    env,
+    ppo,
+    max_assignments,
+    task_logger=None,
+    decision_logger=None,
+    ranking_logger=None,
+    total_assignments=0,
+    iteration=0,
+):
     assignments = 0
     while env.pending_tasks and assignments < max_assignments:
         task = env.pending_tasks[0]
@@ -398,8 +409,12 @@ def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=No
             ranking_logger.log_snapshot(task, env.pending_tasks, env.current_time, iteration)
         if decision_logger is not None:
             decision_logger.log(
-                task, action, heuristic_action, env, env.current_time,
-                queue_features=state_dict.get('queue_features'),
+                task,
+                action,
+                heuristic_action,
+                env,
+                env.current_time,
+                queue_features=state_dict.get("queue_features"),
                 robot_logits=robot_logits,
                 action_entropy=action_entropy,
             )
@@ -407,9 +422,13 @@ def assign_tasks(env, ppo, max_assignments, task_logger=None, decision_logger=No
         if task_logger is not None:
             for leg in legs:
                 task_logger.log_assignment(
-                    leg, action, 0.0,
-                    iteration, env.current_time,
-                    total_assignments + assignments, assignments,
+                    leg,
+                    action,
+                    0.0,
+                    iteration,
+                    env.current_time,
+                    total_assignments + assignments,
+                    assignments,
                 )
 
         if 0 <= action < len(env.robots):

@@ -1,5 +1,7 @@
-import numpy as np
 from typing import Optional
+
+import numpy as np
+
 from ..environment.robot.robot_telemetry import RobotTelemetry
 
 
@@ -8,34 +10,26 @@ class TelemetryEffectsManager:
         self.enable = enable
         self.graph_bounds = graph_bounds  # (min_x, max_x, min_y, max_y)
 
-    def apply_noise(self, telemetry: Optional[RobotTelemetry],
-                    elapsed_minutes: float,
-                    num_nodes: int = None,
-                    num_edges: int = None) -> Optional[RobotTelemetry]:
-        """
-        Inject Phase 1 realistic telemetry noise from ESP32 hardware.
-
-        Args:
-            telemetry: RobotTelemetry object (modified in-place)
-            elapsed_minutes: Time since robot reset/initialization
-
-        Returns:
-            Modified telemetry object (same object)
-        """
+    def apply_noise(
+        self,
+        telemetry: Optional[RobotTelemetry],
+        elapsed_minutes: float,
+        num_nodes: int = None,
+        num_edges: int = None,
+    ) -> Optional[RobotTelemetry]:
+        """Inject Phase 1 realistic telemetry noise from ESP32 hardware, modifying telemetry in-place."""
         if telemetry is None or not self.enable:
             return telemetry
 
-        # Clamp elapsed time to avoid unrealistic drift
-        elapsed_minutes = max(0.0, min(elapsed_minutes, 60.0))  # Cap at 1 hour
+        # Clamp elapsed time to avoid unrealistic drift (cap at 1 hour)
+        elapsed_minutes = max(0.0, min(elapsed_minutes, 60.0))
 
-        # Position: accumulating dead reckoning drift (5-10% per minute)
-        # Real ESP32 dead reckoning accumulates error ~0.075m per minute
+        # Dead reckoning drift: real ESP32 accumulates ~0.075m/min position error
         drift_std = 0.075 * elapsed_minutes
         telemetry.x += np.random.normal(0, max(drift_std, 0.01))
         telemetry.y += np.random.normal(0, max(drift_std, 0.01))
 
-        # Velocity: 25% dropout rate (command didn't execute/wheel slip/sensor lag)
-        # When available, add measurement noise
+        # 25% dropout rate (command didn't execute/wheel slip/sensor lag); otherwise add measurement noise
         if np.random.random() < 0.25:
             telemetry.velocity_ms = None
         else:
@@ -45,13 +39,11 @@ class TelemetryEffectsManager:
         heading_drift_deg = np.random.normal(0, 1.5 * elapsed_minutes)
         telemetry.heading += np.deg2rad(heading_drift_deg)
 
-        # Position bounds validation: clamp to graph bounds
         if self.graph_bounds is not None:
             min_x, max_x, min_y, max_y = self.graph_bounds
             telemetry.x = np.clip(telemetry.x, min_x, max_x)
             telemetry.y = np.clip(telemetry.y, min_y, max_y)
 
-        # Graph position validation: check indices are valid
         if num_nodes is not None:
             if telemetry.current_node_index is not None:
                 if not (0 <= telemetry.current_node_index < num_nodes):

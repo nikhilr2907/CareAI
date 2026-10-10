@@ -1,7 +1,7 @@
-import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict
+from typing import List, Optional
 
+import numpy as np
 
 from .robot_telemetry import RobotTelemetry
 
@@ -67,22 +67,24 @@ class EdgeTraversalRecord:
         return float(np.mean(self.velocity_samples)) / self.max_v_ms
 
     def to_feature_vector(self) -> np.ndarray:
-        return np.array([
-            self.distance_m,
-            self.corridor_width,
-            self.num_robots_on_edge,
-            self.people_count,
-            self.clutter_level,
-            self.approaching_robot_count,
-            self.from_node_occupancy,
-            self.to_node_occupancy,
-            self.time_of_day,
-        ], dtype=np.float32)
+        return np.array(
+            [
+                self.distance_m,
+                self.corridor_width,
+                self.num_robots_on_edge,
+                self.people_count,
+                self.clutter_level,
+                self.approaching_robot_count,
+                self.from_node_occupancy,
+                self.to_node_occupancy,
+                self.time_of_day,
+            ],
+            dtype=np.float32,
+        )
 
 
 class RobotSimulator:
-    def __init__(self, robot_id: int, graph_state, initial_node_index: int,
-                 max_capacity: int = 12):
+    def __init__(self, robot_id: int, graph_state, initial_node_index: int, max_capacity: int = 12):
         self.robot_id = robot_id
         self.graph_state = graph_state
         self.max_capacity = max_capacity
@@ -178,8 +180,8 @@ class RobotSimulator:
         # This will be set by the environment via set_traversal_context()
 
         # Node occupancy at endpoints
-        from_node_occ = len(getattr(from_node, 'current_robot_ids', []))
-        to_node_occ = len(getattr(to_node, 'current_robot_ids', []))
+        from_node_occ = len(getattr(from_node, "current_robot_ids", []))
+        to_node_occ = len(getattr(to_node, "current_robot_ids", []))
 
         self._current_traversal = EdgeTraversalRecord(
             edge_index=self.current_edge_index,
@@ -211,7 +213,9 @@ class RobotSimulator:
             self.velocity_ms = 0.0
             return self.get_telemetry()
 
-        if self.current_edge_index is not None and 0 <= self.current_edge_index < len(self.graph_state.edges):
+        if self.current_edge_index is not None and 0 <= self.current_edge_index < len(
+            self.graph_state.edges
+        ):
             # Robot is on an edge
             edge = self.graph_state.edges[self.current_edge_index]
             num_active = max(1, len(edge.active_robot_ids))
@@ -233,7 +237,11 @@ class RobotSimulator:
             for robot_id, (progress, from_idx, to_idx) in edge.active_robot_progress.items():
                 if robot_id == self.robot_id:
                     continue
-                if from_idx == direction_from and to_idx == direction_to and progress > self.edge_progress:
+                if (
+                    from_idx == direction_from
+                    and to_idx == direction_to
+                    and progress > self.edge_progress
+                ):
                     max_progress = min(max_progress, progress - (headway_m / edge.distance_m))
 
             if max_progress < self.edge_progress:
@@ -314,17 +322,19 @@ class RobotSimulator:
     def get_telemetry(self) -> RobotTelemetry:
         # Calculate ETA to next node
         eta = 0.0
-        if self.current_edge_index is not None and 0 <= self.current_edge_index < len(self.graph_state.edges):
+        if self.current_edge_index is not None and 0 <= self.current_edge_index < len(
+            self.graph_state.edges
+        ):
             edge = self.graph_state.edges[self.current_edge_index]
             remaining_distance = edge.distance_m * (1.0 - self.edge_progress)
             eta = remaining_distance / self.velocity_ms if self.velocity_ms > 0 else 0.0
 
         # Determine availability
         is_available = (
-            not self.path_queue and
-            not self.current_target_node and
-            self.current_capacity == 0 and
-            not self.is_charging
+            not self.path_queue
+            and not self.current_target_node
+            and self.current_capacity == 0
+            and not self.is_charging
         )
 
         return RobotTelemetry(
@@ -344,7 +354,7 @@ class RobotSimulator:
             active_task_id=self.active_task_id,
             remaining_path=self.path_queue.copy(),
             eta_to_next_node=eta,
-            is_charging=self.is_charging
+            is_charging=self.is_charging,
         )
 
     def set_traversal_entry_time(self, time: float):
@@ -372,17 +382,18 @@ class RobotSimulator:
         to_node = self.graph_state.get_node_by_index(to_idx)
 
         for i, edge in enumerate(self.graph_state.edges):
-            if ((edge.from_node == from_node.node_id and edge.to_node == to_node.node_id) or
-                (edge.from_node == to_node.node_id and edge.to_node == from_node.node_id)):
+            if (edge.from_node == from_node.node_id and edge.to_node == to_node.node_id) or (
+                edge.from_node == to_node.node_id and edge.to_node == from_node.node_id
+            ):
                 return i
         return None
 
     def _find_nearest_node(self, x: float, y: float) -> int:
-        min_dist = float('inf')
+        min_dist = float("inf")
         nearest_idx = 0
 
         for i, node in enumerate(self.graph_state.nodes):
-            dist = np.sqrt((node.x - x)**2 + (node.y - y)**2)
+            dist = np.sqrt((node.x - x) ** 2 + (node.y - y) ** 2)
             if dist < min_dist:
                 min_dist = dist
                 nearest_idx = i

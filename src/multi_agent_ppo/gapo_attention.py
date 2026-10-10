@@ -1,6 +1,7 @@
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
 
 
 class TaskRobotAttention(nn.Module):
@@ -58,8 +59,6 @@ class TaskRobotAttention(nn.Module):
 
 
 class TaskNodeAttention(nn.Module):
-    """Attend from a task embedding to node embeddings."""
-
     def __init__(self, embed_dim=64, num_heads=4, dropout=0.0):
         super().__init__()
         self.multihead_attn = nn.MultiheadAttention(
@@ -105,17 +104,7 @@ class TaskNodeAttention(nn.Module):
 
 
 class RobotPeerAttention(nn.Module):
-    """
-    Task-conditioned robot self-attention.
-
-    Each robot attends to all other robots given the current task, producing
-    per-robot peer-aware embeddings that capture assignment covariance — e.g.
-    "robot A is also near ward 3, so I (robot B) should score lower for this task."
-
-    Unlike TaskRobotAttention (task queries robots → single global vector),
-    this produces a distinct [64] vector per robot that encodes its relationship
-    to its peers in the context of the task being assigned.
-    """
+    """Task-conditioned robot self-attention producing a distinct peer-aware embedding per robot that captures assignment covariance between robots."""
 
     def __init__(self, embed_dim=64, num_heads=4, dropout=0.0):
         super().__init__()
@@ -138,22 +127,21 @@ class RobotPeerAttention(nn.Module):
         input_batched = robot_embeddings.dim() == 3
 
         if robot_embeddings.dim() == 2:
-            robot_embeddings = robot_embeddings.unsqueeze(0)   # [1, N, 64]
+            robot_embeddings = robot_embeddings.unsqueeze(0)
         if task_embedding.dim() == 1:
-            task_embedding = task_embedding.unsqueeze(0)       # [1, 64]
+            task_embedding = task_embedding.unsqueeze(0)
 
-        # Inject task context into each robot embedding before self-attention so
-        # robots compare themselves relative to the current task, not in general.
-        task_cond = self.task_condition(task_embedding).unsqueeze(1)  # [B, 1, 64]
-        conditioned = self.layer_norm_pre(robot_embeddings + task_cond)  # [B, N, 64]
+        # Inject task context before self-attention so robots compare themselves relative to the current task.
+        task_cond = self.task_condition(task_embedding).unsqueeze(1)
+        conditioned = self.layer_norm_pre(robot_embeddings + task_cond)
 
         # Mask unavailable robots as keys/values so they don't influence peer context.
         key_padding_mask = None
         if availability_mask is not None:
             if availability_mask.dim() == 1:
-                key_padding_mask = (~availability_mask).unsqueeze(0)  # [1, N]
+                key_padding_mask = (~availability_mask).unsqueeze(0)
             else:
-                key_padding_mask = ~availability_mask                  # [B, N]
+                key_padding_mask = ~availability_mask
 
         peer_output, peer_weights = self.self_attn(
             query=conditioned,
@@ -162,13 +150,13 @@ class RobotPeerAttention(nn.Module):
             key_padding_mask=key_padding_mask,
             need_weights=True,
             average_attn_weights=True,
-        )  # [B, N, 64], [B, N, N]
+        )
 
         peer_output = self.layer_norm_post(peer_output)
 
         if not input_batched:
-            peer_output = peer_output.squeeze(0)    # [N, 64]
-            peer_weights = peer_weights.squeeze(0)  # [N, N]
+            peer_output = peer_output.squeeze(0)
+            peer_weights = peer_weights.squeeze(0)
 
         return peer_output, peer_weights
 
@@ -193,8 +181,7 @@ class RobotScorer(nn.Module):
         peer_context: torch.Tensor,
         node_context: torch.Tensor,
     ) -> torch.Tensor:
-        # peer_context is already per-robot [N, 64] or [B, N, 64] — no expansion needed.
-        # task and node_context are global and must be broadcast across robots.
+        # peer_context is already per-robot; task and node_context are global and must be broadcast across robots.
         if robot_embeddings.dim() == 2:
             num_robots = robot_embeddings.shape[0]
             task_expanded = task_embedding.unsqueeze(0).expand(num_robots, -1)
@@ -238,8 +225,7 @@ class GAPOAttentionModule(nn.Module):
             robot_embeddings,
             robot_availability_mask,
         )
-        # Per-robot peer-aware embeddings: each robot attends to its peers
-        # conditioned on the task, capturing assignment covariance.
+        # Per-robot peer-aware embeddings capturing assignment covariance between robots.
         peer_aware_robots, peer_attn_weights = self.robot_peer_attn(
             robot_embeddings,
             task_embedding,
@@ -249,8 +235,7 @@ class GAPOAttentionModule(nn.Module):
             task_embedding,
             node_embeddings,
         )
-        # peer_aware_robots replaces robot_context in scoring: now 2 of 4 MLP
-        # input slots vary per robot (own embedding + peer context) instead of 1.
+        # peer_aware_robots replaces robot_context in scoring so 2 of 4 MLP input slots vary per robot.
         robot_scores = self.robot_scorer(
             robot_embeddings,
             task_embedding,
