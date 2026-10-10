@@ -24,3 +24,4 @@ digital_twin/
 # Local-only scripts (not shared)
 shell/
 tools/branch_audit.py
+tools/
