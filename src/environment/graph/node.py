@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Dict
+from typing import Dict, List, Optional, Tuple
+
 
 @dataclass
 class GraphNode:
@@ -27,7 +28,7 @@ class GraphNode:
     consumption_enabled: bool = False
 
     # 6. ILC demand scaling
-    foot_traffic_weight: float = 0.0   # 0–1; replaces served_beds
+    foot_traffic_weight: float = 0.0  # 0–1; replaces served_beds
     location_tag: Optional[str] = None  # e.g. "seating_area", "far_side", "home_base"
 
     def __post_init__(self):
@@ -40,8 +41,12 @@ class GraphNode:
     def bounds(self) -> Tuple[float, float, float, float]:
         half_w = self.width / 2
         half_h = self.height / 2
-        return (self.center_x - half_w, self.center_y - half_h,
-                self.center_x + half_w, self.center_y + half_h)
+        return (
+            self.center_x - half_w,
+            self.center_y - half_h,
+            self.center_x + half_w,
+            self.center_y + half_h,
+        )
 
     @property
     def area(self) -> float:
@@ -75,72 +80,72 @@ class GraphNode:
     def needs_restock(self) -> bool:
         if self.sku_inventory:
             for data in self.sku_inventory.values():
-                if float(data.get('stock', 0)) <= float(data.get('reorder', 0)):
+                if float(data.get("stock", 0)) <= float(data.get("reorder", 0)):
                     return True
         return False
 
     @property
     def is_stockout(self) -> bool:
         if self.sku_inventory:
-            return any(d.get('stock', 0.0) <= 0 for d in self.sku_inventory.values())
+            return any(d.get("stock", 0.0) <= 0 for d in self.sku_inventory.values())
         return self.stock_level <= 0
 
     # ── SKU operations ──────────────────────────────────────────────────────────
 
     def get_sku_stock(self, sku_id: str) -> float:
-        return float(self.sku_inventory.get(sku_id, {}).get('stock', 0.0))
+        return float(self.sku_inventory.get(sku_id, {}).get("stock", 0.0))
 
     def get_sku_reorder_point(self, sku_id: str) -> float:
-        return float(self.sku_inventory.get(sku_id, {}).get('reorder', 0.0))
+        return float(self.sku_inventory.get(sku_id, {}).get("reorder", 0.0))
 
     def get_sku_par_level(self, sku_id: str) -> float:
-        return float(self.sku_inventory.get(sku_id, {}).get('par', 0.0))
+        return float(self.sku_inventory.get(sku_id, {}).get("par", 0.0))
 
     def get_sku_max_level(self, sku_id: str) -> float:
-        return float(self.sku_inventory.get(sku_id, {}).get('max', 0.0))
+        return float(self.sku_inventory.get(sku_id, {}).get("max", 0.0))
 
     def consume_sku(self, sku_id: str, amount: float):
         if sku_id in self.sku_inventory:
-            current = float(self.sku_inventory[sku_id].get('stock', 0.0))
-            self.sku_inventory[sku_id]['stock'] = max(0.0, current - amount)
+            current = float(self.sku_inventory[sku_id].get("stock", 0.0))
+            self.sku_inventory[sku_id]["stock"] = max(0.0, current - amount)
 
     def restock_sku(self, sku_id: str, amount: float):
         if sku_id in self.sku_inventory:
-            current = float(self.sku_inventory[sku_id].get('stock', 0.0))
-            max_level = float(self.sku_inventory[sku_id].get('max', current + amount))
-            self.sku_inventory[sku_id]['stock'] = min(max_level, current + amount)
+            current = float(self.sku_inventory[sku_id].get("stock", 0.0))
+            max_level = float(self.sku_inventory[sku_id].get("max", current + amount))
+            self.sku_inventory[sku_id]["stock"] = min(max_level, current + amount)
 
     def recalc_category_inventory(self):
         if not self.sku_inventory:
             return
         aggregates = {}
         for sku_id, data in self.sku_inventory.items():
-            category = data.get('category')
+            category = data.get("category")
             if category is None:
                 continue
             if category not in aggregates:
-                aggregates[category] = {'stock': 0.0, 'max': 0.0, 'num_skus': 0, 'rate': 0.0}
-            aggregates[category]['stock'] += float(data.get('stock', 0.0))
-            aggregates[category]['max']   += float(data.get('max', 0.0))
+                aggregates[category] = {"stock": 0.0, "max": 0.0, "num_skus": 0, "rate": 0.0}
+            aggregates[category]["stock"] += float(data.get("stock", 0.0))
+            aggregates[category]["max"] += float(data.get("max", 0.0))
         for category, agg in aggregates.items():
-            agg['num_skus'] = sum(
-                1 for d in self.sku_inventory.values() if d.get('category') == category
+            agg["num_skus"] = sum(
+                1 for d in self.sku_inventory.values() if d.get("category") == category
             )
         self.category_inventory = aggregates
 
     # ── Category queries ────────────────────────────────────────────────────────
 
     def get_category_stock_level(self, category: str) -> float:
-        return self.category_inventory.get(category, {}).get('stock', 0.0)
+        return self.category_inventory.get(category, {}).get("stock", 0.0)
 
     def get_category_max_stock(self, category: str) -> float:
-        return self.category_inventory.get(category, {}).get('max', 0.0)
+        return self.category_inventory.get(category, {}).get("max", 0.0)
 
     def get_category_num_skus(self, category: str) -> int:
-        return self.category_inventory.get(category, {}).get('num_skus', 0)
+        return self.category_inventory.get(category, {}).get("num_skus", 0)
 
     def get_total_num_skus(self) -> int:
-        return sum(cat.get('num_skus', 0) for cat in self.category_inventory.values())
+        return sum(cat.get("num_skus", 0) for cat in self.category_inventory.values())
 
     def get_all_categories(self) -> List[str]:
         return list(self.category_inventory.keys())

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from typing import Optional
-import time
 
 
 @dataclass
@@ -49,45 +48,45 @@ class RobotTelemetry:
     def to_dict(self):
         """Convert to dictionary for logging/serialization."""
         return {
-            'timestamp': self.timestamp,
-            'robot_id': self.robot_id,
-            'x': self.x,
-            'y': self.y,
-            'heading': self.heading,
-            'current_node_index': self.current_node_index,
-            'current_edge_index': self.current_edge_index,
-            'edge_progress': self.edge_progress,
-            'velocity_ms': self.velocity_ms,
-            'is_moving': self.is_moving,
-            'battery_level': self.battery_level,
-            'current_capacity': self.current_capacity,
-            'is_available': self.is_available,
-            'active_task_id': self.active_task_id,
-            'eta_to_next_node': self.eta_to_next_node,
-            'is_charging': self.is_charging,
-            'needs_charging': self.needs_charging
+            "timestamp": self.timestamp,
+            "robot_id": self.robot_id,
+            "x": self.x,
+            "y": self.y,
+            "heading": self.heading,
+            "current_node_index": self.current_node_index,
+            "current_edge_index": self.current_edge_index,
+            "edge_progress": self.edge_progress,
+            "velocity_ms": self.velocity_ms,
+            "is_moving": self.is_moving,
+            "battery_level": self.battery_level,
+            "current_capacity": self.current_capacity,
+            "is_available": self.is_available,
+            "active_task_id": self.active_task_id,
+            "eta_to_next_node": self.eta_to_next_node,
+            "is_charging": self.is_charging,
+            "needs_charging": self.needs_charging,
         }
 
     @classmethod
     def from_dict(cls, data: dict):
         """Create telemetry from dictionary (for real data ingestion)."""
         return cls(
-            timestamp=data['timestamp'],
-            robot_id=data['robot_id'],
-            x=data['x'],
-            y=data['y'],
-            heading=data['heading'],
-            current_node_index=data.get('current_node_index'),
-            current_edge_index=data.get('current_edge_index'),
-            edge_progress=data.get('edge_progress', 0.0),
-            velocity_ms=data['velocity_ms'],
-            is_moving=data['is_moving'],
-            battery_level=data['battery_level'],
-            current_capacity=data['current_capacity'],
-            is_available=data['is_available'],
-            active_task_id=data.get('active_task_id'),
-            remaining_path=data.get('remaining_path', []),
-            eta_to_next_node=data.get('eta_to_next_node', 0.0),
-            is_charging=data.get('is_charging', False),
-            needs_charging=data.get('needs_charging', False)
+            timestamp=data["timestamp"],
+            robot_id=data["robot_id"],
+            x=data["x"],
+            y=data["y"],
+            heading=data["heading"],
+            current_node_index=data.get("current_node_index"),
+            current_edge_index=data.get("current_edge_index"),
+            edge_progress=data.get("edge_progress", 0.0),
+            velocity_ms=data["velocity_ms"],
+            is_moving=data["is_moving"],
+            battery_level=data["battery_level"],
+            current_capacity=data["current_capacity"],
+            is_available=data["is_available"],
+            active_task_id=data.get("active_task_id"),
+            remaining_path=data.get("remaining_path", []),
+            eta_to_next_node=data.get("eta_to_next_node", 0.0),
+            is_charging=data.get("is_charging", False),
+            needs_charging=data.get("needs_charging", False),
         )

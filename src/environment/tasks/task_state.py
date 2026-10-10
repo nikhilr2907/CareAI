@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
+
 import numpy as np
 
 
@@ -55,7 +56,7 @@ class Task:
 
     # Intra-room coordinates (for precise positioning within nodes)
     from_coordinates: Optional[tuple] = None  # (x, y) exact pickup point in meters
-    to_coordinates: Optional[tuple] = None    # (x, y) exact delivery point in meters
+    to_coordinates: Optional[tuple] = None  # (x, y) exact delivery point in meters
 
     def __post_init__(self):
         """Populate live inventory fields from creation-time context by default."""
@@ -98,37 +99,34 @@ class Task:
         return deadline - current_time
 
     def get_features(self, current_time: float) -> np.ndarray:
-        """
-        Extract task features for ML model.
-
-        Returns features: [to_idx, duration, age, time_to_deadline,
-                          queue_position, num_items, time_to_stockout,
-                          category_id, sku_stock_ratio, sku_reorder_ratio]
-        Total: 10 features
-        """
+        """Extract task features for ML model."""
         age = self.get_age(current_time)
         time_to_deadline = self.get_time_to_deadline(current_time)
         current_stock = self.get_current_sku_stock_level()
         stock_ratio = (current_stock / self.sku_max_level) if self.sku_max_level > 0 else 0.0
         reorder_ratio = (self.reorder_point / self.sku_max_level) if self.sku_max_level > 0 else 0.0
 
-        return np.array([
-            float(self.to_location_index),
-            self.estimated_duration,
-            age,
-            time_to_deadline,
-            float(self.queue_position),
-            float(self.num_items),
-            self.get_current_time_to_stockout(),
-            float(self.category_id),
-            stock_ratio,
-            reorder_ratio,
-        ], dtype=np.float32)
+        return np.array(
+            [
+                float(self.to_location_index),
+                self.estimated_duration,
+                age,
+                time_to_deadline,
+                float(self.queue_position),
+                float(self.num_items),
+                self.get_current_time_to_stockout(),
+                float(self.category_id),
+                stock_ratio,
+                reorder_ratio,
+            ],
+            dtype=np.float32,
+        )
 
 
 @dataclass
 class TaskQueue:
     """Manages a queue of tasks with ranking capabilities."""
+
     tasks: List[Task] = field(default_factory=list)
 
     def add_task(self, task: Task):

@@ -1,7 +1,7 @@
-import numpy as np
-from typing import List, Optional, Set, Tuple, Dict
-from .task_state import Task, TaskQueue
+from typing import Dict, List, Optional, Set, Tuple
+
 from ..graph_helpers import dijkstra_shortest_path
+from .task_state import Task
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 DEFAULT_MIN_REPLENISHMENT_DEADLINE_S = 300.0
@@ -12,7 +12,9 @@ def _parse_time_hhmm(t: str) -> float:
     return int(hh) + int(mm) / 60.0
 
 
-def _weekday_multiplier(weekday_multipliers: Dict[str, float], current_time_seconds: float, start_day: int = 0) -> float:
+def _weekday_multiplier(
+    weekday_multipliers: Dict[str, float], current_time_seconds: float, start_day: int = 0
+) -> float:
     if not weekday_multipliers:
         return 1.0
     day_idx = int(current_time_seconds // 86400) % 7
@@ -20,13 +22,10 @@ def _weekday_multiplier(weekday_multipliers: Dict[str, float], current_time_seco
     return float(weekday_multipliers.get(day_name, 1.0))
 
 
-def _get_current_school_period(school_schedule: dict, current_time_seconds: float) -> Optional[dict]:
-    """Return the active school period dict for current_time_seconds, or None if outside schedule.
-
-    current_time_seconds is the simulation clock (0 = episode start). The episode is
-    anchored to the first period's start_time (e.g. 08:30), so we offset by that
-    amount before comparing against each period's wall-clock window.
-    """
+def _get_current_school_period(
+    school_schedule: dict, current_time_seconds: float
+) -> Optional[dict]:
+    """Return the active school period dict for current_time_seconds, or None if outside schedule."""
     if not school_schedule:
         return None
     periods = school_schedule.get("periods", [])
@@ -47,17 +46,7 @@ def _school_period_weight(
     school_schedule: dict,
     current_time_seconds: float,
 ) -> Tuple[float, float]:
-    """Return (weight, period_hours) for the currently active school period.
-
-    weight        – the fraction of the SKU's daily demand that falls in this period,
-                    taken directly from school_period_profile in the SKU's consumption_model.
-    period_hours  – duration of the period in hours, used to convert the daily demand
-                    fraction into an instantaneous hourly rate.
-
-    Returns (0.0, 1.0) when the simulation clock is outside all defined periods so
-    that consumption falls to zero between the end of one period and the start of the
-    next (e.g. before 08:30 or after 16:30).
-    """
+    """Return (weight, period_hours) for the currently active school period."""
     period = _get_current_school_period(school_schedule, current_time_seconds)
     if period is None:
         return 0.0, 1.0
@@ -70,12 +59,7 @@ def _school_period_weight(
 
 
 def _compute_sku_rate(node, sku_id: str, graph_state, current_time_seconds: float) -> float:
-    """Compute expected hourly consumption rate for a SKU at a given node (ILC mode).
-
-    ILC mode: consumption_model contains 'school_period_profile' (named period keys).
-    Demand is scaled by node.foot_traffic_weight (0–1). The active school period is
-    resolved from graph_state.school_schedule.
-    """
+    """Compute expected hourly consumption rate for a SKU at a given node (ILC mode)."""
     if not node.consumption_enabled:
         return 0.0
     sku_db = getattr(graph_state, "sku_database", None)
@@ -97,7 +81,9 @@ def _compute_sku_rate(node, sku_id: str, graph_state, current_time_seconds: floa
     weight, period_hours = _school_period_weight(
         school_period_profile, school_schedule, current_time_seconds
     )
-    hourly_rate = (daily_mean * weight / period_hours) * foot_traffic_weight * weekday_mult * scale_factor
+    hourly_rate = (
+        (daily_mean * weight / period_hours) * foot_traffic_weight * weekday_mult * scale_factor
+    )
     return max(0.0, hourly_rate)
 
 
@@ -107,22 +93,7 @@ def generate_inventory_tasks(
     next_task_id: int = 0,
     existing_task_keys: Optional[Set[Tuple]] = None,
 ) -> Tuple[List[Task], int]:
-    """
-    Generate tasks based on inventory needs.
-    Creates replenishment tasks for locations that need restocking.
-
-    Args:
-        graph_state: GraphState with inventory information
-        current_time: Current simulation time (seconds)
-        next_task_id: Next available task ID
-        existing_task_keys: Set of (sku_id, dest_node_idx) tuples already covered
-            by pending or in-flight tasks. Tasks matching an existing key are
-            skipped so we never create duplicate replenishment demand. Pass None
-            to skip deduplication (backwards-compatible).
-
-    Returns:
-        Tuple of (list of new tasks, next task ID)
-    """
+    """Generate tasks based on inventory needs."""
     new_tasks = []
     task_id = next_task_id
 
@@ -132,10 +103,7 @@ def generate_inventory_tasks(
     seen_keys: Set[Tuple] = set(existing_task_keys) if existing_task_keys else set()
 
     # Find storage nodes (sources of supplies)
-    storage_nodes = [
-        i for i, node in enumerate(graph_state.nodes)
-        if node.node_type == 'storage'
-    ]
+    storage_nodes = [i for i, node in enumerate(graph_state.nodes) if node.node_type == "storage"]
 
     if not storage_nodes:
         return new_tasks, task_id
@@ -145,7 +113,7 @@ def generate_inventory_tasks(
 
     # Check each node for inventory needs
     for dest_idx, dest_node in enumerate(graph_state.nodes):
-        if dest_node.node_type == 'storage':
+        if dest_node.node_type == "storage":
             continue
         if not dest_node.consumption_enabled:
             continue
@@ -165,7 +133,7 @@ def generate_inventory_tasks(
                 continue
 
             rate = _compute_sku_rate(dest_node, sku_id, graph_state, current_time)
-            tts_hours = (stock / rate) if rate > 0 else float('inf')
+            tts_hours = (stock / rate) if rate > 0 else float("inf")
             tts_seconds = tts_hours * 3600
             deadline = current_time + max(tts_seconds, DEFAULT_MIN_REPLENISHMENT_DEADLINE_S)
 
@@ -187,16 +155,19 @@ def generate_inventory_tasks(
                 deadline=deadline,
                 arrival_time=current_time,
                 estimated_duration=estimated_duration,
-                task_type='replenishment',
+                task_type="replenishment",
                 num_items=num_items,
                 time_to_stockout=tts_hours,
                 sku_id=sku_id,
                 category_key=sku_data.get("category"),
-                category_id=float(graph_state.category_order.index(sku_data.get("category"))) if getattr(graph_state, "category_order", None) and sku_data.get("category") in graph_state.category_order else -1.0,
+                category_id=float(graph_state.category_order.index(sku_data.get("category")))
+                if getattr(graph_state, "category_order", None)
+                and sku_data.get("category") in graph_state.category_order
+                else -1.0,
                 sku_stock_level=stock,
                 sku_max_level=max_level,
                 reorder_point=reorder,
-                par_level=par_level
+                par_level=par_level,
             )
 
             new_tasks.append(task)
@@ -206,23 +177,20 @@ def generate_inventory_tasks(
     return new_tasks, task_id
 
 
-
-
 def update_inventory_levels(graph_state, time_delta_hours: float):
-    """
-    Update stock levels at all nodes based on consumption rates.
-
-    Args:
-        graph_state: GraphState to update
-        time_delta_hours: Time elapsed in hours
-    """
+    """Update stock levels at all nodes based on consumption rates."""
     for node in graph_state.nodes:
         if node.sku_inventory and node.consumption_enabled:
             category_rates = {}
             total_stock = 0.0
             total_rate = 0.0
             for sku_id, sku_data in node.sku_inventory.items():
-                rate = _compute_sku_rate(node, sku_id, graph_state, graph_state.current_time if hasattr(graph_state, "current_time") else 0.0)
+                rate = _compute_sku_rate(
+                    node,
+                    sku_id,
+                    graph_state,
+                    graph_state.current_time if hasattr(graph_state, "current_time") else 0.0,
+                )
                 consumed = rate * time_delta_hours
                 node.consume_sku(sku_id, consumed)
                 total_stock += node.get_sku_stock(sku_id)

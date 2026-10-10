@@ -1,20 +1,3 @@
-"""
-Digital Twin WebSocket publisher.
-
-Runs two servers in background threads:
-  - WebSocket on `port`   (default 8766) — pushes robot state to browser
-  - HTTP      on `port+1` (default 8767) — serves digital_twin/ static files
-
-Usage:
-    publisher = TwinPublisher(graph_state=env.graph_state, port=8766)
-    publisher.start()
-
-    # Inside loop:
-    publisher.broadcast(env)
-
-    publisher.stop()  # called automatically on KeyboardInterrupt via finally block
-"""
-
 import asyncio
 import json
 import logging
@@ -52,8 +35,7 @@ class TwinPublisher:
         self._http_thread.start()
 
         logger.info(
-            f"Digital twin: ws://localhost:{self.port}  |  "
-            f"http://localhost:{self.port + 1}"
+            f"Digital twin: ws://localhost:{self.port}  |  http://localhost:{self.port + 1}"
         )
 
     def stop(self) -> None:
@@ -67,13 +49,7 @@ class TwinPublisher:
         payload = json.dumps(self._build_payload(env, robot_backend=robot_backend))
         self._latest_payload = payload
         if self._loop and self._clients:
-            asyncio.run_coroutine_threadsafe(
-                self._push_to_all(payload), self._loop
-            )
-
-    # ------------------------------------------------------------------
-    # Payload builder
-    # ------------------------------------------------------------------
+            asyncio.run_coroutine_threadsafe(self._push_to_all(payload), self._loop)
 
     def _build_payload(self, env, robot_backend=None) -> dict:
         robots = []
@@ -83,31 +59,35 @@ class TwinPublisher:
         sim_robots = [(robot, sim) for robot, sim in zip(env.robots, sims) if sim is not None]
         if sim_robots:
             for robot, sim in sim_robots:
-                robots.append({
-                    "id": robot.robot_id,
-                    "x": float(sim.x),
-                    "y": float(sim.y),
-                    "heading": float(sim.heading),
-                    "velocity": float(sim.velocity_ms),
-                    "battery": float(sim.battery_level),
-                    "task_id": sim.active_task_id,
-                    "is_charging": bool(sim.is_charging),
-                    "edge_progress": float(sim.edge_progress),
-                })
+                robots.append(
+                    {
+                        "id": robot.robot_id,
+                        "x": float(sim.x),
+                        "y": float(sim.y),
+                        "heading": float(sim.heading),
+                        "velocity": float(sim.velocity_ms),
+                        "battery": float(sim.battery_level),
+                        "task_id": sim.active_task_id,
+                        "is_charging": bool(sim.is_charging),
+                        "edge_progress": float(sim.edge_progress),
+                    }
+                )
         elif robot_backend is not None:
             # Real deployment mode: pull latest telemetry from bridge
             for tel in robot_backend.get_all_telemetry():
-                robots.append({
-                    "id": tel.robot_id,
-                    "x": float(tel.x),
-                    "y": float(tel.y),
-                    "heading": float(tel.heading),
-                    "velocity": float(tel.velocity_ms),
-                    "battery": float(tel.battery_level),
-                    "task_id": tel.active_task_id,
-                    "is_charging": False,
-                    "edge_progress": 0.0,
-                })
+                robots.append(
+                    {
+                        "id": tel.robot_id,
+                        "x": float(tel.x),
+                        "y": float(tel.y),
+                        "heading": float(tel.heading),
+                        "velocity": float(tel.velocity_ms),
+                        "battery": float(tel.battery_level),
+                        "task_id": tel.active_task_id,
+                        "is_charging": False,
+                        "edge_progress": 0.0,
+                    }
+                )
 
         tasks = [
             {
@@ -124,10 +104,6 @@ class TwinPublisher:
             "robots": robots,
             "tasks": tasks,
         }
-
-    # ------------------------------------------------------------------
-    # WebSocket server
-    # ------------------------------------------------------------------
 
     async def _ws_handler(self, websocket) -> None:
         self._clients.add(websocket)
@@ -167,10 +143,6 @@ class TwinPublisher:
         except Exception as e:
             logger.error(f"Twin WS server error: {e}")
 
-    # ------------------------------------------------------------------
-    # HTTP server (serves digital_twin/ static files)
-    # ------------------------------------------------------------------
-
     def _run_http_server(self) -> None:
         os.chdir(_DIGITAL_TWIN_DIR)
 
@@ -182,29 +154,29 @@ class TwinPublisher:
         self._http_server = HTTPServer(("0.0.0.0", http_port), _Handler)
         self._http_server.serve_forever()
 
-    # ------------------------------------------------------------------
-    # Graph JSON (written once at startup, read by index.html)
-    # ------------------------------------------------------------------
-
     def _write_graph_json(self) -> None:
         nodes = []
         for i, node in enumerate(self._graph_state.nodes):
-            nodes.append({
-                "index": i,
-                "id": node.node_id,
-                "name": getattr(node, "name", node.node_id),
-                "type": getattr(node, "node_type", "unknown"),
-                "x": float(node.x),
-                "y": float(node.y),
-            })
+            nodes.append(
+                {
+                    "index": i,
+                    "id": node.node_id,
+                    "name": getattr(node, "name", node.node_id),
+                    "type": getattr(node, "node_type", "unknown"),
+                    "x": float(node.x),
+                    "y": float(node.y),
+                }
+            )
 
         edges = []
         for edge in self._graph_state.edges:
-            edges.append({
-                "from": edge.from_node,
-                "to": edge.to_node,
-                "distance_m": float(edge.distance_m),
-            })
+            edges.append(
+                {
+                    "from": edge.from_node,
+                    "to": edge.to_node,
+                    "distance_m": float(edge.distance_m),
+                }
+            )
 
         graph = {"nodes": nodes, "edges": edges}
         out = _DIGITAL_TWIN_DIR / "graph.json"

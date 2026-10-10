@@ -1,47 +1,28 @@
-"""
-GAPO Real-Robot Training Script.
-
-Trains the ILC pilot robot task allocation policy against a live robot via
-ROS bridge. Identical PPO/memory/reward-routing logic to run_training.py
-with the following differences:
-
-  - GAPOTaskAssignmentEnvReal replaces GAPOTaskAssignmentEnv
-  - ROSBridgeRobotBackend started as async background task
-  - Each step paced to 1 Hz wall clock (await asyncio.sleep)
-  - No curriculum / config switching
-  - No apply_consumption_scale (bridge provides real inventory)
-  - No episode resets — continuous operation; rollout boundaries by iteration
-  - No run_evaluation (no seeded reset on real hardware)
-
-Usage:
-    python run_training_real.py --config configs/ilc_pilot_v1_care_robotics.json
-    python run_training_real.py --config configs/ilc_pilot_v1_care_robotics.json --bridge-url ws://192.168.1.50:8765
-    python run_training_real.py --config configs/ilc_pilot_v1_care_robotics.json --checkpoint outputs/.../gapo_final.pth
-"""
 import asyncio
-import torch
-import numpy as np
-from pathlib import Path
 import time
 from collections import deque
+from pathlib import Path
 
-from src.multi_agent_ppo.gapo_ppo import GAPOPPO, Memory
+import numpy as np
+import torch
+
+from src.analytics.realtime_collector import RealtimeAnalyticsCollector
 from src.deployment.robot_backend import ROSBridgeRobotBackend
-from src.utils.fleet_event_logger import FleetEventLogger
-from src.utils.training_utils import (
-    parse_args,
-    create_real_env_from_config_file,
-    setup_logging_and_output,
-    log_gpu_memory,
-    select_nearest_robot,
-)
-from src.utils.task_logger import TaskLogger
+from src.multi_agent_ppo.gapo_ppo import GAPOPPO, Memory
 from src.utils.decision_logger import DecisionLogger
+from src.utils.fleet_event_logger import FleetEventLogger
+from src.utils.policy_inspector import PolicyInspector
 from src.utils.ranking_snapshot_logger import RankingSnapshotLogger
 from src.utils.robot_sample_logger import RobotSampleLogger
-from src.utils.policy_inspector import PolicyInspector
-from src.analytics.realtime_collector import RealtimeAnalyticsCollector
-from src.utils.fleet_event_logger import FleetEventLogger
+from src.utils.task_logger import TaskLogger
+from src.utils.training_utils import (
+    create_real_env_from_config_file,
+    log_gpu_memory,
+    parse_args,
+    select_nearest_robot,
+    setup_logging_and_output,
+)
+
 
 async def main():
     args = parse_args()
@@ -53,7 +34,7 @@ async def main():
     robot_sample_logger = RobotSampleLogger(output_dir / "logs")
     analytics = RealtimeAnalyticsCollector(
         output_dir=output_dir / "analytics",
-        mode='real',
+        mode="real",
         snapshot_frequency=50,
         task_logger=task_logger,
         robot_sample_logger=robot_sample_logger,
@@ -63,14 +44,12 @@ async def main():
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
 
-    # --- Config (single only, no curriculum) ---
     if not args.config:
         raise ValueError("--config is required for real training")
     config_path = args.config
     if not Path(config_path).exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
-    # --- Hyperparameters (same as run_training.py) ---
     num_robots = args.num_robots
     max_episode_time = args.max_episode_time
     timestep_seconds = 1.0
@@ -109,14 +88,13 @@ async def main():
 
     OPEN_ASSIGNMENT_TTL = 5
 
-    if args.device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
         device = args.device
 
     checkpoint_dir = output_dir / "checkpoints"
 
-    # --- Start robot backend ---
     # bridge_url=None → backend reads ROS_BRIDGE_URL from .env, falls back to ws://localhost:9090
     robot_backend = ROSBridgeRobotBackend(
         bridge_url=args.bridge_url,
@@ -131,16 +109,14 @@ async def main():
     logger.info(f"Device:      {device}")
     logger.info(f"LR:          {lr}  Actor: {actor_lr}  Critic: {critic_lr}")
     logger.info(f"Iterations:  {max_training_iterations}  Rollout: {rollout_steps} steps")
-    logger.info(f"Warmup:      {warmup_iters} iters  mix={warmup_mix}  ent_mult={warmup_entropy_mult}")
+    logger.info(
+        f"Warmup:      {warmup_iters} iters  mix={warmup_mix}  ent_mult={warmup_entropy_mult}"
+    )
     logger.info("=" * 80)
 
     await robot_backend.start()
     logger.info("ROS bridge backend started")
 
-    # Wait for first telemetry from each robot before env.reset() runs.
-    # Yields so the WebSocket listener task can connect + receive its first
-    # robot_state message. Logs progress every second; reports if the
-    # listener task itself died (e.g. wrong URL, connection refused).
     _loop = asyncio.get_running_loop()
     _wait_start = _loop.time()
     _deadline = _wait_start + 20.0
@@ -148,7 +124,9 @@ async def main():
     _expected_robots = num_robots if num_robots else 1
     while _loop.time() < _deadline:
         if all(robot_backend.get_telemetry(r) is not None for r in range(_expected_robots)):
-            logger.info(f"Telemetry confirmed for all robots after {_loop.time() - _wait_start:.2f}s")
+            logger.info(
+                f"Telemetry confirmed for all robots after {_loop.time() - _wait_start:.2f}s"
+            )
             break
         if _loop.time() - _last_log > 1.0:
             logger.info(
@@ -172,7 +150,6 @@ async def main():
             f"Verify with: curl http://localhost:8765/health"
         )
 
-    # --- Create environment ---
     env, num_nodes = create_real_env_from_config_file(
         config_path,
         robot_backend=robot_backend,
@@ -183,16 +160,16 @@ async def main():
         stochastic_task_cap_per_hour=stochastic_task_cap_per_hour,
         initial_stochastic_tasks=initial_stochastic_tasks,
         fleet_event_logger=FleetEventLogger(output_dir / "logs"),
-        log_dir=output_dir / "logs"
+        log_dir=output_dir / "logs",
     )
 
     analytics.sku_logger = env.sku_logger
     analytics.initialize(env.graph_state.nodes)
 
-   
-    logger.info(f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}")
+    logger.info(
+        f"Nodes: {num_nodes}  Robots: {env.num_robots}  Edges: {len(env.graph_state.edges)}"
+    )
 
-    # --- Build PPO model ---
     if getattr(env.graph_state, "category_order", None):
         base_node_dim = env.graph_state.get_node_features_with_category_stats()[0].shape[1]
         sku_feat_dim = env.graph_state.get_node_sku_features()[0].shape[2]
@@ -202,9 +179,13 @@ async def main():
     edge_feat_dim = env.graph_state.get_edge_features_complete()[0].shape[1]
     sku_embed_dim = 16
     node_continuous_dim = base_node_dim + (sku_embed_dim if sku_feat_dim is not None else 0)
-    num_location_tags = len(env.graph_state.location_tag_order) if getattr(env.graph_state, 'location_tag_order', None) else 3
-    schedule = getattr(env.graph_state, 'school_schedule', None) or {}
-    num_school_periods = len(schedule.get('periods', [])) or 8
+    num_location_tags = (
+        len(env.graph_state.location_tag_order)
+        if getattr(env.graph_state, "location_tag_order", None)
+        else 3
+    )
+    schedule = getattr(env.graph_state, "school_schedule", None) or {}
+    num_school_periods = len(schedule.get("periods", [])) or 8
 
     ppo = GAPOPPO(
         node_continuous_dim=node_continuous_dim,
@@ -238,20 +219,19 @@ async def main():
         min_adv_std=min_adv_std,
         ranking_max_pairs_per_group=ranking_max_pairs_per_group,
         ranking_min_adv_gap=ranking_min_adv_gap,
-        task_creation_actor=getattr(env, 'task_creation_actor', None),
-        edge_cost_manager=getattr(env, 'edge_cost_manager', None),
+        task_creation_actor=getattr(env, "task_creation_actor", None),
+        edge_cost_manager=getattr(env, "edge_cost_manager", None),
         device=device,
         logger=logger,
     )
 
     # Load checkpoint if provided (fine-tuning from sim-trained weights)
     if args.checkpoint and Path(args.checkpoint).exists():
-        ppo.load(args.checkpoint, edge_cost_manager=getattr(env, 'edge_cost_manager', None))
+        ppo.load(args.checkpoint, edge_cost_manager=getattr(env, "edge_cost_manager", None))
         logger.info(f"Loaded checkpoint: {args.checkpoint}")
 
     policy_inspector = PolicyInspector(ppo.policy, device=device)
 
-    # --- Training state ---
     memory = Memory()
     task_to_memory_idx: dict = {}
     open_assignments: dict = {}
@@ -273,7 +253,6 @@ async def main():
     logger.info("-" * 80)
 
     for iteration in range(1, max_training_iterations + 1):
-
         if iteration <= warmup_iters:
             ppo.entropy_coef = entropy_coef * warmup_entropy_mult
         else:
@@ -285,57 +264,54 @@ async def main():
         buffer_size = 0
         iteration_completion_times = []
 
-        # ---- Rollout ----
         for step in range(rollout_steps):
             total_timesteps += 1
             step_wall_start = time.monotonic()
 
-            # Re-rank pending tasks
             if env.pending_tasks:
                 scorer_temp = max(0.5, 1.0 - iteration / max(max_training_iterations, 1))
                 env.pending_tasks = ppo.score_and_rank_tasks(
-                    env.pending_tasks, state_dict, env.current_time,
+                    env.pending_tasks,
+                    state_dict,
+                    env.current_time,
                     temperature=scorer_temp,
                 )
 
-            # Re-score robot queues
             for robot in env.robots:
                 all_tasks = robot.task_queue[1:] + robot.overflow_queue
                 if all_tasks:
                     task_features = np.stack([t.get_features(env.current_time) for t in all_tasks])
-                    task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(ppo.device)
+                    task_features_tensor = torch.tensor(task_features, dtype=torch.float32).to(
+                        ppo.device
+                    )
                     state_tensor = ppo._state_dict_to_tensor(state_dict)
                     with torch.no_grad():
                         graph_emb, fleet_emb = ppo.policy_old.encode_context(state_tensor)
-                        scores = ppo.policy_old.score_tasks(
-                            task_features_tensor, graph_emb, fleet_emb
-                        ).cpu().numpy()
+                        scores = (
+                            ppo.policy_old.score_tasks(task_features_tensor, graph_emb, fleet_emb)
+                            .cpu()
+                            .numpy()
+                        )
                     for task, score in zip(all_tasks, scores):
                         task.learned_score = float(score)
-                        # Robot handles the resorting seperately in its own methods.
                     robot.resort_queue()
                     robot.resort_overflow()
                 robot.enforce_capacity_limits()
                 robot.promote_from_overflow()
 
-            # Task assignment
             assignments_this_step = 0
             step_memory_indices = []
             while len(env.pending_tasks) > 0 and assignments_this_step < max_assignments_per_step:
                 task = env.pending_tasks[0]
                 robot_mask = env.get_robot_availability_mask(task)
                 if not robot_mask.any():
-                    # Every robot is offline or must charge — nothing can take work
-                    # this step. Leave the task pending and retry on a later step
-                    # rather than spinning out phantom assignments to a blocked robot.
                     break
-                heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
+                heuristic_action = select_nearest_robot(
+                    task, env.robots, env.graph_state, robot_mask
+                )
                 _used_heuristic = False
                 robot_logits = None
                 action_entropy = None
-                # Select an action but do NOT write to the rollout buffer yet — we
-                # commit the experience only once the env actually accepts the
-                # assignment, so a rejected action never enters memory or the logs.
                 try:
                     if iteration <= warmup_iters and np.random.random() < warmup_mix:
                         action = heuristic_action
@@ -359,9 +335,6 @@ async def main():
 
                 legs = env.assign_task_to_robot(action, task)
                 if not legs:
-                    # Robot rejected the assignment (offline / must charge). Nothing
-                    # was written to memory, so just stop assigning this step; the
-                    # task stays pending for a later step.
                     break
 
                 # Assignment accepted — only now commit the experience to the buffer.
@@ -377,10 +350,14 @@ async def main():
 
                 ranking_logger.log_snapshot(task, env.pending_tasks, env.current_time, iteration)
                 decision_logger.log(
-                    task, action, heuristic_action, env, env.current_time,
+                    task,
+                    action,
+                    heuristic_action,
+                    env,
+                    env.current_time,
                     is_warmup=(iteration <= warmup_iters),
                     used_heuristic=_used_heuristic,
-                    queue_features=state_dict.get('queue_features'),
+                    queue_features=state_dict.get("queue_features"),
                     robot_logits=robot_logits,
                     action_entropy=action_entropy,
                 )
@@ -389,21 +366,29 @@ async def main():
                 assignments_this_step += 1
                 task_to_memory_idx[task.task_id] = mem_idx_before
 
-                feasibility = task.get_time_to_deadline(env.current_time) / max(task.estimated_duration, 1.0) - 1.0
+                feasibility = (
+                    task.get_time_to_deadline(env.current_time) / max(task.estimated_duration, 1.0)
+                    - 1.0
+                )
                 assignment_reward = 0.5 * max(-1.0, min(1.0, feasibility))
                 open_assignments[task.task_id] = {
-                    'state':             state_dict,
-                    'action':            action,
-                    'logprob':           memory.logprobs[mem_idx_before],
-                    'mask':              robot_mask,
-                    'reward':            0.0,
-                    'assignment_reward': assignment_reward,
-                    'born_iter':         iteration,
+                    "state": state_dict,
+                    "action": action,
+                    "logprob": memory.logprobs[mem_idx_before],
+                    "mask": robot_mask,
+                    "reward": 0.0,
+                    "assignment_reward": assignment_reward,
+                    "born_iter": iteration,
                 }
 
                 task_logger.log_assignment(
-                    task, action, assignment_reward,
-                    iteration, env.current_time, num_assignments, len(memory.actions),
+                    task,
+                    action,
+                    assignment_reward,
+                    iteration,
+                    env.current_time,
+                    num_assignments,
+                    len(memory.actions),
                 )
                 state_dict = env._get_state_dict()
                 memory.rewards.append(0.0)
@@ -412,7 +397,6 @@ async def main():
             if len(step_memory_indices) > 1:
                 memory.step_assignment_groups.append(step_memory_indices)
 
-            # Env step
             prev_completed = len(env.completed_tasks)
             state_dict, _, _, info = env.step(dt=1.0)
 
@@ -420,20 +404,24 @@ async def main():
             for task in newly_completed:
                 if task.arrival_time is not None:
                     iteration_completion_times.append(env.current_time - task.arrival_time)
-            
-            task_completion_credits: dict = info.get('task_completion_credits', {})
-            completed_task_legs = info.get('completed_task_legs', [])
-            completed_leg_credits: dict = info.get('completed_leg_credits', {})
+
+            task_completion_credits: dict = info.get("task_completion_credits", {})
+            completed_task_legs = info.get("completed_task_legs", [])
+            completed_leg_credits: dict = info.get("completed_leg_credits", {})
 
             for leg_task in completed_task_legs:
-                raw_leg_reward = float(completed_leg_credits.get((leg_task.task_id, leg_task.leg_type), 0.0))
+                raw_leg_reward = float(
+                    completed_leg_credits.get((leg_task.task_id, leg_task.leg_type), 0.0)
+                )
                 scaled_leg_reward = raw_leg_reward * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_leg_reward = float(np.clip(scaled_leg_reward, -reward_clip, reward_clip))
                 task_logger.log_completion(
                     leg_task.task_id,
                     scaled_leg_reward,
-                    env.current_time - leg_task.arrival_time if leg_task.arrival_time is not None else None,
+                    env.current_time - leg_task.arrival_time
+                    if leg_task.arrival_time is not None
+                    else None,
                     env.current_time,
                     distance_traveled=getattr(leg_task, "distance_traveled", 0.0),
                     energy_consumed=getattr(leg_task, "energy_consumed_wh", 0.0),
@@ -442,9 +430,11 @@ async def main():
 
             deadline_met_by_task = {}
             for leg in completed_task_legs:
-                if leg.leg_type == 'dropoff':
-                    dl = getattr(leg, 'current_deadline', None) or getattr(leg, 'deadline', None)
-                    deadline_met_by_task[leg.task_id] = (env.current_time <= dl) if dl is not None else None
+                if leg.leg_type == "dropoff":
+                    dl = getattr(leg, "current_deadline", None) or getattr(leg, "deadline", None)
+                    deadline_met_by_task[leg.task_id] = (
+                        (env.current_time <= dl) if dl is not None else None
+                    )
 
             for parent_id, bonus in task_completion_credits.items():
                 scaled_bonus = bonus * reward_scale
@@ -454,7 +444,8 @@ async def main():
                 if env.task_creation_actor is not None:
                     env.task_creation_actor.record_completion(parent_id, scaled_bonus)
                 decision_logger.queue_outcome(
-                    parent_id, scaled_bonus,
+                    parent_id,
+                    scaled_bonus,
                     deadline_met=deadline_met_by_task.get(parent_id),
                 )
                 iteration_reward += scaled_bonus
@@ -462,40 +453,35 @@ async def main():
                 orig_idx = task_to_memory_idx.get(parent_id)
                 if orig_idx is not None:
                     entry = open_assignments.pop(parent_id, None)
-                    a_rew = entry['assignment_reward'] if entry else 0.0
+                    a_rew = entry["assignment_reward"] if entry else 0.0
                     memory.rewards[orig_idx] = a_rew + scaled_bonus
                 else:
                     entry = open_assignments.pop(parent_id, None)
                     if entry is not None:
-                        entry['reward'] = entry['assignment_reward'] + scaled_bonus
+                        entry["reward"] = entry["assignment_reward"] + scaled_bonus
                         closed_buffer.append(entry)
 
-
-            # May need episode termination for future consistency
-
-            analytics.record_robot_telemetry(env.robots, env.current_time, iteration=iteration, step=step)
+            analytics.record_robot_telemetry(
+                env.robots, env.current_time, iteration=iteration, step=step
+            )
 
             # Pace to 1 Hz — yields control so backend WebSocket tasks can process messages
             elapsed = time.monotonic() - step_wall_start
             await asyncio.sleep(max(0.0, 1.0 - elapsed))
 
-        # ---- Inject cross-rollout completions ----
         for entry in closed_buffer:
-            if iteration - entry['born_iter'] <= OPEN_ASSIGNMENT_TTL:
-                memory.state_dicts.append(entry['state'])
-                memory.actions.append(entry['action'])
-                memory.logprobs.append(entry['logprob'])
-                memory.rewards.append(entry['reward'])
+            if iteration - entry["born_iter"] <= OPEN_ASSIGNMENT_TTL:
+                memory.state_dicts.append(entry["state"])
+                memory.actions.append(entry["action"])
+                memory.logprobs.append(entry["logprob"])
+                memory.rewards.append(entry["reward"])
                 memory.is_terminals.append(True)
-                memory.robot_masks.append(entry['mask'])
+                memory.robot_masks.append(entry["mask"])
         closed_buffer.clear()
 
-        # ---- Prune unresolved open assignments from memory ----
         if open_assignments and task_to_memory_idx:
             pending_mem_indices = {
-                task_to_memory_idx[tid]
-                for tid in open_assignments
-                if tid in task_to_memory_idx
+                task_to_memory_idx[tid] for tid in open_assignments if tid in task_to_memory_idx
             }
             if pending_mem_indices:
                 keep = [i for i in range(len(memory.actions)) if i not in pending_mem_indices]
@@ -515,7 +501,6 @@ async def main():
 
         buffer_size = len(memory.actions)
 
-        # ---- PPO update ----
         if buffer_size < 2:
             logger.info(f"  Skipping PPO update: buffer too small ({buffer_size})")
         else:
@@ -528,14 +513,13 @@ async def main():
         memory.clear_memory()
         task_to_memory_idx.clear()
         stale_ids = [
-            pid for pid, e in open_assignments.items()
-            if iteration - e['born_iter'] > OPEN_ASSIGNMENT_TTL
+            pid
+            for pid, e in open_assignments.items()
+            if iteration - e["born_iter"] > OPEN_ASSIGNMENT_TTL
         ]
-        # Stale ids indicate assignments that were never resolved (e.g. due to task cancellation or failure)
         for pid in stale_ids:
             open_assignments.pop(pid)
 
-        # ---- Metrics ----
         iteration_time = time.time() - iteration_start_time
         process_time_now = time.process_time()
         cpu_time_delta = process_time_now - prev_process_time
@@ -560,7 +544,6 @@ async def main():
         task_logger.log_running_summary(iteration)
         task_logger.log_iteration_summary(iteration)
 
-
         if iteration % 50 == 0:
             analytics.increment_iteration()
 
@@ -578,18 +561,19 @@ async def main():
             logger.info(f"  Tasks Assigned: {num_assignments}")
             logger.info(f"  Total Timesteps: {total_timesteps}")
             logger.info(f"  Wall Time: {env.current_time / 3600:.2f} hours")
-            logger.info(f"  Pending: {len(env.pending_tasks)} | Completed: {len(env.completed_tasks)}")
-            # Real env has no RobotSimulator objects (robot_simulators is all None);
-            # derive status from telemetry + env charge-tracking sets instead.
+            logger.info(
+                f"  Pending: {len(env.pending_tasks)} | Completed: {len(env.completed_tasks)}"
+            )
+
             def _robot_status(r):
                 if r.is_charging:
-                    return 'CHARGING'
+                    return "CHARGING"
                 if r.robot_id in env._robots_routing_to_charge:
-                    return 'ROUTING_TO_CHARGE'
-                return 'AVAIL' if r.current_task is None else 'BUSY'
+                    return "ROUTING_TO_CHARGE"
+                return "AVAIL" if r.current_task is None else "BUSY"
+
             robot_states_str = " | ".join(
-                f"R{r.robot_id}:{_robot_status(r)} bat={r.battery_level:.3f}"
-                for r in env.robots
+                f"R{r.robot_id}:{_robot_status(r)} bat={r.battery_level:.3f}" for r in env.robots
             )
             logger.info(f"  Robots: {robot_states_str}")
             logger.info(f"  Iteration Time: {iteration_time:.2f}s  CPU Util: {cpu_util:.1f}%")
@@ -612,12 +596,12 @@ async def main():
                     f"Critic: {loss_info.get('critic_loss', 0):.4f} | "
                     f"Ranking: {loss_info.get('ranking_loss', 0):.4f}"
                 )
-                if 'clip_fraction' in loss_info:
-                    clip_fraction_history.append(loss_info['clip_fraction'])
-                if 'grad_norm' in loss_info:
-                    grad_norm_history.append(loss_info['grad_norm'])
-                if 'entropy_loss' in loss_info:
-                    entropy_history.append(loss_info['entropy_loss'])
+                if "clip_fraction" in loss_info:
+                    clip_fraction_history.append(loss_info["clip_fraction"])
+                if "grad_norm" in loss_info:
+                    grad_norm_history.append(loss_info["grad_norm"])
+                if "entropy_loss" in loss_info:
+                    entropy_history.append(loss_info["entropy_loss"])
 
                 try:
                     policy_inspector.log_learning_state(logger, loss_info, iteration)
@@ -637,9 +621,9 @@ async def main():
                     elif grad_mean > 10.0:
                         logger.warning(f"  Warning: grad_norm high ({grad_mean:.3f})")
 
-            if hasattr(env, 'edge_cost_manager'):
+            if hasattr(env, "edge_cost_manager"):
                 ec = env.edge_cost_manager.get_stats()
-                model_status = 'learned' if ec['using_learned_model'] else 'heuristic'
+                model_status = "learned" if ec["using_learned_model"] else "heuristic"
                 logger.info(
                     f"  EdgeCost [{model_status}]: buffer={ec['buffer_size']} "
                     f"records={ec['total_records']} nll_loss={ec['avg_recent_loss']:.4f}"
@@ -653,14 +637,12 @@ async def main():
             analytics.save_metrics_json()
             logger.info(f"Analytics snapshot saved to iter {iteration}")
 
-        # ---- Checkpoint ----
         if iteration % save_interval == 0:
             ckpt_path = checkpoint_dir / f"gapo_real_iter{iteration}.pth"
             ppo.save(str(ckpt_path))
             ppo.save(str(checkpoint_dir / "gapo_real_latest.pth"))
             logger.info(f"  Checkpoint saved: {ckpt_path}")
 
-    # ---- Final checkpoint + teardown ----
     ppo.save(str(checkpoint_dir / "gapo_real_final.pth"))
     final_metrics_dir = output_dir / "metrics_final"
     task_logger.plot_metrics(final_metrics_dir)
@@ -674,5 +656,5 @@ async def main():
     await robot_backend.stop()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())

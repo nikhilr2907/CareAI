@@ -24,3 +24,16 @@ digital_twin/
 shell/
 tools/branch_audit.py
 tools/
+
+.codex/
+archive/
+site/
+!docs/**/*.md
+!mkdocs.yml
+!.readthedocs.yaml
+
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
