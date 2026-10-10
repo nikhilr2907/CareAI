@@ -111,7 +111,6 @@ src/deployment/              ROS bridge backend and WebSocket client
 src/reliability/             Sim-to-real effects (telemetry noise)
 src/analytics/               Realtime analytics and metrics
 src/utils/                   Logging and helpers
-tools/                       Demand probe (checks a config generates demand)
 ```
 
 ## Configuration
