@@ -572,7 +572,7 @@ def main():
                     is_charging = getattr(simulator, 'is_charging', False)
 
                     robot_msg = (
-                        f"R{robot.robot_id} | task={leg_type} parent={parent_id} pickup_done={pickup_done} | "
+                        f"R{robot.robot_id} | task={leg_type} task_id={cur_task_id} pickup_done={pickup_done} | "
                         f"q={robot.num_queued_tasks} ov={len(robot.overflow_queue)} "
                         f"load={getattr(robot, 'current_load', 0)}/{getattr(robot, 'max_capacity', '?')} | "
                         f"battery={battery_level:.2f} charging={is_charging} | "
