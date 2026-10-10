@@ -1,7 +1,7 @@
 site_name: CareRobotics
 site_description: Task allocation and fleet orchestration for hospital restocking robots
-repo_url: https://github.com/nikhilr2907/CareBot-Planning
-repo_name: CareBot-Planning
+repo_url: https://github.com/nikhilr2907/CareAI
+repo_name: CareAI
 
 docs_dir: docs
 
