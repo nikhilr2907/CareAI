@@ -1,0 +1,36 @@
+name: Quality
+
+on:
+  push:
+    branches: [main, pilot_trial]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            docs/requirements.txt
+      - name: Install quality dependencies
+        run: python -m pip install -r requirements-dev.txt -r docs/requirements.txt numpy==2.3.4 matplotlib==3.10.7
+      - name: Lint and format
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: Check conventions and types
+        run: |
+          git ls-files -z '*.py' | xargs -0 python scripts/check_conventions.py
+          python -m mypy
+      - name: Test core contracts
+        run: python -m pytest
+      - name: Build documentation
+        run: python -m mkdocs build --strict

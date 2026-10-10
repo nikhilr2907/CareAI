@@ -1,0 +1,37 @@
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = ["archive", "utilities", "tools", "digital_twin", "site"]
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.13"
+files = [
+    "src/exceptions.py",
+    "src/environment/robot/robot_telemetry.py",
+    "src/environment/tasks/task_state.py",
+    "src/environment/graph/edge.py",
+    "src/analytics/metrics/helpers.py",
+    "scripts/check_conventions.py",
+    "tests/test_core_contracts.py",
+]
+follow_imports = "silent"
+strict = true
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "torch_geometric.*", "pygame.*", "matplotlib.*", "pandas.*", "plotly.*", "seaborn.*", "scipy.*", "sklearn.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["."]

@@ -23,19 +23,19 @@ class GraphEdge:
     max_v_ms: float = 0.5  # Max speed (1 m/s from specs) [cite: 583]
 
     clutter_level: float = 0.0  # 0.0 (clear) to 1.0 (blocked)
-    active_robot_ids: list = field(
+    active_robot_ids: list[int] = field(
         default_factory=list
     )  # Robot IDs currently traversing this corridor
     people_count: int = 0  # Estimated number of people in corridor
     approaching_robot_count: int = 0  # Robots with this edge in their planned path
-    active_robot_progress: dict = field(
+    active_robot_progress: dict[int, tuple[float, int, int]] = field(
         default_factory=dict
     )  # robot_id -> (progress, from_idx, to_idx)
 
     # DEPRECATED: Use corridor_width instead
-    width_m: float = None  # Will be set to corridor_width if not provided
+    width_m: float | None = None  # Will be set to corridor_width if not provided
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Initialize backwards compatibility and compute entry/exit points if needed."""
         if self.width_m is None:
             self.width_m = self.corridor_width
@@ -58,7 +58,7 @@ class GraphEdge:
         """Count pairs of robots traveling in opposite directions on this edge."""
         if len(self.active_robot_progress) < 2:
             return 0
-        directions = {}
+        directions: dict[tuple[int, int], int] = {}
         for rid, (prog, fidx, tidx) in self.active_robot_progress.items():
             key = (fidx, tidx)
             directions.setdefault(key, 0)
@@ -69,16 +69,16 @@ class GraphEdge:
             return min(counts)
         return 0
 
-    def set_people_count(self, count: int):
+    def set_people_count(self, count: int) -> None:
         """Set estimated number of people in this corridor."""
         self.people_count = max(0, int(count))
 
-    def add_robot(self, robot_id: int):
+    def add_robot(self, robot_id: int) -> None:
         """Add a robot to this corridor (updates congestion)."""
         if robot_id not in self.active_robot_ids:
             self.active_robot_ids.append(robot_id)
 
-    def remove_robot(self, robot_id: int):
+    def remove_robot(self, robot_id: int) -> None:
         """Remove a robot from this corridor."""
         if robot_id in self.active_robot_ids:
             self.active_robot_ids.remove(robot_id)
@@ -103,7 +103,7 @@ class GraphEdge:
         closest_x = sx + t * dx
         closest_y = sy + t * dy
 
-        dist = ((x - closest_x) ** 2 + (y - closest_y) ** 2) ** 0.5
+        dist: float = ((x - closest_x) ** 2 + (y - closest_y) ** 2) ** 0.5
 
         return dist <= tolerance
 

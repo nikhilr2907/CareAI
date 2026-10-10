@@ -1,5 +1,26 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import NotRequired, Optional, Self, TypedDict
+
+
+class TelemetryPayload(TypedDict):
+    timestamp: float
+    robot_id: int
+    x: float
+    y: float
+    heading: float
+    velocity_ms: float
+    is_moving: bool
+    battery_level: float
+    current_capacity: int
+    is_available: bool
+    current_node_index: NotRequired[int | None]
+    current_edge_index: NotRequired[int | None]
+    active_task_id: NotRequired[int | None]
+    remaining_path: NotRequired[list[int]]
+    edge_progress: NotRequired[float]
+    eta_to_next_node: NotRequired[float]
+    is_charging: NotRequired[bool]
+    needs_charging: NotRequired[bool]
 
 
 @dataclass
@@ -28,7 +49,7 @@ class RobotTelemetry:
 
     # ===== TASK EXECUTION STATE =====
     active_task_id: Optional[int]  # Currently executing task ID
-    remaining_path: list  # List of node indices still to visit
+    remaining_path: list[int]  # List of node indices still to visit
     eta_to_next_node: float  # Estimated seconds to next waypoint
 
     # ===== CHARGING STATE (with defaults) =====
@@ -45,7 +66,7 @@ class RobotTelemetry:
         """Check if robot is traveling along an edge."""
         return self.current_edge_index is not None
 
-    def to_dict(self):
+    def to_dict(self) -> TelemetryPayload:
         """Convert to dictionary for logging/serialization."""
         return {
             "timestamp": self.timestamp,
@@ -68,7 +89,7 @@ class RobotTelemetry:
         }
 
     @classmethod
-    def from_dict(cls, data: dict):
+    def from_dict(cls, data: TelemetryPayload) -> Self:
         """Create telemetry from dictionary (for real data ingestion)."""
         return cls(
             timestamp=data["timestamp"],

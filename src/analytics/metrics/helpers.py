@@ -1,13 +1,25 @@
+from collections.abc import Sequence
+from typing import Protocol
+
+
+class SpatialNode(Protocol):
+    @property
+    def center_x(self) -> float: ...
+
+    @property
+    def center_y(self) -> float: ...
+
+
 class MetricHelpers:
     """Maps location indices to spatial quadrants on 2x2 grid."""
 
     GRID_SIZE = 2  # 2x2 = 4 quadrants
 
-    def __init__(self, nodes):
+    def __init__(self, nodes: Sequence[SpatialNode]) -> None:
         self.nodes = nodes
-        self._bounds = None
+        self._bounds: dict[str, float] | None = None
 
-    def get_location_quadrant(self, location_idx: int) -> int:
+    def get_location_quadrant(self, location_idx: int | None) -> int:
         """Map a location index to its spatial quadrant: 0=SW, 1=SE, 2=NW, 3=NE (0 if invalid)."""
         if (
             not self.nodes
@@ -28,7 +40,7 @@ class MetricHelpers:
 
         return row * 2 + col
 
-    def _get_bounds(self) -> dict:
+    def _get_bounds(self) -> dict[str, float]:
         """Lazily compute floor extent from node centers."""
         if self._bounds is None:
             xs = [n.center_x for n in self.nodes]

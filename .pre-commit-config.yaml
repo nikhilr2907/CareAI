@@ -1,0 +1,26 @@
+minimum_pre_commit_version: '4.0.0'
+files: ^(src/.*\.py|run_[^/]+\.py|scripts/.*\.py|tests/.*\.py)$
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff lint
+        entry: python -m ruff check
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: Ruff format
+        entry: python -m ruff format --check
+        language: system
+        types: [python]
+      - id: python-conventions
+        name: Python docstring conventions
+        entry: python scripts/check_conventions.py
+        language: system
+        types: [python]
+      - id: mypy
+        name: Mypy strict core contracts
+        entry: python -m mypy
+        language: system
+        pass_filenames: false
+        always_run: true
