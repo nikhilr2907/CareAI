@@ -175,8 +175,6 @@ sbatch shell/sweep.sh          # learning-rate and hidden-dim sweep (9 array job
 
 Settings are environment variables, for example `CONFIG=... ITERATIONS=... sbatch shell/train.sh`. Set `MODULES` (environment modules to load) and `VENV_DIR` (a virtualenv to activate) if your cluster needs them. See `shell/env.sh`.
 
-`.github/workflows/deploy.yml` syncs this branch to the cluster on every push to `main`. Its hosts, username and remote path come from GitHub variables and secrets, listed at the top of the file.
-
 ## Keeping the branches in sync
 
 Improvements to the shared code should land on both branches. Two tools help:
