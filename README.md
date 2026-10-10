@@ -163,29 +163,6 @@ Each run writes to `--output-dir/<exp-name>/`:
 
 Deployment runs write to `outputs/`, which is git-ignored.
 
-## Cluster training
-
-The Slurm jobs are in `shell/`. Submit them from the repository root:
-
-```bash
-sbatch shell/train.sh          # one training run
-sbatch shell/train_long.sh     # longer run with a larger iteration budget
-sbatch shell/sweep.sh          # learning-rate and hidden-dim sweep (9 array jobs)
-```
-
-Settings are environment variables, for example `CONFIG=... ITERATIONS=... sbatch shell/train.sh`. Set `MODULES` (environment modules to load) and `VENV_DIR` (a virtualenv to activate) if your cluster needs them. See `shell/env.sh`.
-
-## Keeping the branches in sync
-
-Improvements to the shared code should land on both branches. Two tools help:
-
-```bash
-python tools/branch_audit.py main pilot_trial > audit.md   # which side changed each function, and in which commit
-python tools/demand_probe.py configs/revised_hospital_config_v3.json --hours 1   # does a config generate demand?
-```
-
-After a sync, the audit should show differences only in the layout and demand layer: config loading, graph and task features, the demand model, encoder naming and the layout-specific rewards.
-
 ## Known limitations
 
 - Real-robot operation has not been tested with hardware.
