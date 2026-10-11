@@ -6,7 +6,9 @@ from ..environment.robot.robot_telemetry import RobotTelemetry
 
 
 class TelemetryEffectsManager:
-    def __init__(self, enable: bool = True, graph_bounds: tuple = None):
+    def __init__(
+        self, enable: bool = True, graph_bounds: tuple[float, float, float, float] | None = None
+    ):
         self.enable = enable
         self.graph_bounds = graph_bounds  # (min_x, max_x, min_y, max_y)
 
@@ -14,8 +16,8 @@ class TelemetryEffectsManager:
         self,
         telemetry: Optional[RobotTelemetry],
         elapsed_minutes: float,
-        num_nodes: int = None,
-        num_edges: int = None,
+        num_nodes: int | None = None,
+        num_edges: int | None = None,
     ) -> Optional[RobotTelemetry]:
         """Inject Phase 1 realistic telemetry noise from ESP32 hardware, modifying telemetry in-place."""
         if telemetry is None or not self.enable:
@@ -31,7 +33,7 @@ class TelemetryEffectsManager:
 
         # 25% dropout rate (command didn't execute/wheel slip/sensor lag); otherwise add measurement noise
         if np.random.random() < 0.25:
-            telemetry.velocity_ms = None
+            telemetry.velocity_ms = 0.0
         else:
             telemetry.velocity_ms = max(0.0, telemetry.velocity_ms + np.random.normal(0, 0.1))
 

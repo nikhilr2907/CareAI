@@ -3,6 +3,7 @@ from typing import List
 from src.exceptions import TelemetryUnavailableError
 
 from .gapo_env import GAPOTaskAssignmentEnv
+from .graph.node import SKUInventory
 from .graph_helpers import dijkstra_shortest_path
 from .robot.robot_telemetry import RobotTelemetry
 from .tasks.task_state import Task
@@ -45,7 +46,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         if not inventories:
             return  # Bridge not connected or no system_state received yet
 
-        for node in self.graph_state.nodes:
+        for node in self._active_graph.nodes:
             inv_data = inventories.get(node.node_id)
             if inv_data is None or not node.sku_inventory:
                 continue
@@ -141,7 +142,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                 if task.leg_type == "pickup":
                     robot.mark_pickup_complete(task.task_id)
                 elif task.task_type == "replenishment":
-                    to_node = self.graph_state.nodes[task.to_location_index]
+                    to_node = self._active_graph.nodes[task.to_location_index]
                     if task.sku_id:
                         to_node.restock_sku(task.sku_id, task.num_items)
                         to_node.recalc_category_inventory()
@@ -155,7 +156,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                         self._refresh_task_inventory_context(task)
                         task.sku_stock_level_at_dropoff = task.current_sku_stock_level
                         if self.sku_logger is not None:
-                            sku_data = to_node.sku_inventory.get(task.sku_id, {})
+                            sku_data: SKUInventory = to_node.sku_inventory.get(task.sku_id, {})
                             self.sku_logger.log_restock(
                                 node_idx=task.to_location_index,
                                 node_tag=getattr(to_node, "location_tag", None)
@@ -297,13 +298,15 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         """Run Dijkstra and dispatch path to the real robot via backend."""
         start_node = robot.current_node_index
         if start_node is None:
+            if robot.telemetry is None:
+                raise RuntimeError("Robot telemetry is required to plan a path")
             start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
 
         path, _ = dijkstra_shortest_path(
             start_node,
             task.to_location_index,
             self.graph_state,
-            len(self.graph_state.nodes),
+            len(self._active_graph.nodes),
             edge_cost_manager=self.edge_cost_manager,
             all_robots=self.robots,
         )
@@ -344,13 +347,15 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
 
         start_node = robot.current_node_index
         if start_node is None:
+            if robot.telemetry is None:
+                raise RuntimeError("Robot telemetry is required to plan a path")
             start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
 
         path, _ = dijkstra_shortest_path(
             start_node,
             hub_idx,
             self.graph_state,
-            len(self.graph_state.nodes),
+            len(self._active_graph.nodes),
             edge_cost_manager=self.edge_cost_manager,
             all_robots=self.robots,
         )
@@ -375,8 +380,8 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
 
         # If robot is on an edge, current_node_index is the from-node of that edge
         if edge_idx is not None:
-            edge = self.graph_state.edges[edge_idx]
-            nodes = self.graph_state.nodes
+            edge = self._active_graph.edges[edge_idx]
+            nodes = self._active_graph.nodes
             for i, node in enumerate(nodes):
                 if node.node_id == edge.from_node:
                     node_idx = i
@@ -415,11 +420,11 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         AT_NODE_THRESHOLD_M = 0.5  # within this distance of an endpoint → at-node
         ON_EDGE_TOLERANCE_M = 1.5  # max perpendicular distance to count as on-edge
 
-        nodes = self.graph_state.nodes
-        edges = self.graph_state.edges
+        nodes = self._active_graph.nodes
+        edges = self._active_graph.edges
 
         if candidate_node_pairs is not None:
-            check_indices = []
+            check_indices: list[int] = []
             for from_idx, to_idx in candidate_node_pairs:
                 from_id = nodes[from_idx].node_id
                 to_id = nodes[to_idx].node_id
@@ -429,7 +434,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                     ):
                         check_indices.append(i)
         else:
-            check_indices = range(len(edges))
+            check_indices = list(range(len(edges)))
 
         best_edge_idx = None
         best_progress = 0.0

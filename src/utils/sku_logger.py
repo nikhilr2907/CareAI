@@ -26,7 +26,7 @@ _COLUMNS = [
 class SKULogger:
     """Logs SKU inventory state to a CSV file for post-run analytics."""
 
-    def __init__(self, log_dir: Path, snapshot_interval_s: float = 60.0):
+    def __init__(self, log_dir: Path | str, snapshot_interval_s: float = 60.0):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.snapshot_interval_s = snapshot_interval_s

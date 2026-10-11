@@ -1,9 +1,24 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TypedDict
+
+
+class SKUInventory(TypedDict, total=False):
+    stock: float
+    par: float
+    reorder: float
+    max: float
+    category: str
+    area_multiplier: float
+
+
+class _GraphNodeAliases:
+    x: float
+    y: float
+    display_name: str
 
 
 @dataclass
-class GraphNode:
+class GraphNode(_GraphNodeAliases):
     # 1. Basic Identification
     node_id: str
     node_type: str  # 'storage', 'recovery', 'hub'
@@ -21,7 +36,7 @@ class GraphNode:
     stock_level: float = 0.0
     max_stock: float = 0.0
     category_inventory: dict = field(default_factory=dict)
-    sku_inventory: Dict[str, Dict] = field(default_factory=dict)
+    sku_inventory: Dict[str, SKUInventory] = field(default_factory=dict)
 
     # 5. Location metadata
     floor: int = 0
@@ -93,21 +108,29 @@ class GraphNode:
     # ── SKU operations ──────────────────────────────────────────────────────────
 
     def get_sku_stock(self, sku_id: str) -> float:
-        return float(self.sku_inventory.get(sku_id, {}).get("stock", 0.0))
+        inventory = self.sku_inventory.get(sku_id)
+        return float(inventory.get("stock", 0.0)) if inventory is not None else 0.0
 
     def get_sku_reorder_point(self, sku_id: str) -> float:
-        return float(self.sku_inventory.get(sku_id, {}).get("reorder", 0.0))
+        inventory = self.sku_inventory.get(sku_id)
+        return float(inventory.get("reorder", 0.0)) if inventory is not None else 0.0
 
     def get_sku_par_level(self, sku_id: str) -> float:
-        return float(self.sku_inventory.get(sku_id, {}).get("par", 0.0))
+        inventory = self.sku_inventory.get(sku_id)
+        return float(inventory.get("par", 0.0)) if inventory is not None else 0.0
 
     def get_sku_max_level(self, sku_id: str) -> float:
-        return float(self.sku_inventory.get(sku_id, {}).get("max", 0.0))
+        inventory = self.sku_inventory.get(sku_id)
+        return float(inventory.get("max", 0.0)) if inventory is not None else 0.0
 
     def consume_sku(self, sku_id: str, amount: float):
         if sku_id in self.sku_inventory:
             current = float(self.sku_inventory[sku_id].get("stock", 0.0))
             self.sku_inventory[sku_id]["stock"] = max(0.0, current - amount)
+
+    def restock(self, amount: float) -> None:
+        """Add delivered stock up to this location's capacity."""
+        self.stock_level = min(self.max_stock, self.stock_level + amount)
 
     def restock_sku(self, sku_id: str, amount: float):
         if sku_id in self.sku_inventory:

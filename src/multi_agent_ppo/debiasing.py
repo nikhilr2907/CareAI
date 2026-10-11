@@ -173,7 +173,7 @@ class ComprehensiveDebiasing(nn.Module):
         features_norm = F.normalize(features_matrix, p=2, dim=1)
         return torch.mm(features_norm, features_norm.t())
 
-    def get_causal_mask(self, num_tasks: int) -> torch.Tensor:
+    def get_causal_mask(self, num_tasks: int) -> torch.Tensor | None:
         if self.causal_masking:
             return self.causal_masking.create_causal_mask(num_tasks)
         return None

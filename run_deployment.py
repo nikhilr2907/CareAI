@@ -561,6 +561,7 @@ def main():
                     logger.debug(robot_msg)
 
             if not args.headless:
+                assert screen is not None and font is not None and clock is not None
                 screen.fill((243, 246, 249))
                 hud_panel_width = 430
                 viz_width = max(640, args.width - hud_panel_width)

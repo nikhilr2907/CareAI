@@ -348,7 +348,7 @@ async def main():
     total_on_time = 0
     total_late = 0
     total_lateness = 0.0
-    completion_time_history = deque(maxlen=1000)
+    completion_time_history: deque[float] = deque(maxlen=1000)
     start_time = time.time()
 
     first_telemetry_logged: set = set()
@@ -526,6 +526,7 @@ async def main():
                     )
 
             if not args.headless:
+                assert screen is not None and font is not None and clock is not None
                 screen.fill((243, 246, 249))
                 hud_panel_width = 430
                 viz_width = max(640, args.width - hud_panel_width)

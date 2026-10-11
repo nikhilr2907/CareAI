@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class DecisionLogger:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         self._path = output_dir / "decisions.csv"
-        self._fh = open(self._path, "w", newline="")
+        self._fh: TextIO = open(self._path, "w", newline="")
         self._writer = csv.DictWriter(self._fh, fieldnames=_FIELDS)
         self._writer.writeheader()
         self._outcome_buffer: dict[int, dict] = {}  # task_id -> {reward, deadline_met}
@@ -259,7 +259,6 @@ class DecisionLogger:
         # Close first — leaving the handle open causes a stale position after df.to_csv() overwrites the file.
         self._fh.flush()
         self._fh.close()
-        self._fh = None
 
         try:
             df = pd.read_csv(self._path)

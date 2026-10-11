@@ -89,6 +89,7 @@ class GAPOPolicyNetwork(nn.Module):
             nn.Linear(128, 1),
         )
 
+        self.debiaser: ComprehensiveDebiasing | None
         if use_debiasing:
             self.debiaser = ComprehensiveDebiasing(
                 lambda_state_delta=lambda_state_delta, lambda_consistency=lambda_consistency
@@ -219,7 +220,7 @@ class GAPOPolicyNetwork(nn.Module):
         state_dict: Dict[str, torch.Tensor],
         robot_availability_mask: Optional[torch.Tensor] = None,
         deterministic: bool = False,
-    ) -> Tuple[int, torch.Tensor]:
+    ) -> Tuple[int, torch.Tensor, List[float], float]:
         """Select action using current policy."""
         with torch.no_grad():
             action_logits, _, _ = self.forward(
@@ -234,14 +235,14 @@ class GAPOPolicyNetwork(nn.Module):
         action_probs = F.softmax(action_logits, dim=-1)
 
         if deterministic:
-            action = torch.argmax(action_probs).item()
+            action = int(torch.argmax(action_probs).item())
         else:
             dist = torch.distributions.Categorical(action_probs)
-            action = dist.sample().item()
+            action = int(dist.sample().item())
 
         # Compute log probability and entropy on GPU before transfer
         log_prob = F.log_softmax(action_logits, dim=-1)[action]
-        entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8)).item()
+        entropy = float(-torch.sum(action_probs * torch.log(action_probs + 1e-8)).item())
 
         return action, log_prob, action_probs.cpu().tolist(), entropy
 
@@ -249,7 +250,7 @@ class GAPOPolicyNetwork(nn.Module):
         self,
         state_dicts: List[Dict[str, torch.Tensor]],
         actions: torch.Tensor,
-        robot_masks: Optional[List[torch.Tensor]] = None,
+        robot_masks: Optional[List[torch.Tensor | None]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate actions for PPO update."""
         batch_size = len(state_dicts)
@@ -299,8 +300,8 @@ class GAPOPolicyNetwork(nn.Module):
     def _forward_batched(
         self,
         state_dicts: List[Dict[str, torch.Tensor]],
-        robot_masks: Optional[List[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict]]:
+        robot_masks: Optional[List[torch.Tensor | None]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict], torch.Tensor, torch.Tensor]:
         """Batched forward pass used by evaluate_actions during PPO updates."""
         batch_size = len(state_dicts)
         device = next(self.parameters()).device
@@ -421,7 +422,7 @@ class GAPOPolicyNetwork(nn.Module):
     ) -> Tuple[torch.Tensor, Dict]:
         """Compute de-biasing loss from current episode."""
         logits_to_use = fresh_logits
-        if not self.use_debiasing or logits_to_use is None or len(logits_to_use) < 2:
+        if self.debiaser is None or logits_to_use is None or len(logits_to_use) < 2:
             return torch.tensor(0.0), {}
 
         _MAX_DEBIAS_SEQ = 256

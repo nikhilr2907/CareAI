@@ -18,6 +18,8 @@ class RobotBridgeTaskDispatcher:
     async def submit_task(self, task, robot_id: int = 0) -> bool:
         """Submit a task to the robot via the bridge, returning True if submitted successfully."""
         try:
+            if self.graph_state is None:
+                raise RuntimeError("Set graph state before submitting a task")
             waypoints = []
             if hasattr(task, "planned_path") and task.planned_path:
                 for node_idx in task.planned_path:

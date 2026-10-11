@@ -23,7 +23,7 @@ def _weekday_multiplier(
 
 
 def _get_current_school_period(
-    school_schedule: dict, current_time_seconds: float
+    school_schedule: dict | None, current_time_seconds: float
 ) -> Optional[dict]:
     """Return the active school period dict for current_time_seconds, or None if outside schedule."""
     if not school_schedule:
@@ -43,7 +43,7 @@ def _get_current_school_period(
 
 def _school_period_weight(
     period_profile: dict,
-    school_schedule: dict,
+    school_schedule: dict | None,
     current_time_seconds: float,
 ) -> Tuple[float, float]:
     """Return (weight, period_hours) for the currently active school period."""
@@ -94,7 +94,7 @@ def generate_inventory_tasks(
     existing_task_keys: Optional[Set[Tuple]] = None,
 ) -> Tuple[List[Task], int]:
     """Generate tasks based on inventory needs."""
-    new_tasks = []
+    new_tasks: list[Task] = []
     task_id = next_task_id
 
     # Work on a mutable copy so we can accumulate keys within this call too
@@ -181,7 +181,7 @@ def update_inventory_levels(graph_state, time_delta_hours: float):
     """Update stock levels at all nodes based on consumption rates."""
     for node in graph_state.nodes:
         if node.sku_inventory and node.consumption_enabled:
-            category_rates = {}
+            category_rates: dict[str, float] = {}
             total_stock = 0.0
             total_rate = 0.0
             for sku_id, sku_data in node.sku_inventory.items():

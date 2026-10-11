@@ -44,8 +44,12 @@ class LearnedEdgeCostModel(nn.Module):
         )
 
         # Mean head bias set to -3.0 so softplus(-3)≈0.049 → delay_factor starts near 1.05 (default softplus(0)=0.693 would start near 1.69).
-        nn.init.constant_(self.mean_head[-1].bias, -3.0)
-        nn.init.constant_(self.log_var_head[-1].bias, -2.0)
+        mean_output = self.mean_head[-1]
+        variance_output = self.log_var_head[-1]
+        assert isinstance(mean_output, nn.Linear) and isinstance(variance_output, nn.Linear)
+        assert mean_output.bias is not None and variance_output.bias is not None
+        nn.init.constant_(mean_output.bias, -3.0)
+        nn.init.constant_(variance_output.bias, -2.0)
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predict the delay-factor distribution (mean >= 1.0, clamped log-variance) from congestion features, excluding distance_m."""
@@ -179,7 +183,7 @@ class EdgeCostTrainer:
         """Average loss over recent training steps."""
         if not self.recent_losses:
             return float("inf")
-        return np.mean(self.recent_losses)
+        return float(np.mean(self.recent_losses))
 
     def get_stats(self) -> dict:
         return {

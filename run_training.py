@@ -299,15 +299,15 @@ def main():
     OPEN_ASSIGNMENT_TTL = (
         5  # discard open_assignments entries older than this many rollouts (stuck/lost tasks)
     )
-    running_reward = 0
+    running_reward = 0.0
     iteration_rewards = []
     config_rewards = []
     total_timesteps = 0
     iterations_on_current_config = 0
-    clip_fraction_history = deque(maxlen=50)
-    grad_norm_history = deque(maxlen=50)
-    entropy_history = deque(maxlen=50)
-    completion_time_history = deque(maxlen=1000)
+    clip_fraction_history: deque[float] = deque(maxlen=50)
+    grad_norm_history: deque[float] = deque(maxlen=50)
+    entropy_history: deque[float] = deque(maxlen=50)
+    completion_time_history: deque[float] = deque(maxlen=1000)
 
     logger.info("\nStarting Training...")
     logger.info("-" * 80)

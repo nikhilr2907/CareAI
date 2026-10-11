@@ -3,7 +3,10 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +56,7 @@ class RobotBridgeWebSocketClient:
     def __init__(self, bridge_url: str = "ws://localhost:8765"):
         """Initialize the client without connecting; the /ws path is appended automatically on connect."""
         self.bridge_url = bridge_url
-        self.websocket = None
+        self.websocket: ClientConnection | None = None
         self.is_connected = False
         self.is_running = False
 
@@ -89,7 +92,7 @@ class RobotBridgeWebSocketClient:
 
     async def listen(self):
         """Listen for messages from the bridge in a blocking loop; run inside an asyncio task."""
-        if not self.is_connected:
+        if not self.is_connected or self.websocket is None:
             logger.error("Not connected to bridge. Call connect() first.")
             return
 
@@ -99,7 +102,7 @@ class RobotBridgeWebSocketClient:
                     data = json.loads(message)
                     await self.handle_message(data)
                 except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON from bridge: {message}")
+                    logger.error(f"Invalid JSON from bridge: {message!r}")
                 except Exception as e:
                     logger.error(f"Error handling message: {e}")
         except Exception as e:
@@ -259,7 +262,7 @@ class RobotBridgeWebSocketClient:
 
     async def send_task_command(self, task_command: Dict) -> bool:
         """Send a task command to the bridge, returning True if sent successfully."""
-        if not self.is_connected:
+        if not self.is_connected or self.websocket is None:
             logger.error("Not connected to bridge")
             return False
 
@@ -273,7 +276,7 @@ class RobotBridgeWebSocketClient:
             return False
 
     async def send_task_cancel(self, task_id: int) -> bool:
-        if not self.is_connected:
+        if not self.is_connected or self.websocket is None:
             logger.error("Not connected to bridge")
             return False
 

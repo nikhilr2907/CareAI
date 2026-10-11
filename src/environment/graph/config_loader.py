@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 
 def load_config_from_file(config_path: str) -> Tuple[List[GraphNode], List[Tuple[int, int]], Dict]:
     """Load an ILC pilot config file and return (nodes, edge_pairs, meta)."""
-    config_path = Path(config_path)
-    if not config_path.exists():
+    config_file = Path(config_path)
+    if not config_file.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_path, "r") as f:
+    with open(config_file, "r") as f:
         raw_data = json.load(f)
 
     env_type = raw_data.get("metadata", {}).get("environment_type", "")

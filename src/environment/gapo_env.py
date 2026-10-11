@@ -8,8 +8,10 @@ from ..multi_agent_ppo.task_creation_actor import TaskCreationActor
 from ..reliability.telemetry_effects import TelemetryEffectsManager
 from ..utils.fleet_event_logger import FleetEventLogger
 from ..utils.sku_logger import SKULogger
+from .graph.graph_state import GraphState
+from .graph.node import SKUInventory
 from .graph_helpers import dijkstra_shortest_path
-from .robot.robot_simulator import RobotSimulator
+from .robot.robot_simulator import EdgeTraversalRecord, RobotSimulator
 from .robot.robot_state import RobotState, create_default_robot
 from .tasks.task_generator import (
     DEFAULT_MIN_REPLENISHMENT_DEADLINE_S,
@@ -25,10 +27,10 @@ logger = logging.getLogger(__name__)
 class GAPOTaskAssignmentEnv:
     def __init__(
         self,
-        num_robots=1,
-        num_nodes=3,
-        max_episode_time=28800.0,
-        timestep_seconds=1.0,
+        num_robots: int = 1,
+        num_nodes: int = 3,
+        max_episode_time: float = 28800.0,
+        timestep_seconds: float = 1.0,
         stochastic_tasks_per_hour: float = 0.0,
         max_stochastic_tasks_per_hour: int = 2,
         initial_stochastic_tasks: int = 0,
@@ -47,13 +49,14 @@ class GAPOTaskAssignmentEnv:
         self.timestep_seconds = timestep_seconds
         self.fleet_event_logger = fleet_event_logger
         self.sku_logger = SKULogger(log_dir) if log_dir is not None else None
-        self.graph_state = None
-        self.robots = []
-        self.robot_simulators = []
+        self.graph_state: GraphState | None = None
+        self._custom_graph_state: GraphState | None = None
+        self.robots: list[RobotState] = []
+        self.robot_simulators: list[RobotSimulator | None] = []
         self.next_task_id = 1
 
-        self.pending_tasks = []
-        self.completed_tasks = []
+        self.pending_tasks: list[Task] = []
+        self.completed_tasks: list[Task] = []
 
         self.current_time = 0.0
         self.last_inventory_check = 0.0
@@ -61,7 +64,7 @@ class GAPOTaskAssignmentEnv:
         self.stochastic_tasks_per_hour = max(0.0, float(stochastic_tasks_per_hour))
         self.max_stochastic_tasks_per_hour = max(0, int(max_stochastic_tasks_per_hour))
         self.initial_stochastic_tasks = max(0, int(initial_stochastic_tasks))
-        self._stochastic_task_timestamps = []
+        self._stochastic_task_timestamps: list[float] = []
 
         self.episode_stockouts = 0
         self.cumulative_reward = 0.0
@@ -74,6 +77,7 @@ class GAPOTaskAssignmentEnv:
         self._task_battery_snapshots: Dict[Tuple[int, str], float] = {}
         self.BATTERY_CAPACITY_WH = 500.0
 
+        self.task_creation_actor: TaskCreationActor | None
         if use_task_creation_actor:
             self.task_creation_actor = TaskCreationActor(device=device)
         else:
@@ -100,25 +104,31 @@ class GAPOTaskAssignmentEnv:
         self.episode_break_stockouts = 0
 
         self.telemetry_noise_manager = TelemetryEffectsManager(enable=True, graph_bounds=None)
-        self.robot_reset_times = []
-        self.graph_bounds = None
+        self.robot_reset_times: list[float] = []
+        self.graph_bounds: tuple[float, float, float, float] | None = None
+
+    @property
+    def _active_graph(self) -> GraphState:
+        if self.graph_state is None:
+            raise RuntimeError("Load a graph and reset the environment before stepping")
+        return self.graph_state
 
     def reset(self):
         if hasattr(self, "_custom_graph_state") and self._custom_graph_state is not None:
             self.graph_state = self._custom_graph_state
 
-            for edge in self.graph_state.edges:
+            for edge in self._active_graph.edges:
                 edge.active_robot_ids = []
-            for node in self.graph_state.nodes:
+            for node in self._active_graph.nodes:
                 node.current_robot_ids = []
         else:
             raise RuntimeError(
                 "No ILC config loaded. Call create_env_from_config_file() before reset()."
             )
 
-        if self.graph_state and self.graph_state.nodes:
-            x_coords = [node.x for node in self.graph_state.nodes]
-            y_coords = [node.y for node in self.graph_state.nodes]
+        if self.graph_state and self._active_graph.nodes:
+            x_coords = [node.x for node in self._active_graph.nodes]
+            y_coords = [node.y for node in self._active_graph.nodes]
             padding = 5.0
             self.graph_bounds = (
                 min(x_coords) - padding,
@@ -159,7 +169,7 @@ class GAPOTaskAssignmentEnv:
         self.current_time = 0.0
         self.last_inventory_check = 0.0
         self._task_battery_snapshots.clear()
-        self.graph_state.current_time = self.current_time
+        self._active_graph.current_time = self.current_time
         self._stochastic_task_timestamps = []
 
         new_tasks, self.next_task_id = generate_inventory_tasks(
@@ -195,12 +205,12 @@ class GAPOTaskAssignmentEnv:
         self.cumulative_reward = 0.0
         return self._get_state_dict()
 
-    def step(self, dt: float = None):
+    def step(self, dt: float | None = None):
         if dt is None:
             dt = self.timestep_seconds
 
         time_delta_hours = dt / 3600.0
-        self.graph_state.current_time = self.current_time
+        self._active_graph.current_time = self.current_time
         self._update_inventory(time_delta_hours)
 
         if self.current_time - self.last_inventory_check >= self.inventory_check_interval:
@@ -242,7 +252,7 @@ class GAPOTaskAssignmentEnv:
             "pending_tasks": len(self.pending_tasks),
             "completed_tasks": len(completed_tasks),
             "total_robot_tasks": sum(r.num_queued_tasks for r in self.robots),
-            "stockouts": sum(1 for n in self.graph_state.nodes if n.is_stockout),
+            "stockouts": sum(1 for n in self._active_graph.nodes if n.is_stockout),
             "cumulative_reward": self.cumulative_reward,
             "edge_cost_model": self.edge_cost_manager.get_stats(),
             "task_completion_credits": self._last_per_task_credits,
@@ -415,13 +425,15 @@ class GAPOTaskAssignmentEnv:
 
         start_node = robot.current_node_index
         if start_node is None:
+            if robot.telemetry is None:
+                raise RuntimeError("Robot telemetry is required to plan a path")
             start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
 
         path, _ = dijkstra_shortest_path(
             start_node,
             task.to_location_index,
             self.graph_state,
-            len(self.graph_state.nodes),
+            len(self._active_graph.nodes),
             edge_cost_manager=self.edge_cost_manager,
             all_robots=self.robots,
         )
@@ -450,9 +462,17 @@ class GAPOTaskAssignmentEnv:
         robot.target_node_index = task.to_location_index
         robot.travel_start_time = self.current_time
 
+    def _require_simulator(self, robot_id: int) -> RobotSimulator:
+        simulator = self.robot_simulators[robot_id]
+        if simulator is None:
+            raise RuntimeError("This operation requires a simulated robot")
+        return simulator
+
     def _update_robot_positions(self, dt: float):
         """Move robots along their planned paths."""
         for robot, simulator in zip(self.robots, self.robot_simulators):
+            if simulator is None:
+                raise RuntimeError("This operation requires a simulated robot")
             prev_edge_idx = simulator.current_edge_index
 
             telemetry = simulator.update(dt)
@@ -460,9 +480,9 @@ class GAPOTaskAssignmentEnv:
 
             robot_id = simulator.robot_id
             elapsed_minutes = (self.current_time - self.robot_reset_times[robot_id]) / 60.0
-            num_nodes = len(self.graph_state.nodes) if self.graph_state else 0
-            num_edges = len(self.graph_state.edges) if self.graph_state else 0
-            telemetry = self.telemetry_noise_manager.apply_noise(
+            num_nodes = len(self._active_graph.nodes) if self.graph_state else 0
+            num_edges = len(self._active_graph.edges) if self.graph_state else 0
+            noisy_telemetry = self.telemetry_noise_manager.apply_noise(
                 telemetry, elapsed_minutes, num_nodes=num_nodes, num_edges=num_edges
             )
 
@@ -475,7 +495,8 @@ class GAPOTaskAssignmentEnv:
             ):
                 simulator.set_traversal_entry_time(self.current_time)
 
-            robot.update_telemetry(telemetry)
+            if noisy_telemetry is not None:
+                robot.update_telemetry(noisy_telemetry)
 
             _velocity_threshold = 0.05
             if simulator.velocity_ms < _velocity_threshold:
@@ -555,6 +576,8 @@ class GAPOTaskAssignmentEnv:
         completed_tasks = []
 
         for robot, simulator in zip(self.robots, self.robot_simulators):
+            if simulator is None:
+                raise RuntimeError("This operation requires a simulated robot")
             if (
                 robot.current_task
                 and robot.current_node_index == robot.target_node_index
@@ -573,7 +596,7 @@ class GAPOTaskAssignmentEnv:
                     simulator.load_items(task.num_items)
                     robot.mark_pickup_complete(task.task_id)
                 elif task.task_type == "replenishment":
-                    to_node = self.graph_state.nodes[task.to_location_index]
+                    to_node = self._active_graph.nodes[task.to_location_index]
                     if task.sku_id:
                         to_node.restock_sku(task.sku_id, task.num_items)
                         to_node.recalc_category_inventory()
@@ -587,7 +610,7 @@ class GAPOTaskAssignmentEnv:
                         self._refresh_task_inventory_context(task)
                         task.sku_stock_level_at_dropoff = task.current_sku_stock_level
                         if self.sku_logger is not None:
-                            sku_data = to_node.sku_inventory.get(task.sku_id, {})
+                            sku_data: SKUInventory = to_node.sku_inventory.get(task.sku_id, {})
                             self.sku_logger.log_restock(
                                 node_idx=task.to_location_index,
                                 node_tag=getattr(to_node, "location_tag", None)
@@ -645,7 +668,7 @@ class GAPOTaskAssignmentEnv:
             # while the robot is still en route (active_task_id==-1 but not yet
             # at hub) or at a non-hub destination.
             robot_id = robot.robot_id
-            _at_hub = robot.current_node_index is not None and self.graph_state.nodes[
+            _at_hub = robot.current_node_index is not None and self._active_graph.nodes[
                 robot.current_node_index
             ].node_type in ("hub", "storage")
             if (
@@ -663,7 +686,7 @@ class GAPOTaskAssignmentEnv:
                         hub_node=robot.current_node_index,
                     )
                 self._robots_routing_to_charge.discard(robot_id)
-                if robot.task_queue:
+                if robot.current_task is not None:
                     self._plan_path_for_robot(robot, robot.current_task, simulator)
 
             # Handle charging arrival — runs AFTER completion so a robot that
@@ -674,7 +697,7 @@ class GAPOTaskAssignmentEnv:
                 and simulator.active_task_id == -1
                 and robot.current_node_index is not None
             ):
-                node = self.graph_state.nodes[robot.current_node_index]
+                node = self._active_graph.nodes[robot.current_node_index]
                 if node.node_type in ("hub", "storage") and not simulator.is_charging:
                     simulator.start_charging()
                     if self.fleet_event_logger:
@@ -738,7 +761,7 @@ class GAPOTaskAssignmentEnv:
                         break
 
             if task.task_type == "replenishment" and task.leg_type == "dropoff":
-                to_node = self.graph_state.nodes[task.to_location_index]
+                to_node = self._active_graph.nodes[task.to_location_index]
                 if (
                     task.sku_id
                     and getattr(to_node, "sku_inventory", None)
@@ -770,7 +793,7 @@ class GAPOTaskAssignmentEnv:
             total_reward += task_reward
 
         stockout_count = 0
-        for node in self.graph_state.nodes:
+        for node in self._active_graph.nodes:
             if not node.sku_inventory or not node.consumption_enabled:
                 continue
             for sku_data in node.sku_inventory.values():
@@ -786,8 +809,16 @@ class GAPOTaskAssignmentEnv:
             for rid in range(len(self.robots)):
                 if rid in self._offline_robots:
                     continue
-                sim = self.robot_simulators[rid]
-                if sim.current_edge_index is not None:
+                simulator = self.robot_simulators[rid]
+                telemetry = self.robots[rid].telemetry
+                edge_index = (
+                    simulator.current_edge_index
+                    if simulator is not None
+                    else telemetry.current_edge_index
+                    if telemetry is not None
+                    else None
+                )
+                if edge_index is not None:
                     total_reward -= self.break_movement_penalty
 
         return total_reward
@@ -812,10 +843,10 @@ class GAPOTaskAssignmentEnv:
         demand_idx = getattr(task, "demand_location_index", None)
         if demand_idx is None:
             demand_idx = task.to_location_index
-        if demand_idx is None or demand_idx < 0 or demand_idx >= len(self.graph_state.nodes):
+        if demand_idx is None or demand_idx < 0 or demand_idx >= len(self._active_graph.nodes):
             return
 
-        node = self.graph_state.nodes[demand_idx]
+        node = self._active_graph.nodes[demand_idx]
         sku_inventory = getattr(node, "sku_inventory", None) or {}
         sku_data = sku_inventory.get(task.sku_id)
         if sku_data is None:
@@ -841,7 +872,7 @@ class GAPOTaskAssignmentEnv:
         task.par_level = par_level
         task.demand_location_index = demand_idx
 
-    def get_robot_availability_mask(self, task: Task = None) -> np.ndarray:
+    def get_robot_availability_mask(self, task: Task | None = None) -> np.ndarray:
         """Get boolean mask for which robots can accept a task right now."""
         mask = np.ones(len(self.robots), dtype=bool)
         for rid in range(len(self.robots)):
@@ -862,12 +893,12 @@ class GAPOTaskAssignmentEnv:
         try:
             if getattr(self.graph_state, "category_order", None):
                 node_continuous, node_categorical = (
-                    self.graph_state.get_node_features_with_category_stats()
+                    self._active_graph.get_node_features_with_category_stats()
                 )
 
-                node_sku_features, node_sku_mask = self.graph_state.get_node_sku_features()
+                node_sku_features, node_sku_mask = self._active_graph.get_node_sku_features()
             else:
-                node_continuous, node_categorical = self.graph_state.get_node_features_complete()
+                node_continuous, node_categorical = self._active_graph.get_node_features_complete()
 
                 node_sku_features, node_sku_mask = (None, None)
         except Exception:
@@ -884,15 +915,15 @@ class GAPOTaskAssignmentEnv:
             padded[:, :cols] = node_categorical[:, :cols].astype(np.int64)
             node_categorical = padded
 
-        edge_features_orig, edge_node_indices_orig = self.graph_state.get_edge_features_complete()
+        edge_features_orig, edge_node_indices_orig = self._active_graph.get_edge_features_complete()
 
         edge_features = np.vstack([edge_features_orig, edge_features_orig])
         edge_node_indices = np.vstack([edge_node_indices_orig, edge_node_indices_orig[:, [1, 0]]])
 
         edge_index = self._build_edge_index()
 
-        robot_features = []
-        robot_positions = []
+        robot_features: list[list[float] | np.ndarray] = []
+        robot_positions: list[list[float]] = []
 
         for robot in self.robots:
             if robot.telemetry:
@@ -943,12 +974,14 @@ class GAPOTaskAssignmentEnv:
                 robot_features.append(np.zeros(19))
                 robot_positions.append([0.0, 0.0])
 
-        robot_features = np.array(robot_features, dtype=np.float32)
-        robot_positions = np.array(robot_positions, dtype=np.float32)
+        robot_feature_array = np.array(robot_features, dtype=np.float32)
+        robot_position_array = np.array(robot_positions, dtype=np.float32)
 
         if self.pending_tasks:
             num_pending = len(self.pending_tasks)
-            avg_priority = np.mean([t.get_current_time_to_stockout() for t in self.pending_tasks])
+            avg_priority = float(
+                np.mean([t.get_current_time_to_stockout() for t in self.pending_tasks])
+            )
             num_urgent = sum(
                 1 for t in self.pending_tasks if t.get_current_time_to_stockout() < 1.0
             )
@@ -1035,8 +1068,8 @@ class GAPOTaskAssignmentEnv:
             "edge_features": edge_features,
             "edge_node_indices": edge_node_indices,
             "edge_index": edge_index,
-            "robot_features": robot_features,
-            "robot_positions": robot_positions,
+            "robot_features": robot_feature_array,
+            "robot_positions": robot_position_array,
             "queue_features": queue_features,
         }
 
@@ -1044,8 +1077,8 @@ class GAPOTaskAssignmentEnv:
         """Sum edge distances along a planned path (list of node indices)."""
         if not path or len(path) < 2:
             return 0.0
-        nodes = self.graph_state.nodes
-        edge_lookup = {(e.from_node, e.to_node): e.distance_m for e in self.graph_state.edges}
+        nodes = self._active_graph.nodes
+        edge_lookup = {(e.from_node, e.to_node): e.distance_m for e in self._active_graph.edges}
         total = 0.0
         for from_idx, to_idx in zip(path, path[1:]):
             key = (nodes[from_idx].node_id, nodes[to_idx].node_id)
@@ -1056,7 +1089,7 @@ class GAPOTaskAssignmentEnv:
         """Build edge connectivity matrix from graph edges."""
         edge_index = []
 
-        for edge in self.graph_state.edges:
+        for edge in self._active_graph.edges:
             from_idx = self._find_node_index(edge.from_node)
             to_idx = self._find_node_index(edge.to_node)
 
@@ -1070,13 +1103,13 @@ class GAPOTaskAssignmentEnv:
             return np.array([[i, i] for i in range(self.num_nodes)], dtype=np.int64).T
 
     def _find_node_index(self, node_id: str) -> Optional[int]:
-        for i, node in enumerate(self.graph_state.nodes):
+        for i, node in enumerate(self._active_graph.nodes):
             if node.node_id == node_id:
                 return i
         return None
 
     def _update_edge_congestion(self):
-        for edge in self.graph_state.edges:
+        for edge in self._active_graph.edges:
             edge.active_robot_ids.clear()
             edge.active_robot_progress.clear()
             edge.approaching_robot_count = 0
@@ -1084,7 +1117,7 @@ class GAPOTaskAssignmentEnv:
         # Clear node occupancy so it is rebuilt fresh each step.
         # node.add_robot / remove_robot are never called incrementally, so we
         # reconstruct from telemetry here — the same pattern used for edges above.
-        for node in self.graph_state.nodes:
+        for node in self._active_graph.nodes:
             node.current_robot_ids.clear()
 
         for robot, simulator in zip(self.robots, self.robot_simulators):
@@ -1092,8 +1125,8 @@ class GAPOTaskAssignmentEnv:
                 continue
             if robot.telemetry.is_on_edge:
                 edge_idx = robot.telemetry.current_edge_index
-                if edge_idx is not None and 0 <= edge_idx < len(self.graph_state.edges):
-                    edge = self.graph_state.edges[edge_idx]
+                if edge_idx is not None and 0 <= edge_idx < len(self._active_graph.edges):
+                    edge = self._active_graph.edges[edge_idx]
                     edge.active_robot_ids.append(robot.robot_id)
                     current_node = (
                         simulator.current_node_index
@@ -1116,17 +1149,17 @@ class GAPOTaskAssignmentEnv:
                     )
             else:
                 node_idx = robot.telemetry.current_node_index
-                if node_idx is not None and 0 <= node_idx < len(self.graph_state.nodes):
-                    self.graph_state.nodes[node_idx].add_robot(robot.robot_id)
+                if node_idx is not None and 0 <= node_idx < len(self._active_graph.nodes):
+                    self._active_graph.nodes[node_idx].add_robot(robot.robot_id)
 
-        for edge_idx, edge in enumerate(self.graph_state.edges):
+        for edge_idx, edge in enumerate(self._active_graph.edges):
             edge.approaching_robot_count = self._count_approaching_robots(edge_idx)
 
     def _find_nearest_node(self, x, y):
         min_dist = float("inf")
         nearest_idx = 0
 
-        for i, node in enumerate(self.graph_state.nodes):
+        for i, node in enumerate(self._active_graph.nodes):
             dist = np.sqrt((node.x - x) ** 2 + (node.y - y) ** 2)
             if dist < min_dist:
                 min_dist = dist
@@ -1135,8 +1168,10 @@ class GAPOTaskAssignmentEnv:
         return nearest_idx
 
     def _collect_traversal_records(self):
-        all_records = []
+        all_records: list[EdgeTraversalRecord] = []
         for simulator in self.robot_simulators:
+            if simulator is None:
+                continue
             records = simulator.get_and_clear_traversal_records()
             all_records.extend(records)
 
@@ -1151,7 +1186,7 @@ class GAPOTaskAssignmentEnv:
             if task.task_type == "replenishment":
                 keys.add((task.sku_id, task.to_location_index))
 
-        parent_to_destination = {}
+        parent_to_destination: dict[int, tuple[str | None, int | None]] = {}
 
         for robot in self.robots:
             for task in robot.task_queue:
@@ -1190,9 +1225,9 @@ class GAPOTaskAssignmentEnv:
 
     def _count_approaching_robots(self, edge_index: int, exclude_robot_id: int = -1) -> int:
         """Count robots with the given edge in their planned path but not currently on it."""
-        if edge_index is None or not (0 <= edge_index < len(self.graph_state.edges)):
+        if edge_index is None or not (0 <= edge_index < len(self._active_graph.edges)):
             return 0
-        edge = self.graph_state.edges[edge_index]
+        edge = self._active_graph.edges[edge_index]
         count = 0
         for robot in self.robots:
             if robot.robot_id == exclude_robot_id:
@@ -1201,8 +1236,8 @@ class GAPOTaskAssignmentEnv:
             if not path or len(path) < 2:
                 continue
             for i in range(len(path) - 1):
-                from_id = self.graph_state.nodes[path[i]].node_id
-                to_id = self.graph_state.nodes[path[i + 1]].node_id
+                from_id = self._active_graph.nodes[path[i]].node_id
+                to_id = self._active_graph.nodes[path[i + 1]].node_id
                 if (edge.from_node == from_id and edge.to_node == to_id) or (
                     edge.from_node == to_id and edge.to_node == from_id
                 ):
@@ -1213,14 +1248,14 @@ class GAPOTaskAssignmentEnv:
     def _get_hub_node_indices(self) -> list:
         """Get indices of all charge-point nodes in the graph."""
         return [
-            i for i, n in enumerate(self.graph_state.nodes) if n.node_type in ("hub", "storage")
+            i for i, n in enumerate(self._active_graph.nodes) if n.node_type in ("hub", "storage")
         ]
 
     def _should_robot_charge(self, robot_id: int) -> bool:
         """Check if robot battery is below threshold to reach nearest hub."""
         if robot_id in self._offline_robots:
             return False
-        simulator = self.robot_simulators[robot_id]
+        simulator = self._require_simulator(robot_id)
         robot = self.robots[robot_id]
         hub_indices = self._get_hub_node_indices()
         if not hub_indices:
@@ -1261,7 +1296,7 @@ class GAPOTaskAssignmentEnv:
         # sets active_task_id = -1. Tasks stay in robot.task_queue so they
         # auto-resume once the charge trip completes.
         robot = self.robots[robot_id]
-        simulator = self.robot_simulators[robot_id]
+        simulator = self._require_simulator(robot_id)
         if self.fleet_event_logger:
             hub_idx = self._nearest_hub_index(robot_id)
             queued_ids = [t.task_id for t in robot.task_queue]
@@ -1288,18 +1323,20 @@ class GAPOTaskAssignmentEnv:
     def _send_robot_to_charge(self, robot_id: int):
         """Route robot to nearest hub to charge."""
         robot = self.robots[robot_id]
-        simulator = self.robot_simulators[robot_id]
+        simulator = self._require_simulator(robot_id)
         hub_idx = self._nearest_hub_index(robot_id)
 
         start_node = robot.current_node_index
         if start_node is None:
+            if robot.telemetry is None:
+                raise RuntimeError("Robot telemetry is required to plan a path")
             start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
 
         path, _ = dijkstra_shortest_path(
             start_node,
             hub_idx,
             self.graph_state,
-            len(self.graph_state.nodes),
+            len(self._active_graph.nodes),
             edge_cost_manager=self.edge_cost_manager,
             all_robots=self.robots,
         )
@@ -1331,7 +1368,9 @@ class GAPOTaskAssignmentEnv:
             self.fleet_event_logger.log_robot_offline(
                 robot_id=robot_id,
                 sim_time=self.current_time,
-                battery_level=simulator.battery_level,
+                battery_level=simulator.battery_level
+                if simulator is not None
+                else robot.battery_level,
                 current_node=robot.current_node_index,
                 requeued_task_ids=requeued_ids,
                 emergency_task_ids=emergency_ids,
@@ -1343,11 +1382,12 @@ class GAPOTaskAssignmentEnv:
         robot.planned_path.clear()
         robot.target_node_index = None
 
-        simulator.path_queue.clear()
-        simulator.current_target_node = None
-        simulator.velocity_ms = 0.0
-        simulator.active_task_id = None
-        simulator.is_charging = False
+        if simulator is not None:
+            simulator.path_queue.clear()
+            simulator.current_target_node = None
+            simulator.velocity_ms = 0.0
+            simulator.active_task_id = None
+            simulator.is_charging = False
 
         self._offline_robots.add(robot_id)
         self._robots_routing_to_charge.discard(robot_id)

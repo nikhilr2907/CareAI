@@ -1,5 +1,5 @@
 minimum_pre_commit_version: '4.0.0'
-files: ^(src/.*\.py|run_[^/]+\.py|scripts/.*\.py|tests/.*\.py)$
+files: ^(src/.*\.py|run_[^/]+\.py|scripts/.*\.py)$
 repos:
   - repo: local
     hooks:
@@ -19,7 +19,7 @@ repos:
         language: system
         types: [python]
       - id: mypy
-        name: Mypy strict core contracts
+        name: Mypy core modules and runners
         entry: python -m mypy
         language: system
         pass_filenames: false

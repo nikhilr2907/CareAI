@@ -5,8 +5,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+class _TaskExecutionMetrics:
+    distance_traveled: float
+    energy_consumed_wh: float
+
+
 @dataclass
-class Task:
+class Task(_TaskExecutionMetrics):
     task_id: int
     from_location_index: int  # Node index
     to_location_index: int  # Node index

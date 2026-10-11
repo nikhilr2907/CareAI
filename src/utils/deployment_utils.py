@@ -196,7 +196,7 @@ def draw_nodes(screen, graph_state, bounds, width, height, font):
 
     # Place labels in a second pass so they avoid both node geometry and each other.
     blocked_rects = [rect.inflate(10, 10) for _, _, _, _, _, _, rect in node_draw_data]
-    occupied_label_rects = []
+    occupied_label_rects: list[pygame.Rect] = []
     for node, x, y, w, h, _, _ in sorted(node_draw_data, key=lambda t: (t[2], t[1])):
         name_text = _short_label(_node_label(node), max_len=18)
         label = font.render(name_text, True, (37, 50, 63))
