@@ -1,9 +1,24 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TypedDict
+
+
+class SKUInventory(TypedDict, total=False):
+    stock: float
+    par: float
+    reorder: float
+    max: float
+    category: str
+    area_multiplier: float
+
+
+class _GraphNodeAliases:
+    x: float
+    y: float
+    display_name: str
 
 
 @dataclass
-class GraphNode:
+class GraphNode(_GraphNodeAliases):
     # 1. Basic Identification
     node_id: str  # e.g., "Ward_10817" or "Hub_Area_A" [cite: 89, 243]
     node_type: str  # e.g., 'storage', 'corridor', 'recovery', 'hub' [cite: 216, 259, 268]
@@ -65,7 +80,7 @@ class GraphNode:
     consumption_enabled: bool = True  # Point-of-use locations only
 
     # SKU-level inventory: sku_id -> {stock, par, reorder, max, category, area_multiplier}
-    sku_inventory: Dict[str, Dict] = field(default_factory=dict)
+    sku_inventory: Dict[str, SKUInventory] = field(default_factory=dict)
 
     def __post_init__(self):
         """Initialize backwards compatibility fields (x, y as aliases for center_x, center_y)."""

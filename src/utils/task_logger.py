@@ -1,10 +1,70 @@
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypedDict
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+class CompletionStats(TypedDict):
+    completed: int
+    robots: defaultdict[int, int]
+
+
+class SourceCounts(TypedDict):
+    assigned: int
+    completed: int
+
+
+class TaskMetadata(TypedDict):
+    iteration: int
+    arrival_time: float
+    from_location_idx: int
+    to_location_idx: int | None
+    assigned_robot: int
+    assignment_reward: float
+    sim_time_assigned: float
+    deadline: float | None
+    num_items: int | None
+    estimated_duration: float | None
+    initial_tts: float | None
+    current_tts: float
+    sku_id: str | None
+    sku_stock_level_at_assign: float | None
+    sku_max_level: float | None
+    reorder_point: float | None
+    par_level: float | None
+    source: str
+    task_type: str | None
+    leg_type: str | None
+    learned_score: float
+
+
+class CostRecord(TypedDict):
+    task_id: int
+    source: str
+    robot: int
+    distance_traveled: float
+    robot_hours: float
+    energy_consumed: float
+    total_cost: float
+    completion_reward: float
+    total_reward: float
+    cost_per_reward: float
+    sim_time: float
+    latency: float | None
+    arrival_time: float | None
+    from_location_idx: int | None
+    to_location_idx: int | None
+    task_type: str | None
+    leg_type: str
+    iteration: int | None
+    stock_at_assign: float | None
+    stock_at_completion: float | None
+    sku_max_level: float | None
+    sim_time_assigned: float | None
+    execution_start_time: float | None
 
 
 class TaskLogger:
@@ -28,15 +88,17 @@ class TaskLogger:
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
 
-        self.task_metadata = {}  # (task_id, leg_type) -> metadata; leg_type defaults to 'full' for non-split tasks
-        self.iteration_assignments = defaultdict(list)  # iter -> [robot_ids]
-        self.iteration_completions = defaultdict(
+        self.task_metadata: dict[tuple[int, str], TaskMetadata] = {}
+        self.iteration_assignments: defaultdict[int, list[int]] = defaultdict(list)
+        self.iteration_completions: defaultdict[int, CompletionStats] = defaultdict(
             lambda: {"completed": 0, "robots": defaultdict(int)}
-        )  # iter -> stats
-        self.source_breakdown = defaultdict(lambda: {"assigned": 0, "completed": 0})
-        self.cost_data = []  # List of {'source', 'reward', 'distance', 'robot_hours', 'energy', 'total_cost', 'cost_per_reward'}
+        )
+        self.source_breakdown: defaultdict[str, SourceCounts] = defaultdict(
+            lambda: {"assigned": 0, "completed": 0}
+        )
+        self.cost_data: list[CostRecord] = []
         # Dropoff completions per destination
-        self.location_visit_counts = defaultdict(int)
+        self.location_visit_counts: defaultdict[int, int] = defaultdict(int)
 
     @staticmethod
     def _format_stock_snapshot(label: str, stock_level, max_level) -> str:
@@ -365,7 +427,7 @@ class TaskLogger:
         total_assigned_all = sum(len(self.iteration_assignments[i]) for i in range(iteration + 1))
 
         total_completed_all = 0
-        robot_totals = defaultdict(int)
+        robot_totals: defaultdict[int, int] = defaultdict(int)
 
         for i in range(iteration + 1):
             if i in self.iteration_completions:
@@ -439,7 +501,7 @@ class TaskLogger:
     def _plot_source_breakdown(self, iterations, output_dir):
         """Plot source breakdown (deterministic/factoriser/fallback) over iterations."""
         sources = sorted(self.source_breakdown.keys())
-        source_by_iter = {source: [] for source in sources}
+        source_by_iter: dict[str, list[int]] = {source: [] for source in sources}
 
         for it in iterations:
             for source in sources:
@@ -527,7 +589,7 @@ class TaskLogger:
     def _plot_ac_ratio_and_robots(self, iterations, output_dir):
         """Plot A:C ratio trend and final robot utilization breakdown."""
         ac_ratios = []
-        robot_totals = defaultdict(int)
+        robot_totals: defaultdict[int, int] = defaultdict(int)
 
         for it in iterations:
             if it in self.iteration_completions:
@@ -568,7 +630,7 @@ class TaskLogger:
 
         robots = sorted(robot_totals.keys())
         completions = [robot_totals[r] for r in robots]
-        colors_robot = plt.cm.Set3(np.linspace(0, 1, len(robots)))
+        colors_robot = plt.get_cmap("Set3")(np.linspace(0, 1, len(robots)))
 
         bars = ax2.bar([f"R{r}" for r in robots], completions, color=colors_robot, alpha=0.8)
         ax2.set_ylabel("Total Completions", fontsize=11)
@@ -596,7 +658,9 @@ class TaskLogger:
         if not self.cost_data:
             return
 
-        source_costs = defaultdict(lambda: {"costs": [], "rewards": [], "cost_per_reward": []})
+        source_costs: defaultdict[str, dict[str, list[float]]] = defaultdict(
+            lambda: {"costs": [], "rewards": [], "cost_per_reward": []}
+        )
         for entry in self.cost_data:
             source = entry["source"]
             source_costs[source]["costs"].append(entry["total_cost"])
@@ -647,8 +711,8 @@ class TaskLogger:
                 fontsize=9,
             )
 
-        cost_components = defaultdict(float)
-        component_counts = defaultdict(int)
+        cost_components: defaultdict[str, float] = defaultdict(float)
+        component_counts: defaultdict[str, int] = defaultdict(int)
         for entry in self.cost_data:
             distance_cost = entry["distance_traveled"] * 0.5
             energy_cost = entry["energy_consumed"] * 0.10

@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -142,8 +142,15 @@ class GAPOPPO:
 
         # torch.compile: dynamic=True avoids recompiling for variable node/edge/robot counts; reduce-overhead speeds up policy_old inference.
         if torch.cuda.is_available():
-            self.policy_old = torch.compile(self.policy_old, mode="reduce-overhead", dynamic=True)
-            self.policy._forward_batched = torch.compile(self.policy._forward_batched, dynamic=True)
+            self.policy_old = cast(
+                GAPOPolicyNetwork,
+                torch.compile(self.policy_old, mode="reduce-overhead", dynamic=True),
+            )
+            setattr(
+                self.policy,
+                "_forward_batched",
+                torch.compile(self.policy._forward_batched, dynamic=True),
+            )
 
         self.MseLoss = nn.MSELoss()
 
@@ -169,14 +176,18 @@ class GAPOPPO:
         self.lambda_creation_factorizer = lambda_creation_factorizer
         self.lambda_creation_kl = lambda_creation_kl
         self.edge_cost_manager = edge_cost_manager
+        self.creation_optimizer: optim.Adam | None
         if task_creation_actor is not None:
             self.creation_optimizer = optim.Adam(task_creation_actor.parameters(), lr=lr_creation)
         else:
             self.creation_optimizer = None
 
     def select_action(
-        self, state_dict: Dict[str, np.ndarray], memory: Memory, robot_mask: np.ndarray = None
-    ) -> int:
+        self,
+        state_dict: Dict[str, np.ndarray],
+        memory: Memory,
+        robot_mask: np.ndarray | None = None,
+    ) -> tuple[int, list[float], float]:
         """Select an action using the current policy and record the experience into memory."""
         state_dict_tensor = self._state_dict_to_tensor(state_dict)
 
@@ -200,8 +211,8 @@ class GAPOPPO:
         return action, action_probs, entropy
 
     def select_action_no_store(
-        self, state_dict: Dict[str, np.ndarray], robot_mask: np.ndarray = None
-    ) -> Tuple[int, float, list, float]:
+        self, state_dict: Dict[str, np.ndarray], robot_mask: np.ndarray | None = None
+    ) -> tuple[int, float, list[float], float]:
         """Select a stochastic action without writing to a Memory buffer, for callers that may reject the assignment before committing it."""
         state_dict_tensor = self._state_dict_to_tensor(state_dict)
         if robot_mask is not None:
@@ -217,8 +228,8 @@ class GAPOPPO:
         return action, log_prob.item(), action_probs, entropy
 
     def select_action_greedy(
-        self, state_dict: Dict[str, np.ndarray], robot_mask: np.ndarray = None
-    ) -> int:
+        self, state_dict: Dict[str, np.ndarray], robot_mask: np.ndarray | None = None
+    ) -> tuple[int, list[float], float]:
         """Select an action greedily (for deployment/evaluation)."""
         state_dict_tensor = self._state_dict_to_tensor(state_dict)
 
@@ -369,7 +380,7 @@ class GAPOPPO:
 
         return loss
 
-    def update(self, memory: Memory, next_state_dict: Dict[str, np.ndarray] = None):
+    def update(self, memory: Memory, next_state_dict: Dict[str, np.ndarray] | None = None):
         """Update the policy using PPO with GAE advantages."""
         # Ensure policy is in train mode for gradient updates; policy_old stays in eval.
         self.policy.train()
@@ -386,7 +397,7 @@ class GAPOPPO:
                 sd["task_features"].detach() for sd in state_dict_tensors
             ]
 
-        robot_mask_tensors = []
+        robot_mask_tensors: list[torch.Tensor | None] = []
         for mask in memory.robot_masks:
             if mask is not None:
                 robot_mask_tensors.append(torch.tensor(mask, dtype=torch.bool).to(self.device))

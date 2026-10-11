@@ -31,7 +31,7 @@ def dijkstra_shortest_path(
         learned_costs = edge_cost_manager.predict_edge_costs(features)
         # learned_costs: [num_edges] — one per edge in graph_state.edges
 
-    adjacency = {i: [] for i in range(num_nodes)}
+    adjacency: dict[int, list[tuple[int, float]]] = {i: [] for i in range(num_nodes)}
     for edge_idx, edge in enumerate(graph_state.edges):
         from_idx = None
         to_idx = None
@@ -52,7 +52,7 @@ def dijkstra_shortest_path(
 
     distances = {i: float("inf") for i in range(num_nodes)}
     distances[start_node_idx] = 0.0
-    previous = {i: None for i in range(num_nodes)}
+    previous: dict[int, int | None] = {i: None for i in range(num_nodes)}
 
     pq = [(0.0, start_node_idx)]
 
@@ -82,7 +82,7 @@ def dijkstra_shortest_path(
         return [start_node_idx, goal_node_idx], euclidean_dist
 
     path = []
-    current = goal_node_idx
+    current: int | None = goal_node_idx
     while current is not None:
         path.append(current)
         current = previous[current]
@@ -267,6 +267,9 @@ def estimate_travel_distance(robot, target_node_idx: int, graph_state) -> float:
         # Find which node this edge leads to (closer to target)
         from_node_idx = get_node_index_by_id(edge.from_node, graph_state)
         to_node_idx = get_node_index_by_id(edge.to_node, graph_state)
+
+        if from_node_idx is None or to_node_idx is None:
+            raise ValueError("Corridor endpoints are not present in the graph")
 
         # Get distances from both ends of edge to target
         _, dist_from_end = dijkstra_shortest_path(to_node_idx, target_node_idx, graph_state)

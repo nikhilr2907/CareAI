@@ -118,7 +118,7 @@ class MockConfigParser:
         )
 
     def _extract_all_categories(self) -> List[str]:
-        category_set = set()
+        category_set: set[str] = set()
         for node in self.nodes:
             category_set.update(node.category_inventory.keys())
         return sorted(list(category_set))

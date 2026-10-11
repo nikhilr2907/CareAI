@@ -220,8 +220,8 @@ class GraphState:
             same_dir = 0.0
             opposite_dir = 0.0
             for _, (_, from_idx, to_idx) in edge.active_robot_progress.items():
-                from_id = idx_to_id.get(from_idx)
-                to_id = idx_to_id.get(to_idx)
+                from_id = idx_to_id.get(from_idx) if from_idx is not None else None
+                to_id = idx_to_id.get(to_idx) if to_idx is not None else None
                 if from_id == edge.from_node and to_id == edge.to_node:
                     same_dir += 1.0
                 else:

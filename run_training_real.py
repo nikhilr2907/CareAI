@@ -239,10 +239,10 @@ async def main():
     running_reward = 0.0
     iteration_rewards = []
     total_timesteps = 0
-    clip_fraction_history = deque(maxlen=50)
-    grad_norm_history = deque(maxlen=50)
-    entropy_history = deque(maxlen=50)
-    completion_time_history = deque(maxlen=1000)
+    clip_fraction_history: deque[float] = deque(maxlen=50)
+    grad_norm_history: deque[float] = deque(maxlen=50)
+    entropy_history: deque[float] = deque(maxlen=50)
+    completion_time_history: deque[float] = deque(maxlen=1000)
 
     log_gpu_memory(logger)
     state_dict = env.reset()

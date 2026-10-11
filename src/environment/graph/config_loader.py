@@ -5,18 +5,18 @@ from typing import Dict, List, Tuple
 
 from .extended_config_parser import ExtendedConfigParser
 from .mock_config_parser import MockConfigParser
-from .node import GraphNode
+from .node import GraphNode, SKUInventory
 
 logger = logging.getLogger(__name__)
 
 
 def load_config_from_file(config_path: str) -> Tuple[List[GraphNode], List[Tuple[int, int]], Dict]:
     """Load a config file and return nodes, edges, and metadata."""
-    config_path = Path(config_path)
-    if not config_path.exists():
+    config_file = Path(config_path)
+    if not config_file.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_path, "r") as f:
+    with open(config_file, "r") as f:
         raw_data = json.load(f)
 
     version = raw_data.get("metadata", {}).get("version", "")
@@ -77,7 +77,7 @@ def _build_category_multipliers(raw_data: Dict) -> Dict[str, Dict[str, float]]:
         .get("demand_profiles", {})
         .get("department_category_multipliers", {})
     )
-    multipliers = {}
+    multipliers: dict[str, dict[str, float]] = {}
     for dept, cats in raw.items():
         if not isinstance(cats, dict):
             continue
@@ -175,7 +175,7 @@ def _load_v3_config(raw_data: Dict) -> Tuple[List[GraphNode], List[Tuple[int, in
         )
         node.display_name = node_data.get("name", node.node_id)
 
-        sku_inventory = {}
+        sku_inventory: dict[str, SKUInventory] = {}
         for loc_id in location_ids:
             for shelf in shelves_by_location.get(loc_id, []):
                 for bin_data in shelf.get("sku_bins", []):

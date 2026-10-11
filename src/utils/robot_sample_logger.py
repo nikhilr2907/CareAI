@@ -1,6 +1,34 @@
 import logging
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, NotRequired, Optional, TypedDict
+
+
+class RobotSample(TypedDict):
+    robot_id: int
+    sim_time: float
+    status: str
+    x: float
+    y: float
+    current_node_index: int | None
+    current_edge_index: int | None
+    edge_progress: float | None
+    velocity_ms: float | None
+    battery_level: float | None
+    current_load: int | None
+    task_queue_len: int
+    overflow_queue_len: int
+    is_charging: bool
+    is_available: bool
+    target_node_index: int | None
+    remaining_path_len: int
+    eta_to_next_node: float | None
+    task_id: int | None
+    leg_type: str | None
+    task_type: str | None
+    task_age: float | None
+    leg_time: float | None
+    iteration: NotRequired[int | None]
+    step: NotRequired[int | None]
 
 
 class RobotSampleLogger:
@@ -51,7 +79,7 @@ class RobotSampleLogger:
             return "ACTIVE"
         return "WAITING_AT_LOCATION"
 
-    def build_sample(self, robot, sim_time: float) -> dict:
+    def build_sample(self, robot, sim_time: float) -> RobotSample:
         """Build one execution-state sample for a single robot."""
         telemetry = getattr(robot, "telemetry", None)
         current_task = getattr(robot, "current_task", None)
@@ -119,7 +147,7 @@ class RobotSampleLogger:
             "leg_time": leg_time,
         }
 
-    def format_sample(self, sample: dict) -> str:
+    def format_sample(self, sample: RobotSample) -> str:
         """Format a robot sample as a single log line."""
         iter_str = f"iter={sample['iteration']} " if sample.get("iteration") is not None else ""
         step_str = f"step={sample['step']} " if sample.get("step") is not None else ""
@@ -148,7 +176,9 @@ class RobotSampleLogger:
             f"leg_time={self._fmt_float(sample.get('leg_time'), 1)}s"
         )
 
-    def log_sample(self, robot, sim_time: float, iteration: int = None, step: int = None) -> dict:
+    def log_sample(
+        self, robot, sim_time: float, iteration: int | None = None, step: int | None = None
+    ) -> RobotSample:
         """Log one execution-state sample for a single robot."""
         sample = self.build_sample(robot, sim_time)
         sample["iteration"] = iteration
@@ -157,7 +187,11 @@ class RobotSampleLogger:
         return sample
 
     def log_samples(
-        self, robots: Iterable, sim_time: float, iteration: int = None, step: int = None
+        self,
+        robots: Iterable,
+        sim_time: float,
+        iteration: int | None = None,
+        step: int | None = None,
     ):
         """Log one sample line per robot."""
         for robot in robots:

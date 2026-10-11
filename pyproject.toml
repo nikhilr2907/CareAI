@@ -13,25 +13,22 @@ indent-style = "space"
 
 [tool.mypy]
 python_version = "3.13"
-files = [
-    "src/exceptions.py",
-    "src/environment/robot/robot_telemetry.py",
-    "src/environment/tasks/task_state.py",
-    "src/environment/graph/edge.py",
-    "src/analytics/metrics/helpers.py",
-    "scripts/check_conventions.py",
-    "tests/test_core_contracts.py",
-]
+files = ["src", "scripts", "run_training.py", "run_training_real.py", "run_deployment.py", "run_real_deployment.py"]
+check_untyped_defs = true
 follow_imports = "silent"
-strict = true
 show_error_codes = true
 pretty = true
 
 [[tool.mypy.overrides]]
-module = ["torch.*", "torch_geometric.*", "pygame.*", "matplotlib.*", "pandas.*", "plotly.*", "seaborn.*", "scipy.*", "sklearn.*"]
+module = ["torch.*", "torch_geometric.*", "pygame.*", "matplotlib.*", "pandas.*", "plotly.*", "seaborn.*", "scipy.*", "sklearn.*", "websockets.*", "numpy.*"]
 ignore_missing_imports = true
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-ra"
-pythonpath = ["."]
+[[tool.mypy.overrides]]
+module = ["src.exceptions", "src.environment.robot.robot_telemetry", "src.environment.tasks.task_state", "src.environment.graph.edge", "src.analytics.metrics.helpers", "scripts.check_conventions"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true

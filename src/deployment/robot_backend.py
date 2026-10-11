@@ -49,7 +49,7 @@ class RobotBackend(ABC):
     """Abstract adapter contract for robot communication backends (mock, WebSocket bridge, MQTT, ...), not the ROS bridge node itself."""
 
     @abstractmethod
-    def get_telemetry(self, robot_id: int) -> RobotTelemetryData:
+    def get_telemetry(self, robot_id: int) -> RobotTelemetryData | None:
         pass
 
     @abstractmethod

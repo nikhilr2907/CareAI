@@ -29,7 +29,7 @@ class GraphEdge:
     has_patient_bed: bool = False  # True if a bed is currently passing [cite: 421]
     people_count: int = 0  # Estimated number of people in corridor
     approaching_robot_count: int = 0  # Robots with this edge in their planned path
-    active_robot_progress: dict[int, tuple[float, int, int]] = field(
+    active_robot_progress: dict[int, tuple[float, int | None, int | None]] = field(
         default_factory=dict
     )  # robot_id -> (progress, from_idx, to_idx)
 
@@ -59,7 +59,7 @@ class GraphEdge:
         """Count pairs of robots traveling in opposite directions on this edge."""
         if len(self.active_robot_progress) < 2:
             return 0
-        directions: dict[tuple[int, int], int] = {}
+        directions: dict[tuple[int | None, int | None], int] = {}
         for rid, (prog, fidx, tidx) in self.active_robot_progress.items():
             key = (fidx, tidx)
             directions.setdefault(key, 0)

@@ -1,7 +1,7 @@
 import json
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import List
+from typing import List, Literal, TypedDict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,6 +10,38 @@ from src.environment.graph.node import GraphNode
 
 # Type hints for objects we'll receive
 from src.environment.robot.robot_state import RobotState
+from src.utils.robot_sample_logger import RobotSample
+
+
+class StockoutStats(TypedDict):
+    stockout_count: int
+    time_to_restock: dict[str, float]
+
+
+class StockoutSummary(TypedDict, total=False):
+    total: int
+    by_pair: dict[str, StockoutStats]
+    by_zone: dict[str, StockoutStats]
+    by_category: dict[str, StockoutStats]
+
+
+class ReplenishmentLag(TypedDict, total=False):
+    mean: float
+    max: float
+    total: dict[str, float]
+    queue_wait: dict[str, float]
+    assign_to_exec: dict[str, float]
+    execution: dict[str, float]
+
+
+class MetricsSnapshot(TypedDict, total=False):
+    latency: dict[str, float]
+    utilization: dict[str, int]
+    replenishment_lag: ReplenishmentLag
+    cost: dict[str, float]
+    sku_demand: dict[str, float]
+    stockouts: StockoutSummary
+    zone_latency: dict
 
 
 class RealtimeAnalyticsCollector:
@@ -33,15 +65,17 @@ class RealtimeAnalyticsCollector:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.nodes = None  # Set by initialize()
+        self.nodes: list[GraphNode] | None = None  # Set by initialize()
 
         # Keep only a bounded recent window of robot samples per robot in memory.
-        self.robot_samples = defaultdict(lambda: deque(maxlen=1000))
+        self.robot_samples: defaultdict[int, deque[RobotSample]] = defaultdict(
+            lambda: deque(maxlen=1000)
+        )
 
         self.current_iteration = 0
 
         # Aggregated metrics (updated per _update_metrics())
-        self.metrics = {
+        self.metrics: MetricsSnapshot = {
             "latency": {"p50": 0, "p95": 0, "p99": 0, "mean": 0},
             "utilization": {"idle": 0, "active": 0, "waiting": 0},
             "replenishment_lag": {"mean": 0, "max": 0},
@@ -49,7 +83,11 @@ class RealtimeAnalyticsCollector:
         }
 
     def record_robot_telemetry(
-        self, robots: List[RobotState], current_time: float, iteration: int = None, step: int = None
+        self,
+        robots: List[RobotState],
+        current_time: float,
+        iteration: int | None = None,
+        step: int | None = None,
     ):
         """Sample robot telemetry from RobotState + RobotTelemetry, called periodically during training (e.g. every 10 steps)."""
         if self.robot_sample_logger is None:
@@ -113,7 +151,7 @@ class RealtimeAnalyticsCollector:
     def _compute_utilization(self):
         if not self.robot_samples:
             return
-        statuses = defaultdict(int)
+        statuses: defaultdict[str, int] = defaultdict(int)
         for sample in self._iter_robot_samples():
             statuses[sample["status"]] += 1
         self.metrics["utilization"] = {
@@ -199,7 +237,7 @@ class RealtimeAnalyticsCollector:
             return
 
         # Sorted so we can find the first restock after a stockout via a simple scan.
-        restock_times = defaultdict(list)
+        restock_times: defaultdict[tuple[int, str], list[float]] = defaultdict(list)
         for ev in restocks:
             restock_times[(ev["node_idx"], ev["sku_id"])].append(ev["sim_time"])
         for times in restock_times.values():
@@ -218,8 +256,8 @@ class RealtimeAnalyticsCollector:
             }
 
         # Level 1: per (node_tag, sku_id) — identifies chronic offenders and their restock speed.
-        pair_counts = defaultdict(int)
-        pair_ttr = defaultdict(list)
+        pair_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
+        pair_ttr: defaultdict[tuple[str, str], list[float]] = defaultdict(list)
 
         for ev in stockouts:
             pair_key = (ev["node_tag"], ev["sku_id"])
@@ -233,7 +271,7 @@ class RealtimeAnalyticsCollector:
                 pair_ttr[pair_key].append(min(future) - t_out)
 
         # Sort by stockout frequency descending so the worst offenders are first
-        by_pair = {
+        by_pair: dict[str, StockoutStats] = {
             f"{sku_id}@{node_tag}": {
                 "stockout_count": pair_counts[(node_tag, sku_id)],
                 "time_to_restock": _agg(pair_ttr.get((node_tag, sku_id), [])),
@@ -242,14 +280,14 @@ class RealtimeAnalyticsCollector:
         }
 
         # Level 2: per zone — reveals whether one hospital area is systematically under-served; needs nodes (initialize()).
-        by_zone = {}
+        by_zone: dict[str, StockoutStats] = {}
         if self.nodes:
             from src.analytics.metrics import MetricHelpers
 
             helpers = MetricHelpers(self.nodes)
 
-            zone_counts = defaultdict(int)
-            zone_ttr = defaultdict(list)
+            zone_counts: defaultdict[str, int] = defaultdict(int)
+            zone_ttr: defaultdict[str, list[float]] = defaultdict(list)
 
             for ev in stockouts:
                 zone_label = helpers.quadrant_label(helpers.get_location_quadrant(ev["node_idx"]))
@@ -270,8 +308,8 @@ class RealtimeAnalyticsCollector:
             }
 
         # Level 3: per category — category is stored directly on each event, no extra lookup needed.
-        cat_counts = defaultdict(int)
-        cat_ttr = defaultdict(list)
+        cat_counts: defaultdict[str, int] = defaultdict(int)
+        cat_ttr: defaultdict[str, list[float]] = defaultdict(list)
 
         for ev in stockouts:
             cat = ev.get("category") or "unknown"
@@ -283,7 +321,7 @@ class RealtimeAnalyticsCollector:
             if future:
                 cat_ttr[cat].append(min(future) - t_out)
 
-        by_category = {
+        by_category: dict[str, StockoutStats] = {
             cat: {
                 "stockout_count": cat_counts[cat],
                 "time_to_restock": _agg(cat_ttr.get(cat, [])),
@@ -378,7 +416,7 @@ class RealtimeAnalyticsCollector:
         if not self.robot_samples:
             return
 
-        statuses = defaultdict(int)
+        statuses: defaultdict[str, int] = defaultdict(int)
         for sample in self._iter_robot_samples():
             statuses[sample["status"]] += 1
 
@@ -410,7 +448,11 @@ class RealtimeAnalyticsCollector:
             return
 
         phases = ["Queue Wait", "Assign→Exec", "Execution"]
-        keys = ["queue_wait", "assign_to_exec", "execution"]
+        keys: list[Literal["queue_wait", "assign_to_exec", "execution"]] = [
+            "queue_wait",
+            "assign_to_exec",
+            "execution",
+        ]
         colors = ["#2E86AB", "#FFE66D", "#4ECDC4"]
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))

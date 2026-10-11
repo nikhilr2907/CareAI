@@ -47,7 +47,7 @@ class ExtendedNodeConfig:
     pos: tuple
     size: tuple
 
-    construction: NodeConstruction = None
+    construction: NodeConstruction | None = None
     inventory_categories: Dict[str, InventoryCategory] = field(default_factory=dict)
     storage_zones: Dict[str, List[str]] = field(default_factory=dict)
     patient_info: Dict = field(default_factory=dict)

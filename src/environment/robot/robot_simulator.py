@@ -100,12 +100,12 @@ class RobotSimulator:
 
         # ===== GRAPH POSITION =====
         self.current_node_index = initial_node_index
-        self.current_edge_index = None
+        self.current_edge_index: int | None = None
         self.edge_progress = 0.0
 
         # ===== MOTION PLANNING =====
-        self.path_queue = []  # List of node indices to visit
-        self.current_target_node = None
+        self.path_queue: list[int] = []  # List of node indices to visit
+        self.current_target_node: int | None = None
 
         # ===== RESOURCES =====
         self.battery_level = 1.0  # Start at 100%
@@ -118,7 +118,7 @@ class RobotSimulator:
         self.charging_rate = 0.001  # battery per second while docked
 
         # ===== TASK TRACKING =====
-        self.active_task_id = None
+        self.active_task_id: int | None = None
 
         # ===== TRAVERSAL TRACKING (for edge cost model) =====
         self.traversal_records: List[EdgeTraversalRecord] = []
@@ -271,6 +271,8 @@ class RobotSimulator:
 
             # Check if reached target node
             if self.edge_progress >= 1.0:
+                if self.current_target_node is None:
+                    raise RuntimeError("An active edge requires a target node")
                 self._arrive_at_node(self.current_target_node)
 
         return self.get_telemetry()

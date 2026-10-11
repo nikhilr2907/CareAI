@@ -250,12 +250,12 @@ def load_curriculum_from_configs(config_paths: List[str]) -> List[Tuple[str, str
     curriculum = []
 
     for config_path in config_paths:
-        config_path = Path(config_path)
-        if not config_path.exists():
+        config_file = Path(config_path)
+        if not config_file.exists():
             print(f"Warning: Config file not found: {config_path}, skipping...")
             continue
 
-        description = config_path.stem.replace("_", " ").title()
+        description = config_file.stem.replace("_", " ").title()
         curriculum.append((str(config_path), description))
 
     if not curriculum:
