@@ -3,6 +3,7 @@ from typing import List, Optional
 
 import numpy as np
 
+from ..graph import edge as edge_module
 from .robot_telemetry import RobotTelemetry
 
 
@@ -29,9 +30,15 @@ class EdgeTraversalRecord:
     approaching_robot_count: int = 0
     from_node_occupancy: int = 0
     to_node_occupancy: int = 0
+    equipment_equivalents: float = 0.0
+    emergency_active: bool = False
 
     # Time feature
     time_of_day: float = 0.0  # Normalized 0-1
+
+    is_lift: bool = False
+    floor_delta: int = 0
+    expected_duration_s: float = 0.0  # lift edges only
 
     # Accumulated during traversal
     stop_count: int = 0  # Number of times velocity dropped to ~0
@@ -43,6 +50,8 @@ class EdgeTraversalRecord:
 
     @property
     def base_traversal_time(self) -> float:
+        if self.is_lift:
+            return self.expected_duration_s
         if self.max_v_ms <= 0:
             return 0.0
         return self.distance_m / self.max_v_ms
@@ -78,6 +87,10 @@ class EdgeTraversalRecord:
                 self.from_node_occupancy,
                 self.to_node_occupancy,
                 self.time_of_day,
+                float(self.is_lift),
+                self.floor_delta,
+                self.equipment_equivalents if edge_module.INCLUDE_EQUIPMENT_EMERGENCY_FEATURES else 0.0,
+                float(self.emergency_active) if edge_module.INCLUDE_EQUIPMENT_EMERGENCY_FEATURES else 0.0,
             ],
             dtype=np.float32,
         )
@@ -124,6 +137,10 @@ class RobotSimulator:
         self.traversal_records: List[EdgeTraversalRecord] = []
         self._current_traversal: Optional[EdgeTraversalRecord] = None
 
+        # ===== LIFT TRANSIT (wait-for-lift + ride, not a distance/speed process) =====
+        self._transit_remaining_s: float | None = None
+        self._transit_total_s: float = 0.0
+
     def set_path(self, path: List[int], task_id: int, num_items: int):
         if len(path) > 1:
             self.path_queue = path[1:]  # Exclude current node
@@ -164,6 +181,13 @@ class RobotSimulator:
         # Start tracking traversal for edge cost model
         edge = self.graph_state.edges[self.current_edge_index]
 
+        if edge.is_lift():
+            self._transit_total_s = edge.sample_transit_duration_s()
+            self._transit_remaining_s = self._transit_total_s
+            self.velocity_ms = 0.0
+        else:
+            self._transit_remaining_s = None
+
         # Count directional robots on edge
         same_dir = 0
         opposite_dir = 0
@@ -198,6 +222,11 @@ class RobotSimulator:
             approaching_robot_count=approaching,
             from_node_occupancy=from_node_occ,
             to_node_occupancy=to_node_occ,
+            equipment_equivalents=edge.equipment_equivalents(),
+            emergency_active=edge.emergency_active,
+            is_lift=edge.is_lift(),
+            floor_delta=edge.floor_delta,
+            expected_duration_s=edge.expected_transit_duration_s() if edge.is_lift() else 0.0,
         )
 
     def update(self, time_delta: float) -> RobotTelemetry:
@@ -218,12 +247,11 @@ class RobotSimulator:
         ):
             # Robot is on an edge
             edge = self.graph_state.edges[self.current_edge_index]
-            num_active = max(1, len(edge.active_robot_ids))
-            corridor_capacity = 2
-            if num_active > corridor_capacity:
-                self.velocity_ms = self.max_velocity_ms * max(0.2, corridor_capacity / num_active)
-            else:
-                self.velocity_ms = self.max_velocity_ms
+
+            if self._transit_remaining_s is not None:
+                return self._update_lift_transit(time_delta)
+
+            self.velocity_ms = min(self.max_velocity_ms, edge.effective_speed())
             distance_traveled = self.velocity_ms * time_delta
 
             # Update progress
@@ -274,6 +302,22 @@ class RobotSimulator:
                 if self.current_target_node is None:
                     raise RuntimeError("An active edge requires a target node")
                 self._arrive_at_node(self.current_target_node)
+
+        return self.get_telemetry()
+
+    def _update_lift_transit(self, time_delta: float) -> RobotTelemetry:
+        """Advance a lift ride by elapsed time, not distance; position stays put until arrival."""
+        assert self._transit_remaining_s is not None
+        self._transit_remaining_s = max(0.0, self._transit_remaining_s - time_delta)
+        self.edge_progress = (
+            1.0 - self._transit_remaining_s / self._transit_total_s if self._transit_total_s > 0 else 1.0
+        )
+        self.velocity_ms = 0.0
+
+        if self._transit_remaining_s <= 0.0:
+            if self.current_target_node is None:
+                raise RuntimeError("An active edge requires a target node")
+            self._arrive_at_node(self.current_target_node)
 
         return self.get_telemetry()
 

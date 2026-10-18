@@ -212,9 +212,9 @@ class GraphState:
             exit_y = edge.exit_point[1] if edge.exit_point else 0.0
 
             base_cost = edge.distance_m / edge.max_v_ms
-            corridor_capacity = edge.corridor_width / 0.6
             num_active = float(len(edge.active_robot_ids))
-            congestion_factor = num_active / max(1.0, corridor_capacity)
+            corridor_capacity = edge.jam_density()
+            congestion_factor = edge.congestion_factor()  # matches simulator physics exactly
             is_congested = 1.0 if congestion_factor > 0.8 else 0.0
 
             same_dir = 0.0
@@ -389,9 +389,9 @@ class GraphState:
 
             base_cost = edge.distance_m / edge.max_v_ms
 
-            corridor_capacity = edge.corridor_width / 0.6  # Assume 60cm per robot
             num_active = len(edge.active_robot_ids)
-            congestion_factor = num_active / max(1.0, corridor_capacity)
+            corridor_capacity = edge.jam_density()
+            congestion_factor = edge.congestion_factor()  # matches simulator physics exactly
             is_congested = 1.0 if congestion_factor > 0.8 else 0.0
 
             edge_continuous = [

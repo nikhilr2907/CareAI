@@ -6,9 +6,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Feature vector index 0 is distance_m (excluded from the encoder); indices 1-8 are congestion features. Direction/stop-count fields were dropped: unknown pre-traversal, or post-traversal only.
-EDGE_COST_FEATURE_DIM = 9
-EDGE_COST_ENCODER_DIM = 8
+from ..environment.graph import edge as edge_module
+
+# Feature vector index 0 is distance_m (excluded from the encoder); indices 1-12 are congestion/lift features. Direction/stop-count fields were dropped: unknown pre-traversal, or post-traversal only.
+EDGE_COST_FEATURE_DIM = 13
+EDGE_COST_ENCODER_DIM = 12
 
 
 class LearnedEdgeCostModel(nn.Module):
@@ -72,7 +74,16 @@ class LearnedEdgeCostModel(nn.Module):
 
         # time = delay_factor * (distance / max_v); sim/config convention uses 0.5 m/s uniformly.
         distance = features[:, 0]
-        base_time = distance / 0.5
+        is_lift = features[:, 9]
+        floor_delta = features[:, 10]
+
+        # Lift edges aren't a distance/speed process -- approximate their baseline with the
+        # default wait+ride constants (mirrors GraphEdge's LIFT_WAIT_MU/SIGMA/RIDE_* defaults),
+        # since per-edge travel_time_model parameters aren't carried in the feature vector.
+        default_expected_wait_s = 336.8  # exp(1.6 + 0.5**2 / 2) * 60
+        lift_base_time = default_expected_wait_s + 25.0 * floor_delta.abs() + 15.0
+        corridor_base_time = distance / 0.5
+        base_time = torch.where(is_lift > 0.5, lift_base_time, corridor_base_time)
 
         if risk_sensitivity > 0.0:
             # Risk-adjusted: penalise edges with high variance in delay
@@ -319,6 +330,10 @@ class EdgeCostManager:
                     float(from_node_occ),
                     float(to_node_occ),
                     time_of_day,
+                    float(edge.is_lift()),
+                    float(edge.floor_delta),
+                    edge.equipment_equivalents() if edge_module.INCLUDE_EQUIPMENT_EMERGENCY_FEATURES else 0.0,
+                    float(edge.emergency_active) if edge_module.INCLUDE_EQUIPMENT_EMERGENCY_FEATURES else 0.0,
                 ]
             )
 

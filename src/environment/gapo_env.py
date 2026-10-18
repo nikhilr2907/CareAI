@@ -5,6 +5,9 @@ import numpy as np
 
 from ..multi_agent_ppo.learned_edge_cost import EdgeCostManager
 from ..multi_agent_ppo.task_creation_actor import TaskCreationActor
+from ..reliability.domain_randomization import CongestionRandomizer
+from ..reliability.emergency_events import EmergencyEventManager
+from ..reliability.equipment_traffic import EquipmentTrafficManager
 from ..reliability.telemetry_effects import TelemetryEffectsManager
 from ..utils.fleet_event_logger import FleetEventLogger
 from ..utils.sku_logger import SKULogger
@@ -109,6 +112,9 @@ class GAPOTaskAssignmentEnv:
         self.episode_break_stockouts = 0
 
         self.telemetry_noise_manager = TelemetryEffectsManager(enable=True, graph_bounds=None)
+        self.congestion_randomizer = CongestionRandomizer(enable=True)
+        self.emergency_event_manager = EmergencyEventManager(enable=True)
+        self.equipment_traffic_manager = EquipmentTrafficManager(enable=True)
         self.robot_reset_times: list[float] = []
         self.graph_bounds: tuple[float, float, float, float] | None = None
 
@@ -153,6 +159,13 @@ class GAPOTaskAssignmentEnv:
                 schedule.get("proactive_restock_lead_time_s", self.proactive_restock_lead_time_s)
             )
         self.episode_break_stockouts = 0
+
+        if self.current_time > 0:
+            success = len(self.completed_tasks) / max(
+                1, len(self.completed_tasks) + self.episode_stockouts
+            )
+            self.congestion_randomizer.record_episode_success(success)
+        self.congestion_randomizer.sample_and_apply(self._active_graph)
 
         self.robots = []
         self.robot_simulators = []
@@ -247,6 +260,9 @@ class GAPOTaskAssignmentEnv:
             self.last_inventory_check = self.current_time
 
         self._generate_stochastic_tasks(dt)
+
+        self.emergency_event_manager.update(self._active_graph, self.current_time, dt)
+        self.equipment_traffic_manager.update(self._active_graph, self.current_time, dt)
 
         self._update_edge_congestion()
 
@@ -460,7 +476,10 @@ class GAPOTaskAssignmentEnv:
             # Between nodes: snap to nearest node to plan from.
             if robot.telemetry is None:
                 raise RuntimeError("Robot telemetry is required to plan a path")
-            start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
+            current_floor = self._active_graph.nodes[simulator.current_node_index].floor
+            start_node = self._find_nearest_node(
+                robot.telemetry.x, robot.telemetry.y, floor=current_floor
+            )
 
         path, _ = dijkstra_shortest_path(
             start_node,
@@ -1229,11 +1248,15 @@ class GAPOTaskAssignmentEnv:
         for edge_idx, edge in enumerate(self._active_graph.edges):
             edge.approaching_robot_count = self._count_approaching_robots(edge_idx)
 
-    def _find_nearest_node(self, x, y):
+    def _find_nearest_node(self, x, y, floor: int | None = None):
+        """Nearest node to (x, y), restricted to `floor` when given so a multi-floor graph can't
+        snap a robot to a node directly below/above it on a different floor."""
         min_dist = float("inf")
         nearest_idx = 0
 
         for i, node in enumerate(self._active_graph.nodes):
+            if floor is not None and node.floor != floor:
+                continue
             dist = np.sqrt((node.x - x) ** 2 + (node.y - y) ** 2)
             if dist < min_dist:
                 min_dist = dist
@@ -1408,7 +1431,10 @@ class GAPOTaskAssignmentEnv:
         if start_node is None:
             if robot.telemetry is None:
                 raise RuntimeError("Robot telemetry is required to plan a path")
-            start_node = self._find_nearest_node(robot.telemetry.x, robot.telemetry.y)
+            current_floor = self._active_graph.nodes[simulator.current_node_index].floor
+            start_node = self._find_nearest_node(
+                robot.telemetry.x, robot.telemetry.y, floor=current_floor
+            )
 
         path, _ = dijkstra_shortest_path(
             start_node,
