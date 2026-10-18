@@ -21,6 +21,7 @@ class TelemetryPayload(TypedDict):
     eta_to_next_node: NotRequired[float]
     is_charging: NotRequired[bool]
     needs_charging: NotRequired[bool]
+    position_confidence: NotRequired[float]
 
 
 @dataclass
@@ -55,6 +56,7 @@ class RobotTelemetry:
     # ===== CHARGING STATE (with defaults) =====
     is_charging: bool = False  # Robot is docked and charging
     needs_charging: bool = False  # Dynamic threshold crossed, return to hub needed
+    position_confidence: float = 1.0  # 1.0 at a known landmark, decays with time since the last one
 
     @property
     def is_at_node(self) -> bool:
@@ -86,6 +88,7 @@ class RobotTelemetry:
             "eta_to_next_node": self.eta_to_next_node,
             "is_charging": self.is_charging,
             "needs_charging": self.needs_charging,
+            "position_confidence": self.position_confidence,
         }
 
     @classmethod
@@ -110,4 +113,5 @@ class RobotTelemetry:
             eta_to_next_node=data.get("eta_to_next_node", 0.0),
             is_charging=data.get("is_charging", False),
             needs_charging=data.get("needs_charging", False),
+            position_confidence=data.get("position_confidence", 1.0),
         )

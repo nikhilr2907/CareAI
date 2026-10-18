@@ -9,8 +9,8 @@ import torch.nn.functional as F
 from ..environment.graph import edge as edge_module
 
 # Feature vector index 0 is distance_m (excluded from the encoder); indices 1-12 are congestion/lift features. Direction/stop-count fields were dropped: unknown pre-traversal, or post-traversal only.
-EDGE_COST_FEATURE_DIM = 13
-EDGE_COST_ENCODER_DIM = 12
+EDGE_COST_FEATURE_DIM = 14
+EDGE_COST_ENCODER_DIM = 13
 
 
 class LearnedEdgeCostModel(nn.Module):
@@ -334,6 +334,7 @@ class EdgeCostManager:
                     float(edge.floor_delta),
                     edge.equipment_equivalents() if edge_module.INCLUDE_EQUIPMENT_EMERGENCY_FEATURES else 0.0,
                     float(edge.emergency_active) if edge_module.INCLUDE_EQUIPMENT_EMERGENCY_FEATURES else 0.0,
+                    float(edge.has_patient_bed),
                 ]
             )
 

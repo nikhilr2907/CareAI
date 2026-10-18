@@ -32,6 +32,7 @@ class EdgeTraversalRecord:
     to_node_occupancy: int = 0
     equipment_equivalents: float = 0.0
     emergency_active: bool = False
+    has_patient_bed: bool = False
 
     # Time feature
     time_of_day: float = 0.0  # Normalized 0-1
@@ -91,6 +92,7 @@ class EdgeTraversalRecord:
                 self.floor_delta,
                 self.equipment_equivalents if edge_module.INCLUDE_EQUIPMENT_EMERGENCY_FEATURES else 0.0,
                 float(self.emergency_active) if edge_module.INCLUDE_EQUIPMENT_EMERGENCY_FEATURES else 0.0,
+                float(self.has_patient_bed),
             ],
             dtype=np.float32,
         )
@@ -140,6 +142,9 @@ class RobotSimulator:
         # ===== LIFT TRANSIT (wait-for-lift + ride, not a distance/speed process) =====
         self._transit_remaining_s: float | None = None
         self._transit_total_s: float = 0.0
+
+        # ===== MOVEMENT FAILURES (per-robot hardware faults, independent of congestion) =====
+        self._stuck_remaining_s: float = 0.0
 
     def set_path(self, path: List[int], task_id: int, num_items: int):
         if len(path) > 1:
@@ -224,6 +229,7 @@ class RobotSimulator:
             to_node_occupancy=to_node_occ,
             equipment_equivalents=edge.equipment_equivalents(),
             emergency_active=edge.emergency_active,
+            has_patient_bed=edge.has_patient_bed,
             is_lift=edge.is_lift(),
             floor_delta=edge.floor_delta,
             expected_duration_s=edge.expected_transit_duration_s() if edge.is_lift() else 0.0,
@@ -252,6 +258,7 @@ class RobotSimulator:
                 return self._update_lift_transit(time_delta)
 
             self.velocity_ms = min(self.max_velocity_ms, edge.effective_speed())
+            self._apply_movement_failures(time_delta)
             distance_traveled = self.velocity_ms * time_delta
 
             # Update progress
@@ -320,6 +327,26 @@ class RobotSimulator:
             self._arrive_at_node(self.current_target_node)
 
         return self.get_telemetry()
+
+    _STUCK_TRIGGER_RATE_PER_S = 0.0005
+    _STUCK_DURATION_RANGE_S = (5.0, 20.0)
+    _SLIP_TRIGGER_PROB = 0.01
+    _SLIP_FACTOR = 0.8
+
+    def _apply_movement_failures(self, time_delta: float) -> None:
+        """Per-robot hardware faults (not congestion) layered on top of effective_speed()."""
+        if self._stuck_remaining_s > 0:
+            self._stuck_remaining_s = max(0.0, self._stuck_remaining_s - time_delta)
+            self.velocity_ms = 0.0
+            return
+
+        if self.velocity_ms > 0 and np.random.random() < self._STUCK_TRIGGER_RATE_PER_S * time_delta:
+            self._stuck_remaining_s = float(np.random.uniform(*self._STUCK_DURATION_RANGE_S))
+            self.velocity_ms = 0.0
+            return
+
+        if np.random.random() < self._SLIP_TRIGGER_PROB:
+            self.velocity_ms *= self._SLIP_FACTOR
 
     def _arrive_at_node(self, node_idx: int):
         # Finalize traversal record before clearing edge state

@@ -22,6 +22,9 @@ utilities/**
 !mkdocs.yml
 !.readthedocs.yaml
 
+# Local interview preparation (plans and demo visuals)
+/docs/bsa_*
+
 # Digital twin front end (local only)
 digital_twin/
 

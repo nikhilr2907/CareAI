@@ -245,7 +245,7 @@ def main():
         department_embedding_dim=16,
         shift_embedding_dim=4,
         day_type_embedding_dim=4,
-        robot_feat_dim=19,
+        robot_feat_dim=20,
         task_feat_dim=15,
         queue_feat_dim=16,
         sku_feat_dim=sku_feat_dim,

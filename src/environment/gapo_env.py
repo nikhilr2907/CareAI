@@ -170,6 +170,8 @@ class GAPOTaskAssignmentEnv:
         self.robots = []
         self.robot_simulators = []
         self.robot_reset_times = [self.current_time] * self.num_robots
+        for i in range(self.num_robots):
+            self.telemetry_noise_manager.reset_robot(i, current_time=self.current_time)
 
         for i in range(self.num_robots):
             initial_node = np.random.randint(0, self.num_nodes)
@@ -532,11 +534,14 @@ class GAPOTaskAssignmentEnv:
             telemetry.timestamp = self.current_time
 
             robot_id = simulator.robot_id
-            elapsed_minutes = (self.current_time - self.robot_reset_times[robot_id]) / 60.0
+            # At a node, position is exactly known -- resync continuously so dead-reckoning
+            # error doesn't accumulate while idle and only starts counting from departure.
+            if simulator.current_edge_index is None:
+                self.telemetry_noise_manager.mark_landmark(robot_id, self.current_time)
             num_nodes = len(self._active_graph.nodes) if self.graph_state else 0
             num_edges = len(self._active_graph.edges) if self.graph_state else 0
             noisy_telemetry = self.telemetry_noise_manager.apply_noise(
-                telemetry, elapsed_minutes, num_nodes=num_nodes, num_edges=num_edges
+                telemetry, self.current_time, dt_seconds=dt, num_nodes=num_nodes, num_edges=num_edges
             )
 
             if prev_edge_idx is not None and simulator.current_edge_index != prev_edge_idx:
@@ -1059,6 +1064,7 @@ class GAPOTaskAssignmentEnv:
                     float(len(remaining_path)),
                     float(target_node),
                     float(is_blocked),
+                    robot.telemetry.position_confidence,
                 ]
                 robot_features.append(feat)
                 robot_positions.append([robot.telemetry.x, robot.telemetry.y])

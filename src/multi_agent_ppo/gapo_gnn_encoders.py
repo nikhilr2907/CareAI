@@ -182,7 +182,7 @@ class GraphEncoder(nn.Module):
 class RobotFleetEncoder(nn.Module):
     """Encodes the robot fleet using a dynamic proximity graph."""
 
-    def __init__(self, robot_feat_dim=19, hidden_dim=64):
+    def __init__(self, robot_feat_dim=20, hidden_dim=64):
         super().__init__()
 
         self.hidden_dim = hidden_dim
@@ -328,7 +328,7 @@ def test_encoders():
     print("  Edge augmentation: 21 continuous + 64 from + 64 to = 149 dims")
 
     print("\n2. Robot Fleet Encoder")
-    robot_encoder = RobotFleetEncoder(robot_feat_dim=19, hidden_dim=64)
+    robot_encoder = RobotFleetEncoder(robot_feat_dim=20, hidden_dim=64)
 
     robot_features = torch.randn(5, 12)
     robot_positions = torch.randn(5, 2)
