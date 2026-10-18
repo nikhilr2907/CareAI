@@ -385,7 +385,9 @@ def assign_tasks(
     assignments = 0
     while env.pending_tasks and assignments < max_assignments:
         task = env.pending_tasks[0]
-        robot_mask = np.ones(env.num_robots, dtype=bool)
+        robot_mask = env.get_robot_availability_mask(task)
+        if not robot_mask.any():
+            break
 
         heuristic_action = select_nearest_robot(task, env.robots, env.graph_state, robot_mask)
 

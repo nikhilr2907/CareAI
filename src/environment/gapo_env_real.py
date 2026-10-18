@@ -197,7 +197,7 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
                         self.completed_tasks.append(completed_task)
 
                 # Plan next task with same demote guard as base class
-                if robot.current_task:
+                if robot.current_task and robot.robot_id not in self._robots_routing_to_charge:
                     _max_demotes = len(robot.task_queue)
                     _demotes = 0
                     while (

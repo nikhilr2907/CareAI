@@ -526,37 +526,22 @@ def run_evaluation(
         assignments_this_step = 0
         while eval_env.pending_tasks and assignments_this_step < max_assignments_per_step:
             task = eval_env.pending_tasks[0]
-            robot_mask = np.ones(eval_env.num_robots, dtype=bool)
+            robot_mask = eval_env.get_robot_availability_mask(task)
+            if not robot_mask.any():
+                break
             if use_baseline:
                 action = select_nearest_robot(
                     task, eval_env.robots, eval_env.graph_state, robot_mask
                 )
             else:
                 action, _, _ = policy.select_action_greedy(eval_env._get_state_dict(), robot_mask)
-            success = eval_env.assign_task_to_robot(action, task)
-            if not success:
-                # Primary robot rejected; retry with the nearest robot that's actually available.
-                other_available = [
-                    rid
-                    for rid in range(eval_env.num_robots)
-                    if rid != action
-                    and rid not in eval_env._offline_robots
-                    and not eval_env._should_robot_charge(rid)
-                ]
-                if other_available:
-                    fallback = select_nearest_robot(
-                        task, eval_env.robots, eval_env.graph_state, robot_mask
-                    )
-                    if fallback != action and not eval_env._should_robot_charge(fallback):
-                        success = eval_env.assign_task_to_robot(fallback, task)
-                if not success:
-                    break  # No robot available; stop assigning this step
-            if success:
-                eval_assignments += 1
-                assignments_this_step += 1
-                assigned_total += 1
-                if task.get_time_to_deadline(eval_env.current_time) < 0:
-                    late_at_assignment += 1
+            if not eval_env.assign_task_to_robot(action, task):
+                break
+            eval_assignments += 1
+            assignments_this_step += 1
+            assigned_total += 1
+            if task.get_time_to_deadline(eval_env.current_time) < 0:
+                late_at_assignment += 1
 
         prev_completed = len(eval_env.completed_tasks)
         state, step_reward, done, _ = eval_env.step(dt=timesteps_per_decision)

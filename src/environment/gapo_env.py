@@ -102,8 +102,14 @@ class GAPOTaskAssignmentEnv:
         self._offline_robots: set = set()
         self._robots_routing_to_charge: set = set()
         self.battery_safety_margin = 1.5
+        self.battery_reserve = 0.20  # fixed floor on top of the trip-to-hub estimate
         self.battery_critical_threshold = 0.10
         self.battery_critical_task_penalty = 1.0
+        self.battery_rescue_penalty = 10.0  # charged to each task held by a robot that died flat
+        self.battery_rescue_delay_s = 900.0  # staff response time to carry a dead robot to a hub
+        self._rescue_due: dict[int, float] = {}  # robot_id -> sim time its manual rescue completes
+        self._pending_rescue_credits: dict[int, float] = {}  # task_id -> penalty, emitted next step
+        self.episode_rescues = 0
         self.emergency_tasks: list = []
 
         # ILC schedule-aware reward shaping; no-ops when school_schedule is absent.
@@ -169,6 +175,11 @@ class GAPOTaskAssignmentEnv:
 
         self.robots = []
         self.robot_simulators = []
+        self._offline_robots.clear()
+        self._robots_routing_to_charge.clear()
+        self._rescue_due.clear()
+        self._pending_rescue_credits.clear()
+        self.episode_rescues = 0
         self.robot_reset_times = [self.current_time] * self.num_robots
         for i in range(self.num_robots):
             self.telemetry_noise_manager.reset_robot(i, current_time=self.current_time)
@@ -273,6 +284,12 @@ class GAPOTaskAssignmentEnv:
         completed_tasks = self._check_task_completions()
 
         reward = self._compute_timestep_reward(completed_tasks)
+        # Rescue penalties ride the completion-credit channel so training closes the causal assignment slots.
+        credits = self._last_per_task_credits
+        for task_id, penalty in self._pending_rescue_credits.items():
+            credits[task_id] = credits.get(task_id, 0.0) + penalty
+            reward += penalty
+        self._pending_rescue_credits.clear()
         self.cumulative_reward += reward
 
         self._update_edge_congestion()
@@ -304,6 +321,7 @@ class GAPOTaskAssignmentEnv:
             "episode_break_stockouts": self.episode_break_stockouts,
             "completed_task_legs": completed_tasks,
             "emergency_tasks": len(self.emergency_tasks),
+            "episode_rescues": self.episode_rescues,
             "offline_robots": list(self._offline_robots),
             "robots_charging": [
                 rid
@@ -524,6 +542,10 @@ class GAPOTaskAssignmentEnv:
 
     def _update_robot_positions(self, dt: float):
         """Move robots along their planned paths and apply telemetry noise each step."""
+        for robot_id, due in list(self._rescue_due.items()):
+            if self.current_time >= due:
+                self._complete_rescue(robot_id)
+
         for robot, simulator in zip(self.robots, self.robot_simulators):
             if simulator is None:
                 raise RuntimeError("This operation requires a simulated robot")
@@ -556,6 +578,13 @@ class GAPOTaskAssignmentEnv:
             if noisy_telemetry is not None:
                 robot.update_telemetry(noisy_telemetry)
 
+            if robot_id in self._offline_robots:
+                continue
+            at_hub = robot.current_node_index in self._get_hub_node_indices()
+            if simulator.battery_level <= 0.0 and not simulator.is_charging and not at_hub:
+                self._strand_robot(robot_id)
+                continue
+
             # Idle time accumulates here; a fleet event fires once it crosses the 10s threshold.
             _velocity_threshold = 0.05
             if simulator.velocity_ms < _velocity_threshold:
@@ -586,11 +615,12 @@ class GAPOTaskAssignmentEnv:
 
             self._interrupt_mid_task_for_charging(simulator.robot_id, robot, simulator)
 
-            # If robot is idle but has queued tasks, plan the next valid task
+            # If robot is idle but has queued tasks, plan the next valid task (not mid charge trip: arrival must start charging)
             if (
                 not simulator.path_queue
                 and simulator.current_target_node is None
                 and robot.current_task is not None
+                and robot.robot_id not in self._robots_routing_to_charge
             ):
                 _max_demotes = len(robot.task_queue)
                 _demotes = 0
@@ -629,6 +659,19 @@ class GAPOTaskAssignmentEnv:
                         hub_node=hub_idx,
                     )
                 self._send_robot_to_charge(robot_id)
+
+            # Charge trip stalled (path lost or overwritten): dock if already at a hub, else re-send.
+            elif (
+                robot_id in self._robots_routing_to_charge
+                and not simulator.is_charging
+                and not simulator.path_queue
+                and simulator.current_target_node is None
+                and simulator.battery_level < 0.99
+            ):
+                if at_hub:
+                    simulator.active_task_id = -1
+                else:
+                    self._send_robot_to_charge(robot_id)
 
     def _check_task_completions(self) -> List[Task]:
         """Check if any robots have arrived at their task's target node with no path remaining."""
@@ -709,7 +752,7 @@ class GAPOTaskAssignmentEnv:
                     if completed_task.leg_type == "dropoff":
                         self.completed_tasks.append(completed_task)
 
-                if robot.current_task:
+                if robot.current_task and robot.robot_id not in self._robots_routing_to_charge:
                     _max_demotes = len(robot.task_queue)
                     _demotes = 0
                     while (
@@ -728,18 +771,11 @@ class GAPOTaskAssignmentEnv:
 
             # Handle charging completion — runs BEFORE arrival so arrival cannot
             # restart charging on the same step that charging finishes.
-            # Requires the robot to be at a hub/storage node so this never fires
-            # while the robot is still en route (active_task_id==-1 but not yet
-            # at hub) or at a non-hub destination.
+            # A full battery alone ends the charge trip, wherever the robot is, so the flag can't outlive it.
             robot_id = robot.robot_id
-            _at_hub = robot.current_node_index is not None and self._active_graph.nodes[
-                robot.current_node_index
-            ].node_type in ("hub", "storage")
             if (
                 simulator.is_charging is False
                 and robot_id in self._robots_routing_to_charge
-                and simulator.active_task_id == -1
-                and _at_hub
                 and simulator.battery_level >= 0.99
             ):
                 if self.fleet_event_logger:
@@ -1373,7 +1409,9 @@ class GAPOTaskAssignmentEnv:
         from .graph_helpers import estimate_travel_distance
 
         min_dist = min(estimate_travel_distance(robot, h, self.graph_state) for h in hub_indices)
-        battery_needed = min_dist * simulator.battery_drain_rate * self.battery_safety_margin
+        battery_needed = (
+            self.battery_reserve + min_dist * simulator.battery_drain_rate * self.battery_safety_margin
+        )
         return simulator.battery_level <= battery_needed
 
     def _interrupt_mid_task_for_charging(self, robot_id: int, robot, simulator) -> bool:
@@ -1429,21 +1467,13 @@ class GAPOTaskAssignmentEnv:
         return min(hub_indices, key=lambda h: estimate_travel_distance(robot, h, self.graph_state))
 
     def _send_robot_to_charge(self, robot_id: int):
-        robot = self.robots[robot_id]
         simulator = self._require_simulator(robot_id)
         hub_idx = self._nearest_hub_index(robot_id)
 
-        start_node = robot.current_node_index
-        if start_node is None:
-            if robot.telemetry is None:
-                raise RuntimeError("Robot telemetry is required to plan a path")
-            current_floor = self._active_graph.nodes[simulator.current_node_index].floor
-            start_node = self._find_nearest_node(
-                robot.telemetry.x, robot.telemetry.y, floor=current_floor
-            )
-
+        # Plan from the simulator's own node: set_path starts the first edge there, so a snapped
+        # nearest node that isn't adjacent to it would be rejected and wipe the charge path.
         path, _ = dijkstra_shortest_path(
-            start_node,
+            simulator.current_node_index,
             hub_idx,
             self.graph_state,
             len(self._active_graph.nodes),
@@ -1462,17 +1492,25 @@ class GAPOTaskAssignmentEnv:
 
         in_transit_parents = set(robot.picked_up_task_ids)
 
+        # One entry per parent: the dropoff leg carries the full from->to route, the pickup leg doesn't.
+        parents: dict[int, Task] = {}
+        for task in robot.task_queue + robot.overflow_queue:
+            if task.task_id not in parents or task.leg_type == "dropoff":
+                parents[task.task_id] = task
+
         requeued_ids = []
         emergency_ids = []
-        for task in robot.task_queue:
-            parent_id = task.task_id
+        for parent_id, task in parents.items():
+            task.leg_type = "full"
+            task.is_assigned = False
+            task.assigned_robot_id = None
             if parent_id in in_transit_parents:
                 task.task_type = "emergency_manual"
                 self.emergency_tasks.append(task)
-                emergency_ids.append(task.task_id)
+                emergency_ids.append(parent_id)
             else:
                 self.pending_tasks.insert(0, task)
-                requeued_ids.append(task.task_id)
+                requeued_ids.append(parent_id)
 
         if self.fleet_event_logger:
             self.fleet_event_logger.log_robot_offline(
@@ -1504,3 +1542,27 @@ class GAPOTaskAssignmentEnv:
 
     def bring_robot_online(self, robot_id: int):
         self._offline_robots.discard(robot_id)
+
+    def _strand_robot(self, robot_id: int):
+        """Battery hit zero away from a hub: take the robot offline, penalise the work it held, and schedule a manual rescue."""
+        robot = self.robots[robot_id]
+        for task in robot.task_queue + robot.overflow_queue:
+            self._pending_rescue_credits[task.task_id] = -self.battery_rescue_penalty
+        self.mark_robot_offline(robot_id)
+        self._rescue_due[robot_id] = self.current_time + self.battery_rescue_delay_s
+        self.episode_rescues += 1
+
+    def _complete_rescue(self, robot_id: int):
+        """Staff carry the dead robot to the nearest hub and dock it; it rejoins the fleet while charging."""
+        simulator = self._require_simulator(robot_id)
+        hub_idx = self._nearest_hub_index(robot_id)
+        hub = self._active_graph.nodes[hub_idx]
+        simulator.current_node_index = hub_idx
+        simulator.current_edge_index = None
+        simulator.edge_progress = 0.0
+        simulator.x, simulator.y = hub.x, hub.y
+        simulator.set_path([hub_idx], task_id=-1, num_items=0)
+        simulator.start_charging()
+        self._robots_routing_to_charge.add(robot_id)
+        self.bring_robot_online(robot_id)
+        del self._rescue_due[robot_id]

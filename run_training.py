@@ -378,10 +378,10 @@ def main():
             step_memory_indices = []  # Track memory indices for this step's assignments
             while len(env.pending_tasks) > 0 and assignments_this_step < max_assignments_per_step:
                 task = env.pending_tasks[0]
-
-                robot_mask = np.ones(env.num_robots, dtype=bool)
-
-                mem_idx_before = len(memory.actions)
+                robot_mask = env.get_robot_availability_mask(task)
+                if not robot_mask.any():
+                    # No robot can take work this step — leave the task pending rather than force an assignment.
+                    break
 
                 heuristic_action = select_nearest_robot(
                     task, env.robots, env.graph_state, robot_mask
@@ -389,6 +389,7 @@ def main():
                 _used_heuristic = False
                 robot_logits = None
                 action_entropy = None
+                # Action isn't written to the rollout buffer until the env accepts the assignment.
                 try:
                     if iteration <= warmup_iters and np.random.random() < warmup_mix:
                         action = heuristic_action
@@ -396,19 +397,15 @@ def main():
                         state_tensor = ppo._state_dict_to_tensor(state_dict)
                         mask_tensor = torch.tensor(robot_mask, dtype=torch.bool).to(ppo.device)
                         with torch.no_grad():
-                            logprob, _, _, _, _, _ = ppo.policy_old.evaluate_actions(
+                            logprob_t, _, _, _, _, _ = ppo.policy_old.evaluate_actions(
                                 [state_tensor],
                                 torch.tensor([action], dtype=torch.long).to(ppo.device),
                                 [mask_tensor],
                             )
-                        memory.state_dicts.append(state_dict)
-                        memory.actions.append(action)
-                        memory.logprobs.append(logprob.item())
-                        memory.robot_masks.append(robot_mask)
-                        ppo.policy.record_action(action)
+                        logprob = logprob_t.item()
                     else:
-                        action, robot_logits, action_entropy = ppo.select_action(
-                            state_dict, memory, robot_mask
+                        action, logprob, robot_logits, action_entropy = ppo.select_action_no_store(
+                            state_dict, robot_mask
                         )
                 except Exception as e:
                     logger.error(
@@ -420,39 +417,19 @@ def main():
                     )
                     raise
 
+                if not env.assign_task_to_robot(action, task):
+                    # Robot rejected the assignment; nothing was written to memory, so just stop for this step.
+                    break
+
+                # Assignment accepted — only now commit the experience to the buffer.
+                mem_idx_before = len(memory.actions)
+                memory.state_dicts.append(state_dict)
+                memory.actions.append(action)
+                memory.logprobs.append(logprob)
+                memory.robot_masks.append(robot_mask)
+                ppo.policy.record_action(action)
+
                 task.source = "heuristic" if _used_heuristic else "policy"
-
-                assigned_legs = env.assign_task_to_robot(action, task)
-                if not assigned_legs:
-                    # Policy's chosen robot was rejected (charging/offline) — try the heuristic fallback robot.
-                    other_available = [
-                        rid
-                        for rid in range(env.num_robots)
-                        if rid != action
-                        and rid not in env._offline_robots
-                        and not env._should_robot_charge(rid)
-                    ]
-                    fallback_assigned = False
-                    if other_available:
-                        fallback_action = select_nearest_robot(
-                            task, env.robots, env.graph_state, robot_mask
-                        )
-                        if fallback_action != action and not env._should_robot_charge(
-                            fallback_action
-                        ):
-                            fallback_legs = env.assign_task_to_robot(fallback_action, task)
-                            if fallback_legs:
-                                action = fallback_action
-                                assigned_legs = fallback_legs
-                                fallback_assigned = True
-
-                    if not fallback_assigned:
-                        # Roll back the memory entry already appended for this action; rewards/is_terminals aren't added yet.
-                        memory.actions.pop()
-                        memory.logprobs.pop()
-                        memory.state_dicts.pop()
-                        memory.robot_masks.pop()
-                        break
 
                 step_memory_indices.append(mem_idx_before)
 
