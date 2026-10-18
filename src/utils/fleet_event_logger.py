@@ -24,6 +24,7 @@ class FleetEventLogger:
         self.robot_offline_events = 0
         self.emergency_tasks = 0
         self.requeued_tasks = 0
+        self.charge_stalls = 0
 
     def log_charge_interrupt(
         self,
@@ -58,6 +59,21 @@ class FleetEventLogger:
         self.logger.info(
             f"CHARGE_DISPATCH_IDLE robot={robot_id} sim_time={sim_time:.1f}s "
             f"battery={battery_level:.3f} current_node={current_node} hub_node={hub_node}"
+        )
+
+    def log_charge_stalled(
+        self,
+        robot_id: int,
+        sim_time: float,
+        battery_level: float,
+        current_node: Optional[int],
+        at_hub: bool,
+    ):
+        """Robot was routing to charge but had lost its path; recovering by docking or re-sending."""
+        self.charge_stalls += 1
+        self.logger.info(
+            f"CHARGE_STALLED robot={robot_id} sim_time={sim_time:.1f}s "
+            f"battery={battery_level:.3f} current_node={current_node} at_hub={at_hub}"
         )
 
     def log_charge_start(
@@ -133,5 +149,6 @@ class FleetEventLogger:
             f"idle_dispatches={self.charge_dispatches_idle} "
             f"offline_events={self.robot_offline_events} "
             f"emergency_tasks={self.emergency_tasks} "
-            f"requeued_tasks={self.requeued_tasks}"
+            f"requeued_tasks={self.requeued_tasks} "
+            f"charge_stalls={self.charge_stalls}"
         )

@@ -346,12 +346,16 @@ class GAPOTaskAssignmentEnvReal(GAPOTaskAssignmentEnv):
         from .graph_helpers import estimate_travel_distance
 
         min_dist = min(estimate_travel_distance(robot, h, self.graph_state) for h in hub_indices)
-        battery_needed = min_dist * self._real_battery_drain_rate * self.battery_safety_margin
+        battery_needed = (
+            self.battery_reserve
+            + min_dist * self._real_battery_drain_rate * self.battery_safety_margin
+        )
         return robot.battery_level <= battery_needed
 
     def _send_robot_to_charge(self, robot_id: int):
         robot = self.robots[robot_id]
         hub_idx = self._nearest_hub_index(robot_id)
+        self._release_unstarted_tasks(robot)
 
         start_node = robot.current_node_index
         if start_node is None:

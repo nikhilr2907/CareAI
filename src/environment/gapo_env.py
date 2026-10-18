@@ -108,7 +108,8 @@ class GAPOTaskAssignmentEnv:
         self.battery_rescue_penalty = 10.0  # charged to each task held by a robot that died flat
         self.battery_rescue_delay_s = 900.0  # staff response time to carry a dead robot to a hub
         self._rescue_due: dict[int, float] = {}  # robot_id -> sim time its manual rescue completes
-        self._pending_rescue_credits: dict[int, float] = {}  # task_id -> penalty, emitted next step
+        self._pending_task_credits: dict[int, float] = {}  # task_id -> credit, emitted this step
+        self._released_task_ids: list[int] = []  # tasks handed back to pending this step
         self.episode_rescues = 0
         self.emergency_tasks: list = []
 
@@ -178,7 +179,8 @@ class GAPOTaskAssignmentEnv:
         self._offline_robots.clear()
         self._robots_routing_to_charge.clear()
         self._rescue_due.clear()
-        self._pending_rescue_credits.clear()
+        self._pending_task_credits.clear()
+        self._released_task_ids = []
         self.episode_rescues = 0
         self.robot_reset_times = [self.current_time] * self.num_robots
         for i in range(self.num_robots):
@@ -254,6 +256,7 @@ class GAPOTaskAssignmentEnv:
     def step(self, dt: float | None = None):
         if dt is None:
             dt = self.timestep_seconds
+        self._released_task_ids = []
 
         time_delta_hours = dt / 3600.0
         self._active_graph.current_time = self.current_time
@@ -284,12 +287,12 @@ class GAPOTaskAssignmentEnv:
         completed_tasks = self._check_task_completions()
 
         reward = self._compute_timestep_reward(completed_tasks)
-        # Rescue penalties ride the completion-credit channel so training closes the causal assignment slots.
+        # Rescue penalties and release closures ride the completion-credit channel so training closes the causal assignment slots.
         credits = self._last_per_task_credits
-        for task_id, penalty in self._pending_rescue_credits.items():
+        for task_id, penalty in self._pending_task_credits.items():
             credits[task_id] = credits.get(task_id, 0.0) + penalty
             reward += penalty
-        self._pending_rescue_credits.clear()
+        self._pending_task_credits.clear()
         self.cumulative_reward += reward
 
         self._update_edge_congestion()
@@ -322,6 +325,8 @@ class GAPOTaskAssignmentEnv:
             "completed_task_legs": completed_tasks,
             "emergency_tasks": len(self.emergency_tasks),
             "episode_rescues": self.episode_rescues,
+            # Credits for these close the old assignment only; the task was requeued, not delivered.
+            "released_task_ids": list(self._released_task_ids),
             "offline_robots": list(self._offline_robots),
             "robots_charging": [
                 rid
@@ -660,14 +665,24 @@ class GAPOTaskAssignmentEnv:
                     )
                 self._send_robot_to_charge(robot_id)
 
-            # Charge trip stalled (path lost or overwritten): dock if already at a hub, else re-send.
+            # Charge trip stalled (path lost, or charge marker overwritten at a hub): dock or re-send.
+            # A normal hub arrival keeps active_task_id == -1 and is docked by the arrival handler.
             elif (
                 robot_id in self._robots_routing_to_charge
                 and not simulator.is_charging
                 and not simulator.path_queue
                 and simulator.current_target_node is None
                 and simulator.battery_level < 0.99
+                and (not at_hub or simulator.active_task_id != -1)
             ):
+                if self.fleet_event_logger:
+                    self.fleet_event_logger.log_charge_stalled(
+                        robot_id=robot_id,
+                        sim_time=self.current_time,
+                        battery_level=simulator.battery_level,
+                        current_node=robot.current_node_index,
+                        at_hub=at_hub,
+                    )
                 if at_hub:
                     simulator.active_task_id = -1
                 else:
@@ -1469,18 +1484,24 @@ class GAPOTaskAssignmentEnv:
     def _send_robot_to_charge(self, robot_id: int):
         simulator = self._require_simulator(robot_id)
         hub_idx = self._nearest_hub_index(robot_id)
+        self._release_unstarted_tasks(self.robots[robot_id])
 
-        # Plan from the simulator's own node: set_path starts the first edge there, so a snapped
-        # nearest node that isn't adjacent to it would be rejected and wipe the charge path.
+        mid_edge = simulator.current_edge_index is not None and simulator.current_target_node is not None
+        # Mid-edge: finish the current edge and route on from the node ahead, rather than restarting it.
+        start_node = simulator.current_target_node if mid_edge else simulator.current_node_index
         path, _ = dijkstra_shortest_path(
-            simulator.current_node_index,
+            start_node,
             hub_idx,
             self.graph_state,
             len(self._active_graph.nodes),
             edge_cost_manager=self.edge_cost_manager,
             all_robots=self.robots,
         )
-        simulator.set_path(path, task_id=-1, num_items=0)
+        if mid_edge:
+            simulator.path_queue = path[1:]
+            simulator.active_task_id = -1
+        else:
+            simulator.set_path(path, task_id=-1, num_items=0)
         self._robots_routing_to_charge.add(robot_id)
 
     def mark_robot_offline(self, robot_id: int):
@@ -1490,27 +1511,15 @@ class GAPOTaskAssignmentEnv:
         robot = self.robots[robot_id]
         simulator = self.robot_simulators[robot_id]
 
-        in_transit_parents = set(robot.picked_up_task_ids)
-
-        # One entry per parent: the dropoff leg carries the full from->to route, the pickup leg doesn't.
-        parents: dict[int, Task] = {}
-        for task in robot.task_queue + robot.overflow_queue:
-            if task.task_id not in parents or task.leg_type == "dropoff":
-                parents[task.task_id] = task
-
-        requeued_ids = []
+        requeued_ids = self._release_unstarted_tasks(robot)
+        # Whatever is left has items on board, which go down with the robot.
         emergency_ids = []
-        for parent_id, task in parents.items():
-            task.leg_type = "full"
-            task.is_assigned = False
-            task.assigned_robot_id = None
-            if parent_id in in_transit_parents:
-                task.task_type = "emergency_manual"
-                self.emergency_tasks.append(task)
-                emergency_ids.append(parent_id)
-            else:
-                self.pending_tasks.insert(0, task)
-                requeued_ids.append(parent_id)
+        for task in robot.task_queue + robot.overflow_queue:
+            if task.task_id in emergency_ids:
+                continue
+            task.task_type = "emergency_manual"
+            self.emergency_tasks.append(task)
+            emergency_ids.append(task.task_id)
 
         if self.fleet_event_logger:
             self.fleet_event_logger.log_robot_offline(
@@ -1543,11 +1552,39 @@ class GAPOTaskAssignmentEnv:
     def bring_robot_online(self, robot_id: int):
         self._offline_robots.discard(robot_id)
 
+    def _release_unstarted_tasks(self, robot: RobotState) -> List[int]:
+        """Return tasks the robot hasn't picked up to pending (one entry per parent); items already on board stay with it."""
+        in_transit = robot.picked_up_task_ids
+        # One entry per parent: the dropoff leg carries the full from->to route, the pickup leg doesn't.
+        parents: dict[int, Task] = {}
+        for task in robot.task_queue + robot.overflow_queue:
+            if task.task_id in in_transit:
+                continue
+            if task.task_id not in parents or task.leg_type == "dropoff":
+                parents[task.task_id] = task
+
+        if not parents:
+            return []
+        robot.task_queue[:] = [t for t in robot.task_queue if t.task_id in in_transit]
+        robot.overflow_queue[:] = [t for t in robot.overflow_queue if t.task_id in in_transit]
+        # The old target may belong to a released task; leaving it would let completion fire on the wrong leg.
+        robot.target_node_index = None
+        robot.planned_path = []
+        for parent_id, task in parents.items():
+            task.leg_type = "full"
+            task.is_assigned = False
+            task.assigned_robot_id = None
+            self.pending_tasks.insert(0, task)
+            # Closes the original assignment's training slot; setdefault keeps any rescue penalty already set.
+            self._pending_task_credits.setdefault(parent_id, 0.0)
+        self._released_task_ids.extend(parents)
+        return list(parents)
+
     def _strand_robot(self, robot_id: int):
         """Battery hit zero away from a hub: take the robot offline, penalise the work it held, and schedule a manual rescue."""
         robot = self.robots[robot_id]
         for task in robot.task_queue + robot.overflow_queue:
-            self._pending_rescue_credits[task.task_id] = -self.battery_rescue_penalty
+            self._pending_task_credits[task.task_id] = -self.battery_rescue_penalty
         self.mark_robot_offline(robot_id)
         self._rescue_due[robot_id] = self.current_time + self.battery_rescue_delay_s
         self.episode_rescues += 1

@@ -533,19 +533,21 @@ def main():
                     )
 
             # Route each completion bonus to the causal memory slot; cross-rollout completions go via closed_buffer.
+            released_ids = set(info.get("released_task_ids", []))
             for parent_id, bonus in task_completion_credits.items():
                 scaled_bonus = bonus * reward_scale
                 if reward_clip is not None and reward_clip > 0:
                     scaled_bonus = float(np.clip(scaled_bonus, -reward_clip, reward_clip))
 
-                # Route completion signal to task creation actor buffer (#7/#8 training)
-                if env.task_creation_actor is not None:
-                    env.task_creation_actor.record_completion(parent_id, scaled_bonus)
-                decision_logger.queue_outcome(
-                    parent_id,
-                    scaled_bonus,
-                    deadline_met=deadline_met_by_task.get(parent_id),
-                )
+                # Released tasks were requeued, not delivered: only their assignment slot is closed here.
+                if parent_id not in released_ids:
+                    if env.task_creation_actor is not None:
+                        env.task_creation_actor.record_completion(parent_id, scaled_bonus)
+                    decision_logger.queue_outcome(
+                        parent_id,
+                        scaled_bonus,
+                        deadline_met=deadline_met_by_task.get(parent_id),
+                    )
                 iteration_reward += scaled_bonus
                 orig_idx = task_to_memory_idx.get(parent_id)
                 if orig_idx is not None:

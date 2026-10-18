@@ -148,7 +148,8 @@ class RobotSimulator:
 
     def set_path(self, path: List[int], task_id: int, num_items: int):
         if len(path) > 1:
-            self.path_queue = path[1:]  # Exclude current node
+            # Queue holds the nodes after the current target; _arrive_at_node pops the next one on arrival.
+            self.path_queue = path[2:]
             self.current_target_node = path[1]
             self.active_task_id = task_id
 
@@ -243,7 +244,8 @@ class RobotSimulator:
                 self.stop_charging()
             return self.get_telemetry()
 
-        if not self.path_queue and not self.current_target_node:
+        # Node 0 is a valid target, so compare to None rather than relying on truthiness.
+        if not self.path_queue and self.current_target_node is None:
             # Robot is idle
             self.velocity_ms = 0.0
             return self.get_telemetry()
@@ -405,7 +407,7 @@ class RobotSimulator:
         # Determine availability
         is_available = (
             not self.path_queue
-            and not self.current_target_node
+            and self.current_target_node is None
             and self.current_capacity == 0
             and not self.is_charging
         )
